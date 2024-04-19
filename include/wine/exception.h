@@ -25,6 +25,8 @@
 #ifndef __WINE_WINE_EXCEPTION_H
 #define __WINE_WINE_EXCEPTION_H
 
+#include "wine/winheader_enter.h"
+
 #include <windef.h>
 #include <winternl.h>
 #include <rtlsupportapi.h>
@@ -295,5 +297,7 @@ static inline EXCEPTION_REGISTRATION_RECORD *__wine_get_frame(void)
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif  /* __WINE_WINE_EXCEPTION_H */

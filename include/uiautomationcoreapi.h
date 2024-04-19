@@ -19,6 +19,8 @@
 #ifndef _INC_UIAUTOMATIONCOREAPI
 #define _INC_UIAUTOMATIONCOREAPI
 
+#include "wine/winheader_enter.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -564,5 +566,7 @@ BOOL WINAPI UiaClientsAreListening(void);
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif /* _INC_UIAUTOMATIONCOREAPI */

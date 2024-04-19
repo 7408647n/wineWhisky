@@ -21,6 +21,8 @@
 #ifndef __WINE_HTTP_H
 #define __WINE_HTTP_H
 
+#include "wine/winheader_enter.h"
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -492,5 +494,7 @@ HTTPAPI_LINKAGE ULONG WINAPI HttpSetUrlGroupProperty(HTTP_URL_GROUP_ID id, HTTP_
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif  /* __WINE_HTTP_H */

@@ -19,6 +19,8 @@
 #ifndef _EVNTRACE_
 #define _EVNTRACE_
 
+#include "wine/winheader_enter.h"
+
 #include <guiddef.h>
 
 #ifdef __cplusplus
@@ -325,5 +327,7 @@ ULONG WMIAPI UnregisterTraceGuids(TRACEHANDLE);
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif /* _EVNTRACE_ */

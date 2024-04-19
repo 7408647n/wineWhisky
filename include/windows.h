@@ -31,6 +31,8 @@
 #include <winresrc.h>
 #else /* RC_INVOKED && !NOWINRES */
 
+#include "wine/winheader_enter.h"
+
 /* All the basic includes */
 #include <excpt.h>
 #include <sdkddkver.h>
@@ -99,6 +101,8 @@
 #endif /* !NOIMM */
 
 #endif  /* __WINESRC__ */
+
+#include "wine/winheader_exit.h"
 
 #endif  /* RC_INVOKED && !NOWINRES */
 #endif /* _INC_WINDOWS */

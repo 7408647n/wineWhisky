@@ -2,10 +2,6 @@
 /* generated from https://www.unicode.org/Public/15.1.0/ucd/UCD.zip:VerticalOrientation.txt */
 /* DO NOT EDIT!! */
 
-#if 0
-#pragma makedep unix
-#endif
-
 #include "windef.h"
 
 const unsigned short vertical_orientation_table[1248] =

@@ -19,6 +19,8 @@
 #ifndef _PERFLIB_H_
 #define _PERFLIB_H_
 
+#include "wine/winheader_enter.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -119,5 +121,7 @@ ULONG WINAPI PerfQueryCounterData(HANDLE, PERF_DATA_HEADER *, DWORD, DWORD *);
 #ifdef __cplusplus
 }       /* extern "C" */
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif /* _PERFLIB_H_ */

@@ -21,6 +21,8 @@
 #ifndef __WINE_UXTHEME_H
 #define __WINE_UXTHEME_H
 
+#include "wine/winheader_enter.h"
+
 #include <commctrl.h>
 
 #ifndef THEMEAPI
@@ -282,5 +284,7 @@ THEMEAPI_(HANIMATIONBUFFER) BeginBufferedAnimation(HWND, HDC, const RECT *,
 THEMEAPI_(BOOL) BufferedPaintRenderAnimation(HWND, HDC);
 THEMEAPI BufferedPaintStopAllAnimations(HWND);
 THEMEAPI EndBufferedAnimation(HANIMATIONBUFFER, BOOL);
+
+#include "wine/winheader_exit.h"
 
 #endif

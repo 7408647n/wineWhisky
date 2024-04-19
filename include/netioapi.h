@@ -19,6 +19,8 @@
 #ifndef __WINE_NETIOAPI_H
 #define __WINE_NETIOAPI_H
 
+#include "wine/winheader_enter.h"
+
 #include <ntddndis.h>
 
 #ifndef IPHLPAPI_DLL_LINKAGE
@@ -283,5 +285,7 @@ IPHLPAPI_DLL_LINKAGE DWORD WINAPI GetUnicastIpAddressEntry(MIB_UNICASTIPADDRESS_
 IPHLPAPI_DLL_LINKAGE DWORD WINAPI GetUnicastIpAddressTable(ADDRESS_FAMILY,MIB_UNICASTIPADDRESS_TABLE**);
 IPHLPAPI_DLL_LINKAGE PCHAR WINAPI if_indextoname(NET_IFINDEX,PCHAR);
 IPHLPAPI_DLL_LINKAGE NET_IFINDEX WINAPI if_nametoindex(PCSTR);
+
+#include "wine/winheader_exit.h"
 
 #endif /* __WINE_NETIOAPI_H */

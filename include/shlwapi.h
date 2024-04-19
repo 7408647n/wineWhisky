@@ -21,6 +21,8 @@
 #ifndef __WINE_SHLWAPI_H
 #define __WINE_SHLWAPI_H
 
+#include "wine/winheader_enter.h"
+
 /* FIXME: #include <specstrings.h> */
 #include <objbase.h>
 #include <shtypes.h>
@@ -1212,5 +1214,7 @@ WINSHLWAPI BOOL WINAPI SHUnlockShared(void *data);
 #ifdef __cplusplus
 } /* extern "C" */
 #endif /* defined(__cplusplus) */
+
+#include "wine/winheader_exit.h"
 
 #endif /* __WINE_SHLWAPI_H */

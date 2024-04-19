@@ -22,6 +22,8 @@
 #ifndef _COMPSTUI_
 #define _COMPSTUI_
 
+#include "wine/winheader_enter.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -474,5 +476,7 @@ BOOL      WINAPI SetPSTUIUserData(HWND, ULONG_PTR);
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif  /* _COMPSTUI_ */

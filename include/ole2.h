@@ -21,6 +21,8 @@
 #ifndef __WINE_OLE2_H
 #define __WINE_OLE2_H
 
+#include "wine/winheader_enter.h"
+
 #include <winerror.h>
 #include <objbase.h>
 #include <oleauto.h>
@@ -151,5 +153,7 @@ WINOLE32API HRESULT     WINAPI OleSetAutoConvert( REFCLSID clsidOld, REFCLSID cl
 #ifdef __cplusplus
 } /* extern "C" */
 #endif /* defined(__cplusplus) */
+
+#include "wine/winheader_exit.h"
 
 #endif  /* __WINE_OLE2_H */

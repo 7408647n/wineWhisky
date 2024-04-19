@@ -19,6 +19,8 @@
 #ifndef __WINE_WINSCARD_H
 #define __WINE_WINSCARD_H
 
+#include "wine/winheader_enter.h"
+
 #include <wtypes.h>
 #include <winioctl.h>
 #include <winsmcrd.h>
@@ -182,5 +184,7 @@ WINSCARDAPI LONG        WINAPI SCardTransmit(SCARDHANDLE,LPCSCARD_IO_REQUEST,LPC
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif  /* __WINE_WINSCARD_H */

@@ -37,4 +37,5 @@ import "windows.devices.power.idl";
 #define DO_NO_IMPORTS
 #include "windows.gaming.input.forcefeedback.idl"
 #include "windows.gaming.input.idl"
+#include "windows.gaming.ui.idl"
 #include "windows.gaming.input.custom.idl"

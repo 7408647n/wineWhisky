@@ -110,6 +110,8 @@
 #ifndef _WINSOCKAPI_
 #define _WINSOCKAPI_
 
+#include "wine/winheader_enter.h"
+
 #include <inaddr.h>
 
 #ifndef WINSOCK_API_LINKAGE
@@ -950,5 +952,7 @@ WINSOCK_API_LINKAGE int WINAPI WS(gethostname)(char*,int);
 #endif
 
 #undef WS
+
+#include "wine/winheader_exit.h"
 
 #endif  /* _WINSOCKAPI_ */

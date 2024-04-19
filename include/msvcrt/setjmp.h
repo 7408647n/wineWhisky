@@ -20,6 +20,8 @@
 #ifndef __WINE_SETJMP_H
 #define __WINE_SETJMP_H
 
+#include "wine/winheader_enter.h"
+
 #include <corecrt.h>
 
 #include <pshpack8.h>
@@ -183,5 +185,7 @@ _ACRTIMP int __cdecl __attribute__((__nothrow__,__returns_twice__)) _setjmpex(jm
 #endif
 
 #include <poppack.h>
+
+#include "wine/winheader_exit.h"
 
 #endif /* __WINE_SETJMP_H */

@@ -20,6 +20,8 @@
 #ifndef __WINE_MALLOC_H
 #define __WINE_MALLOC_H
 
+#include "wine/winheader_enter.h"
+
 #include <corecrt.h>
 #include <corecrt_malloc.h>
 
@@ -79,5 +81,7 @@ void *_alloca(size_t size);
 # elif defined(_MSC_VER)
 # define alloca(x) _alloca((x))
 # endif
+
+#include "wine/winheader_exit.h"
 
 #endif /* __WINE_MALLOC_H */

@@ -18,6 +18,8 @@
 #ifndef __CRYPTDLG_H__
 #define __CRYPTDLG_H__
 
+#include "wine/winheader_enter.h"
+
 #include <prsht.h>
 
 #ifndef CRYPTDLGAPI
@@ -315,5 +317,7 @@ CRYPTDLGAPI HRESULT WINAPI CertModifyCertificatesToTrust(int cCertStore,
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif

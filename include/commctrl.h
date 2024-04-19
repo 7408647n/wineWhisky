@@ -21,6 +21,8 @@
 #ifndef __WINE_COMMCTRL_H
 #define __WINE_COMMCTRL_H
 
+#include "wine/winheader_enter.h"
+
 #include <prsht.h>
 #include <commctrl.rh>
 
@@ -5566,5 +5568,7 @@ WINCOMMCTRLAPI HRESULT WINAPI TaskDialogIndirect(const TASKDIALOGCONFIG *, int *
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif  /* __WINE_COMMCTRL_H */

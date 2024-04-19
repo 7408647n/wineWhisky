@@ -19,6 +19,8 @@
 #ifndef _NTDDK_
 #define _NTDDK_
 
+#include "wine/winheader_enter.h"
+
 /* Note: We will probably have to duplicate everything ultimately :-( */
 #include <ddk/wdm.h>
 
@@ -290,5 +292,7 @@ void      WINAPI RtlUpperString(STRING*,const STRING*);
 #ifndef _WIN64
 ULONGLONG WINAPI RtlLargeIntegerDivide(ULONGLONG,ULONGLONG,ULONGLONG*);
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif

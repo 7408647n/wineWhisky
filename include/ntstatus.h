@@ -21,6 +21,8 @@
 #ifndef __WINE_NTSTATUS_H
 #define __WINE_NTSTATUS_H
 
+#include "wine/winheader_enter.h"
+
 #ifndef WIN32_NO_STATUS
 
 /*
@@ -2917,5 +2919,7 @@
 #define STATUS_APPEXEC_CALLER_WAIT_TIMEOUT_RESOURCES                        ((NTSTATUS) 0xC0EC000C)
 
 #endif /* WIN32_NO_STATUS */
+
+#include "wine/winheader_exit.h"
 
 #endif /* __WINE_NTSTATUS_H */

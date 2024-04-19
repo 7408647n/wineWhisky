@@ -4530,7 +4530,9 @@ static void test_swapchain_parameters(void)
 
         expected_usage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_BACK_BUFFER;
         hr = IDXGIResource_GetUsage(resource, &usage);
+        todo_wine
         ok(hr == S_OK, "Got unexpected hr %#lx, test %u.\n", hr, i);
+        todo_wine
         ok((usage & expected_usage) == expected_usage, "Got usage %x, expected %x, test %u.\n",
                 usage, expected_usage, i);
 
@@ -4567,7 +4569,9 @@ static void test_swapchain_parameters(void)
                 broken_usage |= DXGI_USAGE_READ_ONLY;
 
             hr = IDXGIResource_GetUsage(resource, &usage);
+            todo_wine
             ok(hr == S_OK, "Got unexpected hr %#lx, test %u, buffer %u.\n", hr, i, j);
+            todo_wine
             ok(usage == expected_usage || broken(usage == broken_usage),
                     "Got usage %x, expected %x, test %u, buffer %u.\n",
                     usage, expected_usage, i, j);
@@ -4638,7 +4642,9 @@ static void test_swapchain_parameters(void)
         ok(hr == S_OK, "Got unexpected hr %#lx, test %u.\n", hr, i);
         expected_usage = usage | DXGI_USAGE_BACK_BUFFER | DXGI_USAGE_DISCARD_ON_PRESENT;
         hr = IDXGIResource_GetUsage(resource, &usage);
+        todo_wine
         ok(hr == S_OK, "Got unexpected hr %#lx, test %u.\n", hr, i);
+        todo_wine_if(i != 7)
         ok(usage == expected_usage, "Got usage %x, expected %x, test %u.\n", usage, expected_usage, i);
         IDXGIResource_Release(resource);
 

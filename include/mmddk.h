@@ -23,6 +23,8 @@
 #ifndef __MMDDK_H
 #define __MMDDK_H
 
+#include "wine/winheader_enter.h"
+
 #include <mmsystem.h>
 #include <winbase.h>
 
@@ -459,5 +461,7 @@ DWORD    WINAPI mmGetCurrentTask(VOID);
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif /* __MMDDK_H */

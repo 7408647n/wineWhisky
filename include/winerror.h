@@ -19,6 +19,8 @@
 #ifndef __WINE_WINERROR_H
 #define __WINE_WINERROR_H
 
+#include "wine/winheader_enter.h"
+
 #include <specstrings.h>
 
 #define FACILITY_NULL                         0
@@ -7383,5 +7385,7 @@ static inline HRESULT HRESULT_FROM_WIN32(unsigned int x)
 #define ERROR_IO_PREEMPTED                                 _HRESULT_TYPEDEF_(0x89010001)
 
 #define JSCRIPT_E_CANTEXECUTE                              _HRESULT_TYPEDEF_(0x89020001)
+
+#include "wine/winheader_exit.h"
 
 #endif  /* __WINE_WINERROR_H */

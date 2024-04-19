@@ -1,5 +1,6 @@
 EXTRADEFS = -D_USER32_
 MODULE    = user32.dll
+UNIXLIB   = user32.so
 IMPORTLIB = user32
 IMPORTS   = $(PNG_PE_LIBS) gdi32 sechost advapi32 kernelbase win32u
 EXTRAINCL = $(PNG_PE_CFLAGS)
@@ -11,6 +12,7 @@ SOURCES = \
 	clipboard.c \
 	combo.c \
 	cursoricon.c \
+	cxmenu.c \
 	dde_client.c \
 	dde_misc.c \
 	dde_server.c \

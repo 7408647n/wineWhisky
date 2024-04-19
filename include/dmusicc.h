@@ -20,6 +20,8 @@
 #ifndef __WINE_DMUSIC_CORE_H
 #define __WINE_DMUSIC_CORE_H
 
+#include "wine/winheader_enter.h"
+
 #include <windows.h>
 
 #define COM_NO_WINDOWS_H
@@ -724,5 +726,7 @@ DECLARE_INTERFACE_(IDirectMusicThru,IUnknown)
 #endif
 
 #include <poppack.h>
+
+#include "wine/winheader_exit.h"
 
 #endif /* __WINE_DMUSIC_CORE_H */

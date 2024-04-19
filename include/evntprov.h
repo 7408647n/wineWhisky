@@ -19,6 +19,8 @@
 #ifndef _EVNTPROV_H_
 #define _EVNTPROV_H_
 
+#include "wine/winheader_enter.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -83,5 +85,7 @@ ULONG EVNTAPI EventWriteTransfer(REGHANDLE,PCEVENT_DESCRIPTOR,LPCGUID,LPCGUID,UL
 #ifdef __cplusplus
 }
 #endif
+
+#include "wine/winheader_exit.h"
 
 #endif /* _EVNTPROV_H_ */

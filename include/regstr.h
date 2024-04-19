@@ -21,6 +21,8 @@
 #ifndef _INC_REGSTR
 #define _INC_REGSTR
 
+#include "wine/winheader_enter.h"
+
 
 #define REGSTR_PATH_UNINSTALL			TEXT("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall")
 #define REGSTR_VAL_MAX_HCID_LEN 1024
@@ -50,5 +52,7 @@
 #define CONFIGFLAG_FINISHINSTALL_ACTION 0x00020000
 #define CONFIGFLAG_BOOT_DEVICE          0x00040000
 #define CONFIGFLAG_NEEDS_CLASS_CONFIG   0x00080000
+
+#include "wine/winheader_exit.h"
 
 #endif  /* _INC_REGSTR_H */

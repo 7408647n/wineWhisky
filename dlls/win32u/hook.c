@@ -19,10 +19,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#if 0
-#pragma makedep unix
-#endif
-
 #include <assert.h>
 #include "win32u_private.h"
 #include "ntuser_private.h"
@@ -121,7 +117,7 @@ HHOOK WINAPI NtUserSetWindowsHookEx( HINSTANCE inst, UNICODE_STRING *module, DWO
         req->unicode   = !ansi;
         if (inst) /* make proc relative to the module base */
         {
-            req->proc = wine_server_client_ptr( (void *)((char *)proc - (char *)inst) );
+            req->proc = wine_server_client_ptr( TRUNCCAST(void *, (char *)proc - (char *)inst) );
             wine_server_add_data( req, module->Buffer, module->Length );
         }
         else req->proc = wine_server_client_ptr( proc );
@@ -204,6 +200,7 @@ static LRESULT call_hook( struct win_hook_params *info, const WCHAR *module, siz
                           size_t message_size, BOOL ansi )
 {
     DWORD_PTR ret = 0;
+    LRESULT lres = 0;
 
     if (info->tid)
     {
@@ -218,12 +215,12 @@ static LRESULT call_hook( struct win_hook_params *info, const WCHAR *module, siz
         switch(info->id)
         {
         case WH_KEYBOARD_LL:
-            send_internal_message_timeout( info->pid, info->tid, WM_WINE_KEYBOARD_LL_HOOK,
+            lres = send_internal_message_timeout( info->pid, info->tid, WM_WINE_KEYBOARD_LL_HOOK,
                                            info->wparam, (LPARAM)&h_extra, SMTO_ABORTIFHUNG,
                                            get_ll_hook_timeout(), &ret );
             break;
         case WH_MOUSE_LL:
-            send_internal_message_timeout( info->pid, info->tid, WM_WINE_MOUSE_LL_HOOK,
+            lres = send_internal_message_timeout( info->pid, info->tid, WM_WINE_MOUSE_LL_HOOK,
                                            info->wparam, (LPARAM)&h_extra, SMTO_ABORTIFHUNG,
                                            get_ll_hook_timeout(), &ret );
             break;
@@ -231,6 +228,13 @@ static LRESULT call_hook( struct win_hook_params *info, const WCHAR *module, siz
             ERR("Unknown hook id %d\n", info->id);
             assert(0);
             break;
+        }
+
+        /* CrossOver HACK 19354 */
+        if (!lres && GetLastError() == ERROR_TIMEOUT)
+        {
+            TRACE("Hook %p timed out; removing it.\n", info->handle);
+            NtUserUnhookWindowsHookEx( info->handle );
         }
     }
     else if (info->proc)
@@ -513,7 +517,7 @@ HWINEVENTHOOK WINAPI NtUserSetWinEventHook( DWORD event_min, DWORD event_max, HM
         req->unicode   = 1;
         if (inst) /* make proc relative to the module base */
         {
-            req->proc = wine_server_client_ptr( (void *)((char *)proc - (char *)inst) );
+            req->proc = wine_server_client_ptr( TRUNCCAST(void *, (char *)proc - (char *)inst) );
             wine_server_add_data( req, module->Buffer, module->Length );
         }
         else req->proc = wine_server_client_ptr( proc );

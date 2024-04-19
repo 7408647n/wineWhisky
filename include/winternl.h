@@ -21,6 +21,8 @@
 #ifndef __WINE_WINTERNL_H
 #define __WINE_WINTERNL_H
 
+#include "wine/winheader_enter.h"
+
 #include <ntdef.h>
 #include <windef.h>
 
@@ -5389,5 +5391,7 @@ typedef struct
 #ifdef __cplusplus
 } /* extern "C" */
 #endif /* defined(__cplusplus) */
+
+#include "wine/winheader_exit.h"
 
 #endif  /* __WINE_WINTERNL_H */
