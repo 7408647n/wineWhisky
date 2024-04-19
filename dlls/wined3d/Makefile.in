@@ -1,10 +1,9 @@
-EXTRADEFS = -DWINE_NO_LONG_TYPES
 MODULE    = wined3d.dll
 IMPORTLIB = wined3d
 IMPORTS   = $(VKD3D_PE_LIBS) dxguid opengl32 user32 gdi32 advapi32
 EXTRAINCL = $(VKD3D_PE_CFLAGS)
 
-C_SRCS = \
+SOURCES = \
 	adapter_gl.c \
 	adapter_vk.c \
 	arb_program_shader.c \
@@ -16,6 +15,7 @@ C_SRCS = \
 	cs.c \
 	device.c \
 	directx.c \
+	ffp_gl.c \
 	gl_compat.c \
 	glsl_shader.c \
 	nvidia_texture_shader.c \
@@ -27,14 +27,12 @@ C_SRCS = \
 	shader_sm1.c \
 	shader_sm4.c \
 	shader_spirv.c \
-	state.c \
 	stateblock.c \
 	surface.c \
 	swapchain.c \
 	texture.c \
 	utils.c \
+	version.rc \
 	vertexdeclaration.c \
 	view.c \
 	wined3d_main.c
-
-RC_SRCS = version.rc

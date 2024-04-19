@@ -81,10 +81,6 @@ typedef struct
     int pendingUpdown;
 } DATETIME_INFO, *LPDATETIME_INFO;
 
-/* in monthcal.c */
-extern int MONTHCAL_MonthLength(int month, int year);
-extern int MONTHCAL_CalculateDayOfWeek(SYSTEMTIME *date, BOOL inplace);
-
 /* this list of defines is closely related to `allowedformatchars' defined
  * in datetime.c; the high nibble indicates the `base type' of the format
  * specifier.
@@ -793,8 +789,6 @@ DATETIME_Refresh (DATETIME_INFO *infoPtr, HDC hdc)
         else
             state = ABS_DOWNNORMAL;
 
-        if (IsThemeBackgroundPartiallyTransparent(theme, SBP_ARROWBTN, state))
-            DrawThemeParentBackground(infoPtr->hwndSelf, hdc, &infoPtr->calbutton);
         DrawThemeBackground(theme, hdc, SBP_ARROWBTN, state, &infoPtr->calbutton, NULL);
     }
     else
@@ -1530,8 +1524,6 @@ DATETIME_StyleChanged(DATETIME_INFO *infoPtr, WPARAM wStyleType, const STYLESTRU
 	DestroyWindow(infoPtr->hUpdown);
 	infoPtr->hUpdown = 0;
     }
-
-    InvalidateRect(infoPtr->hwndSelf, NULL, TRUE);
     return 0;
 }
 

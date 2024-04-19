@@ -786,7 +786,7 @@ static void test_ax_win(void)
 
         /* test file:// scheme on non-existent file */
         ret = DeleteFileW(pathW);
-        ok(ret, "DeleteFile failed!\n");
+        ok(ret, "DeleteFile failed (gle=%lu)\n", GetLastError());
         hwnd = CreateWindowW(cls_names[i], file_uri1W, 0, 100, 100, 100, 100, NULL, NULL, NULL, NULL);
         ok(hwnd != NULL, "CreateWindow failed!\n");
         control = NULL;
@@ -1048,7 +1048,7 @@ static void test_AtlAxCreateControl(void)
 
     /* test file:// scheme on non-existent file. */
     ret = DeleteFileW(pathW);
-    ok(ret, "DeleteFile failed!\n");
+    ok(ret, "DeleteFile failed (gle=%lu)\n", GetLastError());
     container = NULL;
     control = NULL;
     hwnd = create_container_window();
@@ -1060,6 +1060,84 @@ static void test_AtlAxCreateControl(void)
     IUnknown_Release(container);
     IUnknown_Release(control);
     DestroyWindow(hwnd);
+}
+
+static void test_AtlComModuleGetClassObject(void)
+{
+    _ATL_OBJMAP_ENTRY *null_entry = NULL;
+    _ATL_COM_MODULE module;
+    HRESULT hr;
+    void *ret;
+
+    /* Test NULL module */
+    hr = AtlComModuleGetClassObject(NULL, &GUID_NULL, &IID_NULL, &ret);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    /* Test NULL m_ppAutoObjMapFirst and m_ppAutoObjMapLast */
+    module.cbSize = sizeof(module);
+    module.m_ppAutoObjMapFirst = NULL;
+    module.m_ppAutoObjMapLast = NULL;
+    hr = AtlComModuleGetClassObject(&module, &GUID_NULL, &IID_NULL, &ret);
+    ok(hr == CLASS_E_CLASSNOTAVAILABLE, "Unexpected hr %#lx.\n", hr);
+
+    /* Test m_ppAutoObjMapFirst and m_ppAutoObjMapLast both pointing to a NULL entry */
+    module.cbSize = sizeof(module);
+    module.m_ppAutoObjMapFirst = &null_entry;
+    module.m_ppAutoObjMapLast = &null_entry;
+    hr = AtlComModuleGetClassObject(&module, &GUID_NULL, &IID_NULL, &ret);
+    ok(hr == CLASS_E_CLASSNOTAVAILABLE, "Unexpected hr %#lx.\n", hr);
+}
+
+static void test_AtlComModuleRegisterClassObjects(void)
+{
+    _ATL_OBJMAP_ENTRY *null_entry = NULL;
+    _ATL_COM_MODULE module;
+    HRESULT hr;
+
+    /* Test NULL module */
+    hr = AtlComModuleRegisterClassObjects(NULL, CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    /* Test NULL m_ppAutoObjMapFirst and m_ppAutoObjMapLast */
+    module.cbSize = sizeof(module);
+    module.m_ppAutoObjMapFirst = NULL;
+    module.m_ppAutoObjMapLast = NULL;
+    hr = AtlComModuleRegisterClassObjects(&module, CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE);
+    todo_wine_if(hr == S_OK)
+    ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+
+    /* Test m_ppAutoObjMapFirst and m_ppAutoObjMapLast both pointing to a NULL entry */
+    module.cbSize = sizeof(module);
+    module.m_ppAutoObjMapFirst = &null_entry;
+    module.m_ppAutoObjMapLast = &null_entry;
+    hr = AtlComModuleRegisterClassObjects(&module, CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE);
+    todo_wine_if(hr == S_OK)
+    ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+}
+
+static void test_AtlComModuleRevokeClassObjects(void)
+{
+    _ATL_OBJMAP_ENTRY *null_entry = NULL;
+    _ATL_COM_MODULE module;
+    HRESULT hr;
+
+    /* Test NULL module */
+    hr = AtlComModuleRevokeClassObjects(NULL);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    /* Test NULL m_ppAutoObjMapFirst and m_ppAutoObjMapLast */
+    module.cbSize = sizeof(module);
+    module.m_ppAutoObjMapFirst = NULL;
+    module.m_ppAutoObjMapLast = NULL;
+    hr = AtlComModuleRevokeClassObjects(&module);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* Test m_ppAutoObjMapFirst and m_ppAutoObjMapLast both pointing to a NULL entry */
+    module.cbSize = sizeof(module);
+    module.m_ppAutoObjMapFirst = &null_entry;
+    module.m_ppAutoObjMapLast = &null_entry;
+    hr = AtlComModuleRevokeClassObjects(&module);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
 }
 
 START_TEST(atl)
@@ -1077,6 +1155,9 @@ START_TEST(atl)
     test_ax_win();
     test_AtlAxAttachControl();
     test_AtlAxCreateControl();
+    test_AtlComModuleGetClassObject();
+    test_AtlComModuleRegisterClassObjects();
+    test_AtlComModuleRevokeClassObjects();
 
     CoUninitialize();
 }

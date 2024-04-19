@@ -482,13 +482,31 @@ static void test__strnicmp(void)
 
     SET_EXPECT(invalid_parameter_handler);
     errno = 0xdeadbeef;
+    ret = _strnicmp(str1, NULL, 2);
+    CHECK_CALLED(invalid_parameter_handler);
+    ok(ret == _NLSCMPERROR, "got %d.\n", ret);
+    ok(errno == EINVAL, "Unexpected errno %d.\n", errno);
+
+    SET_EXPECT(invalid_parameter_handler);
+    errno = 0xdeadbeef;
     ret = _strnicmp(str1, str2, -1);
-    todo_wine CHECK_CALLED(invalid_parameter_handler);
-    todo_wine ok(ret == _NLSCMPERROR, "got %d.\n", ret);
-    todo_wine ok(errno == EINVAL, "Unexpected errno %d.\n", errno);
+    CHECK_CALLED(invalid_parameter_handler);
+    ok(ret == _NLSCMPERROR, "got %d.\n", ret);
+    ok(errno == EINVAL, "Unexpected errno %d.\n", errno);
+
+    ret = _strnicmp(str1, str2, 0);
+    ok(!ret, "got %d.\n", ret);
 
     ret = _strnicmp(str1, str2, 0x7fffffff);
     ok(!ret, "got %d.\n", ret);
+
+    /* If numbers of characters to compare is too big return error */
+    SET_EXPECT(invalid_parameter_handler);
+    errno = 0xdeadbeef;
+    ret = _strnicmp(str1, str2, 0x80000000);
+    CHECK_CALLED(invalid_parameter_handler);
+    ok(ret == _NLSCMPERROR, "got %d.\n", ret);
+    ok(errno == EINVAL, "Unexpected errno %d.\n", errno);
 }
 
 static void test_wcsnicmp(void)
@@ -602,6 +620,37 @@ static void test__mbbtype_l(void)
     }
 }
 
+static void test_strcmp(void)
+{
+    int ret = strcmp( "abc", "abcd" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = strcmp( "", "abc" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = strcmp( "abc", "ab\xa0" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = strcmp( "ab\xb0", "ab\xa0" );
+    ok( ret == 1, "wrong ret %d\n", ret );
+    ret = strcmp( "ab\xc2", "ab\xc2" );
+    ok( ret == 0, "wrong ret %d\n", ret );
+
+    ret = strncmp( "abc", "abcd", 3 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = strncmp( "", "abc", 3 );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = strncmp( "abc", "ab\xa0", 4 );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = strncmp( "ab\xb0", "ab\xa0", 3 );
+    ok( ret == 1, "wrong ret %d\n", ret );
+    ret = strncmp( "ab\xb0", "ab\xa0", 2 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = strncmp( "ab\xc2", "ab\xc2", 3 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = strncmp( "abc", "abd", 0 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = strncmp( "abc", "abc", 12 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+}
+
 START_TEST(string)
 {
     ok(_set_invalid_parameter_handler(test_invalid_parameter_handler) == NULL,
@@ -619,4 +668,5 @@ START_TEST(string)
     test_wcsnicmp();
     test_SpecialCasing();
     test__mbbtype_l();
+    test_strcmp();
 }

@@ -55,6 +55,7 @@ struct midi_dest
 {
     BOOL                bEnabled;
     MIDIOPENDESC        midiDesc;
+    BYTE                runningStatus;
     WORD                wFlags;
     MIDIOUTCAPSW        caps;
     snd_seq_t          *seq;
@@ -79,8 +80,8 @@ static pthread_mutex_t seq_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t in_buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static unsigned int num_dests, num_srcs;
-static struct midi_dest dests[MAX_MIDIOUTDRV];
-static struct midi_src srcs[MAX_MIDIINDRV];
+static struct midi_dest *dests;
+static struct midi_src *srcs;
 static snd_seq_t *midi_seq;
 static unsigned int seq_refs;
 static int port_in = -1;
@@ -297,12 +298,12 @@ static void port_add(snd_seq_client_info_t* cinfo, snd_seq_port_info_t* pinfo, u
               snd_seq_port_info_get_name(pinfo),
               type);
 
-        if (num_dests >= MAX_MIDIOUTDRV)
-            return;
         if (!type)
             return;
 
+        dests = realloc( dests, (num_dests + 1) * sizeof(*dests) );
         dest = dests + num_dests;
+        memset( dest, 0, sizeof(*dest) );
         dest->addr = *snd_seq_port_info_get_addr(pinfo);
 
         /* Manufac ID. We do not have access to this with soundcard.h
@@ -359,7 +360,7 @@ static void port_add(snd_seq_client_info_t* cinfo, snd_seq_port_info_t* pinfo, u
               num_dests, wine_dbgstr_w(dest->caps.szPname),
               dest->caps.wTechnology,
               dest->caps.wVoices, dest->caps.wNotes,
-              dest->caps.wChannelMask, dest->caps.dwSupport,
+              dest->caps.wChannelMask, (unsigned)dest->caps.dwSupport,
               type);
 
         num_dests++;
@@ -372,12 +373,12 @@ static void port_add(snd_seq_client_info_t* cinfo, snd_seq_port_info_t* pinfo, u
               snd_seq_port_info_get_name(pinfo),
               type);
 
-        if (num_srcs >= MAX_MIDIINDRV)
-            return;
         if (!type)
             return;
 
+        srcs = realloc( srcs, (num_srcs + 1) * sizeof(*srcs) );
         src = srcs + num_srcs;
+        memset( src, 0, sizeof(*src) );
         src->addr = *snd_seq_port_info_get_addr(pinfo);
 
         /* Manufac ID. We do not have access to this with soundcard.h
@@ -407,13 +408,13 @@ static void port_add(snd_seq_client_info_t* cinfo, snd_seq_port_info_t* pinfo, u
 
         TRACE("MidiIn [%d]\tname='%s' support=%d\n"
               "\tALSA info: midi dev-type=%x, capa=0\n",
-              num_srcs, wine_dbgstr_w(src->caps.szPname), src->caps.dwSupport, type);
+              num_srcs, wine_dbgstr_w(src->caps.szPname), (unsigned)src->caps.dwSupport, type);
 
         num_srcs++;
     }
 }
 
-static UINT midi_init(void)
+static UINT alsa_midi_init(void)
 {
     static BOOL init_done;
     snd_seq_client_info_t *cinfo;
@@ -467,7 +468,7 @@ static UINT midi_init(void)
     return NOERROR;
 }
 
-NTSTATUS midi_release(void *args)
+NTSTATUS alsa_midi_release(void *args)
 {
     /* stop the notify_wait thread */
     notify_post(NULL);
@@ -504,11 +505,7 @@ static UINT midi_out_open(WORD dev_id, MIDIOPENDESC *midi_desc, UINT flags, stru
         WARN("Invalid Parameter !\n");
         return MMSYSERR_INVALPARAM;
     }
-    if (dev_id >= num_dests)
-    {
-        TRACE("MAX_MIDIOUTDRV reached !\n");
-        return MMSYSERR_BADDEVICEID;
-    }
+    if (dev_id >= num_dests) return MMSYSERR_BADDEVICEID;
     dest = dests + dev_id;
     if (dest->midiDesc.hMidi != 0)
     {
@@ -539,6 +536,7 @@ static UINT midi_out_open(WORD dev_id, MIDIOPENDESC *midi_desc, UINT flags, stru
         return MMSYSERR_NOTENABLED;
     }
 
+    dest->runningStatus = 0;
     dest->wFlags = HIWORD(flags & CALLBACK_TYPEMASK);
     dest->midiDesc = *midi_desc;
     dest->seq = midi_seq;
@@ -639,9 +637,7 @@ static UINT midi_out_close(WORD dev_id, struct notify_context *notify)
 
 static UINT midi_out_data(WORD dev_id, UINT data)
 {
-    BYTE evt = LOBYTE(LOWORD(data));
-    BYTE d1  = HIBYTE(LOWORD(data));
-    BYTE d2  = LOBYTE(HIWORD(data));
+    BYTE evt = LOBYTE(LOWORD(data)), d1, d2;
     struct midi_dest *dest;
 
     TRACE("(%04X, %08X);\n", dev_id, data);
@@ -656,6 +652,28 @@ static UINT midi_out_data(WORD dev_id, UINT data)
         WARN("can't play !\n");
         return MIDIERR_NODEVICE;
     }
+
+    if (evt & 0x80)
+    {
+        d1 = HIBYTE(LOWORD(data));
+        d2 = LOBYTE(HIWORD(data));
+        if (evt < 0xF0)
+            dest->runningStatus = evt;
+        else if (evt <= 0xF7)
+            dest->runningStatus = 0;
+    }
+    else if (dest->runningStatus)
+    {
+        evt = dest->runningStatus;
+        d1 = LOBYTE(LOWORD(data));
+        d2 = HIBYTE(LOWORD(data));
+    }
+    else
+    {
+        FIXME("ooch %x\n", data);
+        return MMSYSERR_NOERROR;
+    }
+
     switch (dest->caps.wTechnology)
     {
     case MOD_SYNTH:
@@ -724,6 +742,7 @@ static UINT midi_out_data(WORD dev_id, UINT data)
             {
                 BYTE reset_sysex_seq[] = {MIDI_CMD_COMMON_SYSEX, 0x7e, 0x7f, 0x09, 0x01, 0xf7};
                 snd_seq_ev_set_sysex(&event, sizeof(reset_sysex_seq), reset_sysex_seq);
+                dest->runningStatus = 0;
                 break;
             }
             case 0x01:	/* MTC Quarter frame */
@@ -810,7 +829,7 @@ static UINT midi_out_long_data(WORD dev_id, MIDIHDR *hdr, UINT hdr_size, struct 
         new_data = malloc(hdr->dwBufferLength + 2);
     }
 
-    TRACE("dwBufferLength=%u !\n", hdr->dwBufferLength);
+    TRACE("dwBufferLength=%u !\n", (unsigned)hdr->dwBufferLength);
     TRACE("                 %02X %02X %02X ... %02X %02X %02X\n",
           data[0], data[1], data[2], data[hdr->dwBufferLength-3],
           data[hdr->dwBufferLength-2], data[hdr->dwBufferLength-1]);
@@ -855,6 +874,7 @@ static UINT midi_out_long_data(WORD dev_id, MIDIHDR *hdr, UINT hdr_size, struct 
         return MMSYSERR_NOTENABLED;
     }
 
+    dest->runningStatus = 0;
     hdr->dwFlags &= ~MHDR_INQUEUE;
     hdr->dwFlags |= MHDR_DONE;
     set_out_notify(notify, dest, dev_id, MOM_DONE, (DWORD_PTR)hdr, 0);
@@ -922,16 +942,14 @@ static UINT midi_out_reset(WORD dev_id)
     if (!dests[dev_id].bEnabled) return MIDIERR_NODEVICE;
 
     /* stop all notes */
-    /* FIXME: check if 0x78B0 is channel dependent or not. I coded it so that
-     * it's channel dependent...
-     */
     for (chn = 0; chn < 16; chn++)
     {
         /* turn off every note */
-        midi_out_data(dev_id, 0x7800 | MIDI_CMD_CONTROL | chn);
+        midi_out_data(dev_id, (MIDI_CTL_ALL_SOUNDS_OFF << 8) | MIDI_CMD_CONTROL | chn);
         /* remove sustain on all channels */
         midi_out_data(dev_id, (MIDI_CTL_SUSTAIN << 8) | MIDI_CMD_CONTROL | chn);
     }
+    dests[dev_id].runningStatus = 0;
     /* FIXME: the LongData buffers must also be returned to the app */
     return MMSYSERR_NOERROR;
 }
@@ -1367,7 +1385,7 @@ static DWORD midi_in_reset(WORD dev_id, struct notify_context *notify)
     return err;
 }
 
-NTSTATUS midi_out_message(void *args)
+NTSTATUS alsa_midi_out_message(void *args)
 {
     struct midi_out_message_params *params = args;
 
@@ -1376,7 +1394,7 @@ NTSTATUS midi_out_message(void *args)
     switch (params->msg)
     {
     case DRVM_INIT:
-        *params->err = midi_init();
+        *params->err = alsa_midi_init();
         break;
     case DRVM_EXIT:
     case DRVM_ENABLE:
@@ -1425,7 +1443,7 @@ NTSTATUS midi_out_message(void *args)
     return STATUS_SUCCESS;
 }
 
-NTSTATUS midi_in_message(void *args)
+NTSTATUS alsa_midi_in_message(void *args)
 {
     struct midi_in_message_params *params = args;
 
@@ -1434,7 +1452,7 @@ NTSTATUS midi_in_message(void *args)
     switch (params->msg)
     {
     case DRVM_INIT:
-        *params->err = midi_init();
+        *params->err = alsa_midi_init();
         break;
     case DRVM_EXIT:
     case DRVM_ENABLE:
@@ -1480,7 +1498,7 @@ NTSTATUS midi_in_message(void *args)
     return STATUS_SUCCESS;
 }
 
-NTSTATUS midi_notify_wait(void *args)
+NTSTATUS alsa_midi_notify_wait(void *args)
 {
     struct midi_notify_wait_params *params = args;
 
@@ -1584,7 +1602,7 @@ static UINT wow64_midi_out_unprepare(WORD dev_id, struct midi_hdr32 *hdr, UINT h
     return MMSYSERR_NOERROR;
 }
 
-NTSTATUS wow64_midi_out_message(void *args)
+NTSTATUS alsa_wow64_midi_out_message(void *args)
 {
     struct
     {
@@ -1655,7 +1673,7 @@ NTSTATUS wow64_midi_out_message(void *args)
         return STATUS_SUCCESS;
     }
 
-    midi_out_message(&params);
+    alsa_midi_out_message(&params);
 
     switch (params32->msg)
     {
@@ -1708,7 +1726,7 @@ static UINT wow64_midi_in_unprepare(WORD dev_id, struct midi_hdr32 *hdr, UINT hd
     return MMSYSERR_NOERROR;
 }
 
-NTSTATUS wow64_midi_in_message(void *args)
+NTSTATUS alsa_wow64_midi_in_message(void *args)
 {
     struct
     {
@@ -1780,7 +1798,7 @@ NTSTATUS wow64_midi_in_message(void *args)
         return STATUS_SUCCESS;
     }
 
-    midi_in_message(&params);
+    alsa_midi_in_message(&params);
 
     switch (params32->msg)
     {
@@ -1815,7 +1833,7 @@ NTSTATUS wow64_midi_in_message(void *args)
     return STATUS_SUCCESS;
 }
 
-NTSTATUS wow64_midi_notify_wait(void *args)
+NTSTATUS alsa_wow64_midi_notify_wait(void *args)
 {
     struct
     {
@@ -1833,7 +1851,7 @@ NTSTATUS wow64_midi_notify_wait(void *args)
     };
     notify32->send_notify = FALSE;
 
-    midi_notify_wait(&params);
+    alsa_midi_notify_wait(&params);
 
     if (!*params.quit && notify.send_notify)
     {

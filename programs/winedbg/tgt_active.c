@@ -70,9 +70,14 @@ static unsigned dbg_handle_debug_event(DEBUG_EVENT* de);
  */
 BOOL dbg_attach_debuggee(DWORD pid)
 {
+    if (pid == GetCurrentProcessId())
+    {
+        dbg_printf("WineDbg can't debug its own process. Please use another process ID.\n");
+        return FALSE;
+    }
     if (!(dbg_curr_process = dbg_add_process(&be_process_active_io, pid, 0))) return FALSE;
 
-    if (!DebugActiveProcess(pid)) 
+    if (!DebugActiveProcess(pid))
     {
         dbg_printf("Can't attach process %04lx: error %lu\n", pid, GetLastError());
         dbg_del_process(dbg_curr_process);
@@ -82,6 +87,7 @@ BOOL dbg_attach_debuggee(DWORD pid)
     SetEnvironmentVariableA("DBGHELP_NOLIVE", NULL);
 
     dbg_curr_process->active_debuggee = TRUE;
+    dbg_printf("WineDbg attached to pid %04lx\n", dbg_curr_pid);
     return TRUE;
 }
 
@@ -148,7 +154,7 @@ static BOOL dbg_exception_prolog(BOOL is_debug, const EXCEPTION_RECORD* rec)
 
     if (addr.Mode != dbg_curr_thread->addr_mode)
     {
-        const char* name = NULL;
+        const char* name;
 
         switch (addr.Mode)
         {
@@ -157,6 +163,7 @@ static BOOL dbg_exception_prolog(BOOL is_debug, const EXCEPTION_RECORD* rec)
         case AddrModeReal: name = "vm86";       break;
         case AddrModeFlat: name = dbg_curr_process->be_cpu->pointer_size == 4
                                   ? "32 bit" : "64 bit"; break;
+        default: return FALSE;
         }
         dbg_printf("In %s mode.\n", name);
         dbg_curr_thread->addr_mode = addr.Mode;
@@ -192,10 +199,10 @@ static BOOL dbg_exception_prolog(BOOL is_debug, const EXCEPTION_RECORD* rec)
             if ((!last_name || strcmp(last_name, si->Name)) ||
                 (!last_file || strcmp(last_file, il.FileName)))
             {
-                HeapFree(GetProcessHeap(), 0, last_name);
-                HeapFree(GetProcessHeap(), 0, last_file);
-                last_name = strcpy(HeapAlloc(GetProcessHeap(), 0, strlen(si->Name) + 1), si->Name);
-                last_file = strcpy(HeapAlloc(GetProcessHeap(), 0, strlen(il.FileName) + 1), il.FileName);
+                free(last_name);
+                free(last_file);
+                last_name = strdup(si->Name);
+                last_file = strdup(il.FileName);
                 dbg_printf("%s () at %s:%lu\n", last_name, last_file, il.LineNumber);
             }
         }
@@ -269,7 +276,7 @@ static DWORD dbg_handle_exception(const EXCEPTION_RECORD* rec, BOOL first_chance
     }
 
     if (first_chance && !is_debug && !DBG_IVAR(BreakOnFirstChance) &&
-	!(rec->ExceptionFlags & EH_STACK_INVALID))
+	!(rec->ExceptionFlags & EXCEPTION_STACK_INVALID))
     {
         /* pass exception to program except for debug exceptions */
         return DBG_EXCEPTION_NOT_HANDLED;
@@ -495,7 +502,7 @@ static unsigned dbg_handle_debug_event(DEBUG_EVENT* de)
                    de->dwProcessId, de->dwThreadId,
                    de->u.UnloadDll.lpBaseOfDll);
         break_delete_xpoints_from_module((DWORD_PTR)de->u.UnloadDll.lpBaseOfDll);
-        SymUnloadModule64(dbg_curr_process->handle, (DWORD_PTR)de->u.UnloadDll.lpBaseOfDll);
+        dbg_unload_module(dbg_curr_process, (DWORD_PTR)de->u.UnloadDll.lpBaseOfDll);
         break;
 
     case OUTPUT_DEBUG_STRING_EVENT:
@@ -591,6 +598,26 @@ void     dbg_active_wait_for_first_exception(void)
     wait_exception();
 }
 
+static BOOL dbg_active_wait_for_startup(DEBUG_EVENT* de)
+{
+    dbg_interactiveP = FALSE;
+    while (dbg_num_processes() && WaitForDebugEvent(de, INFINITE))
+    {
+        switch (de->dwDebugEventCode)
+        {
+        case CREATE_PROCESS_DEBUG_EVENT:
+        case CREATE_THREAD_DEBUG_EVENT:
+        case LOAD_DLL_DEBUG_EVENT:
+        case EXCEPTION_DEBUG_EVENT:
+            if (dbg_handle_debug_event(de)) return TRUE;
+            break;
+        default:
+            return FALSE;
+        }
+    }
+    return FALSE;
+}
+
 static BOOL dbg_start_debuggee(LPSTR cmdLine)
 {
     PROCESS_INFORMATION	info;
@@ -644,6 +671,7 @@ static BOOL dbg_start_debuggee(LPSTR cmdLine)
         free(dbg_last_cmd_line);
         dbg_last_cmd_line = cmdLine;
     }
+    dbg_printf("WineDbg starting on pid %04lx\n", dbg_curr_pid);
 
     return TRUE;
 }
@@ -729,6 +757,11 @@ static char *dbg_build_command_line( char **argv )
     return ret;
 }
 
+void dbg_set_exec_file(const char *path)
+{
+    free(dbg_executable);
+    dbg_executable = strdup(path);
+}
 
 void	dbg_run_debuggee(struct list_string* ls)
 {
@@ -788,98 +821,6 @@ static HANDLE create_temp_file(void)
         return INVALID_HANDLE_VALUE;
     return CreateFileW( name, GENERIC_READ|GENERIC_WRITE|DELETE, FILE_SHARE_DELETE,
                         NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, 0 );
-}
-
-static const struct
-{
-    int type;
-    int platform;
-    int major;
-    int minor;
-    const char *str;
-}
-version_table[] =
-{
-    { 0,                   VER_PLATFORM_WIN32s,        2,  0, "2.0" },
-    { 0,                   VER_PLATFORM_WIN32s,        3,  0, "3.0" },
-    { 0,                   VER_PLATFORM_WIN32s,        3, 10, "3.1" },
-    { 0,                   VER_PLATFORM_WIN32_WINDOWS, 4,  0, "95" },
-    { 0,                   VER_PLATFORM_WIN32_WINDOWS, 4, 10, "98" },
-    { 0,                   VER_PLATFORM_WIN32_WINDOWS, 4, 90, "ME" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      3, 51, "NT 3.51" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      4,  0, "NT 4.0" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      5,  0, "2000" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      5,  1, "XP" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      5,  2, "XP" },
-    { VER_NT_SERVER,       VER_PLATFORM_WIN32_NT,      5,  2, "Server 2003" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      6,  0, "Vista" },
-    { VER_NT_SERVER,       VER_PLATFORM_WIN32_NT,      6,  0, "Server 2008" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      6,  1, "7" },
-    { VER_NT_SERVER,       VER_PLATFORM_WIN32_NT,      6,  1, "Server 2008 R2" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      6,  2, "8" },
-    { VER_NT_SERVER,       VER_PLATFORM_WIN32_NT,      6,  2, "Server 2012" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,      6,  3, "8.1" },
-    { VER_NT_SERVER,       VER_PLATFORM_WIN32_NT,      6,  3, "Server 2012 R2" },
-    { VER_NT_WORKSTATION,  VER_PLATFORM_WIN32_NT,     10,  0, "10" },
-};
-
-static const char *get_windows_version(void)
-{
-    RTL_OSVERSIONINFOEXW info = { sizeof(RTL_OSVERSIONINFOEXW) };
-    static char str[64];
-    int i;
-
-    RtlGetVersion( &info );
-
-    for (i = 0; i < ARRAY_SIZE(version_table); i++)
-    {
-        if (version_table[i].type == info.wProductType &&
-            version_table[i].platform == info.dwPlatformId &&
-            version_table[i].major == info.dwMajorVersion &&
-            version_table[i].minor == info.dwMinorVersion)
-        {
-            return version_table[i].str;
-        }
-    }
-
-    snprintf( str, sizeof(str), "%ld.%ld (%d)", info.dwMajorVersion,
-              info.dwMinorVersion, info.wProductType );
-    return str;
-}
-
-static void output_system_info(void)
-{
-#ifdef __i386__
-    static const char platform[] = "i386";
-#elif defined(__x86_64__)
-    static const char platform[] = "x86_64";
-#elif defined(__arm__)
-    static const char platform[] = "arm";
-#elif defined(__aarch64__)
-    static const char platform[] = "arm64";
-#else
-# error CPU unknown
-#endif
-
-    const char *(CDECL *wine_get_build_id)(void);
-    void (CDECL *wine_get_host_version)( const char **sysname, const char **release );
-    BOOL is_wow64;
-
-    wine_get_build_id = (void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_build_id");
-    wine_get_host_version = (void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_host_version");
-    if (!IsWow64Process( dbg_curr_process->handle, &is_wow64 )) is_wow64 = FALSE;
-
-    dbg_printf( "System information:\n" );
-    if (wine_get_build_id) dbg_printf( "    Wine build: %s\n", wine_get_build_id() );
-    dbg_printf( "    Platform: %s%s\n", platform, is_wow64 ? " (WOW64)" : "" );
-    dbg_printf( "    Version: Windows %s\n", get_windows_version() );
-    if (wine_get_host_version)
-    {
-        const char *sysname, *release;
-        wine_get_host_version( &sysname, &release );
-        dbg_printf( "    Host system: %s\n", sysname );
-        dbg_printf( "    Host version: %s\n", release );
-    }
 }
 
 /******************************************************************
@@ -948,6 +889,8 @@ enum dbg_start dbg_active_auto(int argc, char* argv[])
 {
     HANDLE thread = 0, event = 0, input, output = INVALID_HANDLE_VALUE;
     enum dbg_start      ds = start_error_parse;
+    BOOL first_exception = TRUE;
+    DEBUG_EVENT de;
 
     DBG_IVAR(BreakOnDllLoad) = 0;
 
@@ -974,16 +917,31 @@ enum dbg_start dbg_active_auto(int argc, char* argv[])
     }
 
     input = parser_generate_command_file("echo Modules:", "info share",
-                                         "echo Threads:", "info threads", NULL);
+                                         "echo Threads:", "info threads",
+                                         "info system",
+                                         "detach",
+                                         NULL);
     if (input == INVALID_HANDLE_VALUE) return start_error_parse;
 
-    if (dbg_curr_process->active_debuggee)
-        dbg_active_wait_for_first_exception();
+    /* debuggee can terminate before we get the first exception.
+     * so detect end of attach load sequence, and then print information.
+     */
+    if (dbg_curr_process->active_debuggee && !(first_exception = dbg_active_wait_for_startup(&de)))
+    {
+        dbg_printf("Couldn't get first exception for process %04lx %ls%s.\n"
+                   "No backtrace available\n",
+                   dbg_curr_pid, dbg_curr_process->imageName, dbg_curr_process->is_wow64 ? " (WOW64)" : "");
+    }
 
     dbg_interactiveP = TRUE;
     parser_handle(NULL, input);
-    output_system_info();
 
+    if (!first_exception)
+    {
+        /* continue managing debug events, in case the exception event comes after current debug event */
+        ContinueDebugEvent(de.dwProcessId, de.dwThreadId, DBG_CONTINUE);
+        dbg_active_wait_for_first_exception();
+    }
     if (output != INVALID_HANDLE_VALUE)
     {
         SetEvent( event );
@@ -994,7 +952,6 @@ enum dbg_start dbg_active_auto(int argc, char* argv[])
     }
 
     CloseHandle( input );
-    dbg_curr_process->process_io->close_process(dbg_curr_process, TRUE);
     return start_ok;
 }
 
@@ -1117,7 +1074,17 @@ static BOOL tgt_process_active_write(HANDLE hProcess, void* addr,
 
 static BOOL tgt_process_active_get_selector(HANDLE hThread, DWORD sel, LDT_ENTRY* le)
 {
+#ifdef _WIN64
+    THREAD_DESCRIPTOR_INFORMATION desc = { .Selector = sel };
+    ULONG retlen;
+
+    if (RtlWow64GetThreadSelectorEntry( hThread, &desc, sizeof(desc), &retlen ))
+        return FALSE;
+    *le = desc.Entry;
+    return TRUE;
+#else
     return GetThreadSelectorEntry( hThread, sel, le );
+#endif
 }
 
 static struct be_process_io be_process_active_io =

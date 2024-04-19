@@ -22,6 +22,8 @@
 #include <stdarg.h>
 #include <string.h>
 
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
 #include "wine/winuser16.h"
 #include "wownt32.h"
 #include "winerror.h"
@@ -248,7 +250,7 @@ static LRESULT call_window_proc16( HWND16 hwnd, UINT16 msg, WPARAM16 wParam, LPA
 
     memset(&context, 0, sizeof(context));
     context.SegDs = context.SegEs = CURRENT_SS;
-    if (!(context.Eax = GetWindowWord( HWND_32(hwnd), GWLP_HINSTANCE ))) context.Eax = context.SegDs;
+    if (!(context.Eax = (WORD)GetWindowLongA( HWND_32(hwnd), GWLP_HINSTANCE ))) context.Eax = context.SegDs;
     context.SegCs = SELECTOROF(func);
     context.Eip   = OFFSETOF(func);
     context.Ebp   = CURRENT_SP + FIELD_OFFSET(STACK16FRAME, bp);
@@ -945,15 +947,15 @@ LRESULT WINPROC_CallProc32ATo16( winproc_callback16_t callback, HWND hwnd, UINT 
             BOOL mdi_child = (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_MDICHILD);
 
             CREATESTRUCT32Ato16( cs32, &cs );
-            cs.lpszName  = MapLS( cs32->lpszName );
-            cs.lpszClass = MapLS( cs32->lpszClass );
+            cs.lpszName  = MapLS( (void *)cs32->lpszName );
+            cs.lpszClass = MapLS( (void *)cs32->lpszClass );
 
             if (mdi_child)
             {
                 MDICREATESTRUCTA *mdi_cs = cs32->lpCreateParams;
                 MDICREATESTRUCT32Ato16( mdi_cs, &mdi_cs16 );
-                mdi_cs16.szTitle = MapLS( mdi_cs->szTitle );
-                mdi_cs16.szClass = MapLS( mdi_cs->szClass );
+                mdi_cs16.szTitle = MapLS( (void *)mdi_cs->szTitle );
+                mdi_cs16.szClass = MapLS( (void *)mdi_cs->szClass );
                 cs.lpCreateParams = MapLS( &mdi_cs16 );
             }
             lParam = MapLS( &cs );
@@ -975,8 +977,8 @@ LRESULT WINPROC_CallProc32ATo16( winproc_callback16_t callback, HWND hwnd, UINT 
             MDICREATESTRUCT16 cs;
 
             MDICREATESTRUCT32Ato16( cs32, &cs );
-            cs.szTitle = MapLS( cs32->szTitle );
-            cs.szClass = MapLS( cs32->szClass );
+            cs.szTitle = MapLS( (void *)cs32->szTitle );
+            cs.szClass = MapLS( (void *)cs32->szClass );
             lParam = MapLS( &cs );
             ret = callback( HWND_16(hwnd), msg, wParam, lParam, result, arg );
             UnMapLS( lParam );
@@ -1503,9 +1505,9 @@ LRESULT WINAPI SendMessage16( HWND16 hwnd16, UINT16 msg, WPARAM16 wparam, LPARAM
 
         if (!(winproc = (WNDPROC16)GetWindowLong16( hwnd16, GWLP_WNDPROC ))) return 0;
 
-        TRACE_(message)("(0x%04x) [%04x] wp=%04x lp=%08lx\n", hwnd16, msg, wparam, lparam );
+        TRACE_(message)("(0x%04x) [%04x] wp=%04x lp=%08Ix\n", hwnd16, msg, wparam, lparam );
         result = CallWindowProc16( winproc, hwnd16, msg, wparam, lparam );
-        TRACE_(message)("(0x%04x) [%04x] wp=%04x lp=%08lx returned %08lx\n",
+        TRACE_(message)("(0x%04x) [%04x] wp=%04x lp=%08Ix returned %08Ix\n",
                         hwnd16, msg, wparam, lparam, result );
     }
     else  /* map to 32-bit unicode for inter-thread/process message */
@@ -1730,9 +1732,9 @@ LONG WINAPI DispatchMessage16( const MSG16* msg )
         SetLastError( ERROR_INVALID_WINDOW_HANDLE );
         return 0;
     }
-    TRACE_(message)("(0x%04x) [%04x] wp=%04x lp=%08lx\n", msg->hwnd, msg->message, msg->wParam, msg->lParam );
+    TRACE_(message)("(0x%04x) [%04x] wp=%04x lp=%08Ix\n", msg->hwnd, msg->message, msg->wParam, msg->lParam );
     retval = CallWindowProc16( winproc, msg->hwnd, msg->message, msg->wParam, msg->lParam );
-    TRACE_(message)("(0x%04x) [%04x] wp=%04x lp=%08lx returned %08lx\n",
+    TRACE_(message)("(0x%04x) [%04x] wp=%04x lp=%08Ix returned %08Ix\n",
                     msg->hwnd, msg->message, msg->wParam, msg->lParam, retval );
     return retval;
 }
@@ -2581,28 +2583,31 @@ HWND create_window16( CREATESTRUCTW *cs, LPCWSTR className, HINSTANCE instance, 
 }
 
 
-static void WINAPI User16CallFreeIcon( ULONG *param, ULONG size )
+static NTSTATUS WINAPI User16CallFreeIcon( void *args, ULONG size )
 {
+    ULONG *param = args;
     GlobalFree16( LOWORD(*param) );
+    return STATUS_SUCCESS;
 }
 
 
-static DWORD WINAPI User16ThunkLock( DWORD *param, ULONG size )
+static NTSTATUS WINAPI User16ThunkLock( void *args, ULONG size )
 {
+    DWORD *param = args;
     if (size != sizeof(DWORD))
     {
         DWORD lock;
         ReleaseThunkLock( &lock );
-        return lock;
+        return NtCallbackReturn( &lock, sizeof(lock), STATUS_SUCCESS );
     }
     RestoreThunkLock( *param );
-    return 0;
+    return STATUS_SUCCESS;
 }
 
 
 void register_wow_handlers(void)
 {
-    void **callback_table = NtCurrentTeb()->Peb->KernelCallbackTable;
+    KERNEL_CALLBACK_PROC *callback_table = NtCurrentTeb()->Peb->KernelCallbackTable;
     static const struct wow_handlers16 handlers16 =
     {
         button_proc16,

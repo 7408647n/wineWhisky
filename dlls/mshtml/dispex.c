@@ -19,8 +19,6 @@
 #include <stdarg.h>
 
 #define COBJMACROS
-#define NONAMELESSUNION
-
 #include "windef.h"
 #include "winbase.h"
 #include "winuser.h"
@@ -34,6 +32,8 @@
 WINE_DEFAULT_DEBUG_CHANNEL(mshtml);
 
 #define MAX_ARGS 16
+
+static ExternalCycleCollectionParticipant dispex_ccp;
 
 static CRITICAL_SECTION cs_dispex_static_data;
 static CRITICAL_SECTION_DEBUG cs_dispex_static_data_dbg =
@@ -85,11 +85,10 @@ typedef struct {
 } dynamic_prop_t;
 
 #define DYNPROP_DELETED    0x01
+#define DYNPROP_HIDDEN     0x02
 
 typedef struct {
     DispatchEx dispex;
-    IUnknown IUnknown_iface;
-    LONG ref;
     DispatchEx *obj;
     func_info_t *info;
 } func_disp_t;
@@ -201,14 +200,14 @@ void release_typelib(void)
                 for(j = 0; j < iter->funcs[i].argc; j++)
                     VariantClear(&iter->funcs[i].arg_info[j].default_value);
             }
-            heap_free(iter->funcs[i].arg_types);
-            heap_free(iter->funcs[i].arg_info);
+            free(iter->funcs[i].arg_types);
+            free(iter->funcs[i].arg_info);
             SysFreeString(iter->funcs[i].name);
         }
 
-        heap_free(iter->funcs);
-        heap_free(iter->name_table);
-        heap_free(iter);
+        free(iter->funcs);
+        free(iter->name_table);
+        free(iter);
     }
 
     if(!typelib)
@@ -270,16 +269,22 @@ static BOOL is_arg_type_supported(VARTYPE vt)
 }
 
 static void add_func_info(dispex_data_t *data, tid_t tid, const FUNCDESC *desc, ITypeInfo *dti,
-                          dispex_hook_invoke_t hook)
+                          dispex_hook_invoke_t hook, const WCHAR *name_override)
 {
     func_info_t *info;
     BSTR name;
     HRESULT hres;
 
-    hres = ITypeInfo_GetDocumentation(dti, desc->memid, &name, NULL, NULL, NULL);
-    if(FAILED(hres)) {
-        WARN("GetDocumentation failed: %08lx\n", hres);
+    if(name_override)
+        name = SysAllocString(name_override);
+    else if(desc->wFuncFlags & FUNCFLAG_FRESTRICTED)
         return;
+    else {
+        hres = ITypeInfo_GetDocumentation(dti, desc->memid, &name, NULL, NULL, NULL);
+        if(FAILED(hres)) {
+            WARN("GetDocumentation failed: %08lx\n", hres);
+            return;
+        }
     }
 
     for(info = data->funcs; info < data->funcs+data->func_cnt; info++) {
@@ -295,8 +300,16 @@ static void add_func_info(dispex_data_t *data, tid_t tid, const FUNCDESC *desc, 
     TRACE("adding %s...\n", debugstr_w(name));
 
     if(info == data->funcs+data->func_cnt) {
-        if(data->func_cnt == data->func_size)
-            data->funcs = heap_realloc_zero(data->funcs, (data->func_size <<= 1)*sizeof(func_info_t));
+        if(data->func_cnt == data->func_size) {
+            info = realloc(data->funcs, data->func_size * 2 * sizeof(func_info_t));
+            if(!info) {
+                SysFreeString(name);
+                return;
+            }
+            memset(info + data->func_size, 0, data->func_size * sizeof(func_info_t));
+            data->funcs = info;
+            data->func_size *= 2;
+        }
         info = data->funcs+data->func_cnt;
 
         data->func_cnt++;
@@ -320,7 +333,7 @@ static void add_func_info(dispex_data_t *data, tid_t tid, const FUNCDESC *desc, 
         assert(info->argc < MAX_ARGS);
         assert(desc->funckind == FUNC_DISPATCH);
 
-        info->arg_info = heap_alloc_zero(sizeof(*info->arg_info) * info->argc);
+        info->arg_info = calloc(info->argc, sizeof(*info->arg_info));
         if(!info->arg_info)
             return;
 
@@ -330,7 +343,7 @@ static void add_func_info(dispex_data_t *data, tid_t tid, const FUNCDESC *desc, 
             return; /* Fallback to ITypeInfo::Invoke */
         }
 
-        info->arg_types = heap_alloc(sizeof(*info->arg_types) * (info->argc + (info->prop_vt == VT_VOID ? 0 : 1)));
+        info->arg_types = malloc(sizeof(*info->arg_types) * (info->argc + (info->prop_vt == VT_VOID ? 0 : 1)));
         if(!info->arg_types)
             return;
 
@@ -349,11 +362,11 @@ static void add_func_info(dispex_data_t *data, tid_t tid, const FUNCDESC *desc, 
 
         for(i=0; i < info->argc; i++) {
             TYPEDESC *tdesc = &desc->lprgelemdescParam[i].tdesc;
-            if(tdesc->vt == VT_PTR && tdesc->u.lptdesc->vt == VT_USERDEFINED) {
+            if(tdesc->vt == VT_PTR && tdesc->lptdesc->vt == VT_USERDEFINED) {
                 ITypeInfo *ref_type_info;
                 TYPEATTR *attr;
 
-                hres = ITypeInfo_GetRefTypeInfo(dti, tdesc->u.lptdesc->u.hreftype, &ref_type_info);
+                hres = ITypeInfo_GetRefTypeInfo(dti, tdesc->lptdesc->hreftype, &ref_type_info);
                 if(FAILED(hres)) {
                     ERR("Could not get referenced type info: %08lx\n", hres);
                     return;
@@ -376,9 +389,9 @@ static void add_func_info(dispex_data_t *data, tid_t tid, const FUNCDESC *desc, 
                 return; /* Fallback to ITypeInfo for unsupported arg types */
             }
 
-            if(desc->lprgelemdescParam[i].u.paramdesc.wParamFlags & PARAMFLAG_FHASDEFAULT) {
+            if(desc->lprgelemdescParam[i].paramdesc.wParamFlags & PARAMFLAG_FHASDEFAULT) {
                 hres = VariantCopy(&info->arg_info[i].default_value,
-                                   &desc->lprgelemdescParam[i].u.paramdesc.pparamdescex->varDefaultValue);
+                                   &desc->lprgelemdescParam[i].paramdesc.pparamdescex->varDefaultValue);
                 if(FAILED(hres)) {
                     ERR("Could not copy default value: %08lx\n", hres);
                     return;
@@ -395,6 +408,9 @@ static void add_func_info(dispex_data_t *data, tid_t tid, const FUNCDESC *desc, 
         info->call_vtbl_off = desc->oVft/sizeof(void*);
     }else if(desc->invkind & (DISPATCH_PROPERTYPUT|DISPATCH_PROPERTYGET)) {
         VARTYPE vt = VT_EMPTY;
+
+        if(desc->wFuncFlags & FUNCFLAG_FHIDDEN)
+            info->func_disp_idx = -2;
 
         if(desc->invkind & DISPATCH_PROPERTYGET) {
             vt = desc->elemdescFunc.tdesc.vt;
@@ -438,9 +454,9 @@ static HRESULT process_interface(dispex_data_t *data, tid_t tid, ITypeInfo *disp
                 hook = NULL;
         }
 
-        if(!hook || hook->invoke) {
+        if(!hook || hook->invoke || hook->name) {
             add_func_info(data, tid, funcdesc, disp_typeinfo ? disp_typeinfo : typeinfo,
-                          hook ? hook->invoke : NULL);
+                          hook ? hook->invoke : NULL, hook ? hook->name : NULL);
         }
 
         ITypeInfo_ReleaseFuncDesc(typeinfo, funcdesc);
@@ -484,7 +500,7 @@ static dispex_data_t *preprocess_dispex_data(dispex_static_data_t *desc, compat_
         }
     }
 
-    data = heap_alloc(sizeof(dispex_data_t));
+    data = malloc(sizeof(dispex_data_t));
     if (!data) {
         ERR("Out of memory\n");
         return NULL;
@@ -494,9 +510,9 @@ static dispex_data_t *preprocess_dispex_data(dispex_static_data_t *desc, compat_
     data->func_cnt = 0;
     data->func_disp_cnt = 0;
     data->func_size = 16;
-    data->funcs = heap_alloc_zero(data->func_size*sizeof(func_info_t));
+    data->funcs = calloc(data->func_size, sizeof(func_info_t));
     if (!data->funcs) {
-        heap_free (data);
+        free(data);
         ERR("Out of memory\n");
         return NULL;
     }
@@ -512,7 +528,7 @@ static dispex_data_t *preprocess_dispex_data(dispex_static_data_t *desc, compat_
     }
 
     if(!data->func_cnt) {
-        heap_free(data->funcs);
+        free(data->funcs);
         data->name_table = NULL;
         data->funcs = NULL;
         data->func_size = 0;
@@ -520,10 +536,10 @@ static dispex_data_t *preprocess_dispex_data(dispex_static_data_t *desc, compat_
     }
 
 
-    data->funcs = heap_realloc(data->funcs, data->func_cnt * sizeof(func_info_t));
+    data->funcs = realloc(data->funcs, data->func_cnt * sizeof(func_info_t));
     qsort(data->funcs, data->func_cnt, sizeof(func_info_t), dispid_cmp);
 
-    data->name_table = heap_alloc(data->func_cnt * sizeof(func_info_t*));
+    data->name_table = malloc(data->func_cnt * sizeof(func_info_t*));
     for(i=0; i < data->func_cnt; i++)
         data->name_table[i] = data->funcs+i;
     qsort(data->name_table, data->func_cnt, sizeof(func_info_t*), func_name_cmp);
@@ -557,7 +573,7 @@ HRESULT get_dispids(tid_t tid, DWORD *ret_size, DISPID **ret)
     func_cnt = attr->cFuncs;
     ITypeInfo_ReleaseTypeAttr(ti, attr);
 
-    ids = heap_alloc(func_cnt*sizeof(DISPID));
+    ids = malloc(func_cnt * sizeof(DISPID));
     if(!ids) {
         ITypeInfo_Release(ti);
         return E_OUTOFMEMORY;
@@ -574,7 +590,7 @@ HRESULT get_dispids(tid_t tid, DWORD *ret_size, DISPID **ret)
 
     ITypeInfo_Release(ti);
     if(FAILED(hres)) {
-        heap_free(ids);
+        free(ids);
         return hres;
     }
 
@@ -620,11 +636,11 @@ static inline dispex_dynamic_data_t *get_dynamic_data(DispatchEx *This)
     if(This->dynamic_data)
         return This->dynamic_data;
 
-    This->dynamic_data = heap_alloc_zero(sizeof(dispex_dynamic_data_t));
+    This->dynamic_data = calloc(1, sizeof(dispex_dynamic_data_t));
     if(!This->dynamic_data)
         return NULL;
 
-    if(This->info->desc->vtbl && This->info->desc->vtbl->populate_props)
+    if(This->info->desc->vtbl->populate_props)
         This->info->desc->vtbl->populate_props(This);
 
     return This->dynamic_data;
@@ -658,14 +674,14 @@ static HRESULT get_dynamic_prop(DispatchEx *This, const WCHAR *name, DWORD flags
     TRACE("creating dynamic prop %s\n", debugstr_w(name));
 
     if(!data->buf_size) {
-        data->props = heap_alloc(sizeof(dynamic_prop_t)*4);
+        data->props = malloc(sizeof(dynamic_prop_t) * 4);
         if(!data->props)
             return E_OUTOFMEMORY;
         data->buf_size = 4;
     }else if(data->buf_size == data->prop_cnt) {
         dynamic_prop_t *new_props;
 
-        new_props = heap_realloc(data->props, sizeof(dynamic_prop_t)*(data->buf_size<<1));
+        new_props = realloc(data->props, sizeof(dynamic_prop_t) * (data->buf_size << 1));
         if(!new_props)
             return E_OUTOFMEMORY;
 
@@ -675,7 +691,7 @@ static HRESULT get_dynamic_prop(DispatchEx *This, const WCHAR *name, DWORD flags
 
     prop = data->props + data->prop_cnt;
 
-    prop->name = heap_strdupW(name);
+    prop->name = wcsdup(name);
     if(!prop->name)
         return E_OUTOFMEMORY;
 
@@ -695,11 +711,13 @@ HRESULT dispex_get_dprop_ref(DispatchEx *This, const WCHAR *name, BOOL alloc, VA
     if(FAILED(hres))
         return hres;
 
+    if(alloc)
+        prop->flags |= DYNPROP_HIDDEN;
     *ret = &prop->var;
     return S_OK;
 }
 
-HRESULT dispex_get_dynid(DispatchEx *This, const WCHAR *name, DISPID *id)
+HRESULT dispex_get_dynid(DispatchEx *This, const WCHAR *name, BOOL hidden, DISPID *id)
 {
     dynamic_prop_t *prop;
     HRESULT hres;
@@ -708,6 +726,8 @@ HRESULT dispex_get_dynid(DispatchEx *This, const WCHAR *name, DISPID *id)
     if(FAILED(hres))
         return hres;
 
+    if(hidden)
+        prop->flags |= DYNPROP_HIDDEN;
     *id = DISPID_DYNPROP_0 + (prop - This->dynamic_data->props);
     return S_OK;
 }
@@ -717,7 +737,7 @@ static HRESULT dispex_value(DispatchEx *This, LCID lcid, WORD flags, DISPPARAMS 
 {
     HRESULT hres;
 
-    if(This->info->desc->vtbl && This->info->desc->vtbl->value)
+    if(This->info->desc->vtbl->value)
         return This->info->desc->vtbl->value(This, lcid, flags, params, res, ei, caller);
 
     switch(flags) {
@@ -755,7 +775,7 @@ static HRESULT typeinfo_invoke(DispatchEx *This, func_info_t *func, WORD flags, 
         return hres;
     }
 
-    hres = IUnknown_QueryInterface(This->outer, tid_ids[func->tid], (void**)&unk);
+    hres = IDispatchEx_QueryInterface(&This->IDispatchEx_iface, tid_ids[func->tid], (void**)&unk);
     if(FAILED(hres)) {
         ERR("Could not get iface %s: %08lx\n", debugstr_mshtml_guid(tid_ids[func->tid]), hres);
         return E_FAIL;
@@ -767,65 +787,16 @@ static HRESULT typeinfo_invoke(DispatchEx *This, func_info_t *func, WORD flags, 
     return hres;
 }
 
-static inline func_disp_t *impl_from_IUnknown(IUnknown *iface)
-{
-    return CONTAINING_RECORD(iface, func_disp_t, IUnknown_iface);
-}
-
-static HRESULT WINAPI Function_QueryInterface(IUnknown *iface, REFIID riid, void **ppv)
-{
-    func_disp_t *This = impl_from_IUnknown(iface);
-
-    TRACE("(%p)->(%s %p)\n", This, debugstr_mshtml_guid(riid), ppv);
-
-    if(IsEqualGUID(&IID_IUnknown, riid)) {
-        *ppv = &This->IUnknown_iface;
-    }else if(dispex_query_interface(&This->dispex, riid, ppv)) {
-        return *ppv ? S_OK : E_NOINTERFACE;
-    }else {
-        *ppv = NULL;
-        return E_NOINTERFACE;
-    }
-
-    IUnknown_AddRef((IUnknown*)*ppv);
-    return S_OK;
-}
-
-static ULONG WINAPI Function_AddRef(IUnknown *iface)
-{
-    func_disp_t *This = impl_from_IUnknown(iface);
-    LONG ref = InterlockedIncrement(&This->ref);
-
-    TRACE("(%p) ref=%ld\n", This, ref);
-
-    return ref;
-}
-
-static ULONG WINAPI Function_Release(IUnknown *iface)
-{
-    func_disp_t *This = impl_from_IUnknown(iface);
-    LONG ref = InterlockedDecrement(&This->ref);
-
-    TRACE("(%p) ref=%ld\n", This, ref);
-
-    if(!ref) {
-        assert(!This->obj);
-        release_dispex(&This->dispex);
-        heap_free(This);
-    }
-
-    return ref;
-}
-
-static const IUnknownVtbl FunctionUnkVtbl = {
-    Function_QueryInterface,
-    Function_AddRef,
-    Function_Release
-};
-
 static inline func_disp_t *impl_from_DispatchEx(DispatchEx *iface)
 {
     return CONTAINING_RECORD(iface, func_disp_t, dispex);
+}
+
+static void function_destructor(DispatchEx *dispex)
+{
+    func_disp_t *This = impl_from_DispatchEx(dispex);
+    assert(!This->obj);
+    free(This);
 }
 
 static HRESULT function_value(DispatchEx *dispex, LCID lcid, WORD flags, DISPPARAMS *params,
@@ -883,159 +854,15 @@ static HRESULT function_value(DispatchEx *dispex, LCID lcid, WORD flags, DISPPAR
     return hres;
 }
 
-static HRESULT function_get_dispid(DispatchEx *dispex, BSTR name, DWORD grfdex, DISPID *pid)
-{
-    if(!wcscmp(name, L"apply")) {
-        *pid = MSHTML_DISPID_CUSTOM_MIN;
-        return S_OK;
-    }
-
-    if(!wcscmp(name, L"call")) {
-        *pid = MSHTML_DISPID_CUSTOM_MIN + 1;
-        return S_OK;
-    }
-
-    return DISP_E_UNKNOWNNAME;
-}
-
-static HRESULT args_to_dp(IDispatch *args_obj, LCID lcid,  DISPPARAMS *dp)
-{
-    DISPPARAMS propget_dp = {NULL};
-    IDispatchEx *dispex;
-    BSTR str;
-    WCHAR buf[12];
-    unsigned i;
-    VARIANT v;
-    DISPID id;
-    HRESULT hres;
-
-    static const WCHAR lengthW[] = {'l','e','n','g','t','h',0};
-    static const WCHAR formatW[] = {'%','u',0};
-
-    hres = IDispatch_QueryInterface(args_obj, &IID_IDispatchEx, (void**)&dispex);
-    if(FAILED(hres)) {
-        FIXME("Could not get IDispatchEx\n");
-        return hres;
-    }
-
-    str = SysAllocString(lengthW);
-    hres = IDispatchEx_GetDispID(dispex, str, 0, &id);
-    SysFreeString(str);
-    if(SUCCEEDED(hres)) {
-        hres = IDispatchEx_InvokeEx(dispex, id, lcid, DISPATCH_PROPERTYGET, &propget_dp, &v, NULL, NULL);
-        if(SUCCEEDED(hres)) {
-            if(V_VT(&v) == VT_I4) {
-                TRACE("length %d\n", V_I4(&v));
-                dp->cArgs = V_I4(&v);
-            }
-            VariantClear(&v);
-        }
-    }
-
-    if(dp->cArgs)
-        dp->rgvarg = heap_alloc(dp->cArgs * sizeof(*dp->rgvarg));
-
-    for(i = 0; i < dp->cArgs; i++) {
-        swprintf(buf, ARRAY_SIZE(buf), formatW, i);
-        str = SysAllocString(buf);
-        hres = IDispatchEx_GetDispID(dispex, str, 0, &id);
-        SysFreeString(str);
-        if(SUCCEEDED(hres)) {
-            hres = IDispatchEx_InvokeEx(dispex, id, lcid, DISPATCH_PROPERTYGET, &propget_dp, dp->rgvarg+dp->cArgs-i-1, NULL, NULL);
-            if(SUCCEEDED(hres)) {
-                TRACE("[%u] = %s\n", i, debugstr_variant(dp->rgvarg+dp->cArgs-i-1));
-            }else {
-                TRACE("InvokeEx failed: %08x\n", hres);
-            }
-        }else {
-            TRACE("no arg %u\n", i);
-            V_VT(dp->rgvarg+dp->cArgs-i-1) = VT_EMPTY;
-        }
-    }
-
-    IDispatchEx_Release(dispex);
-    return S_OK;
-}
-
-static HRESULT function_dispex_invoke(DispatchEx *dispex, DISPID id, LCID lcid,
-        WORD flags, DISPPARAMS *params, VARIANT *res, EXCEPINFO *ei,
-        IServiceProvider *caller)
-{
-    func_disp_t *This = impl_from_DispatchEx(dispex);
-
-    switch(id) {
-    case MSHTML_DISPID_CUSTOM_MIN: {
-        DISPPARAMS dp = {NULL};
-        unsigned i;
-        HRESULT hres;
-
-        if(params->cArgs != 2 || params->cNamedArgs) {
-            FIXME("unsupported apply arguments\n");
-            return E_FAIL;
-        }
-
-        FIXME("%p.apply(%s %s)\n", This, debugstr_variant(params->rgvarg+1), debugstr_variant(params->rgvarg));
-        if((IDispatch*)&This->obj->IDispatchEx_iface != V_DISPATCH(params->rgvarg+1)) {
-            FIXME("obj != this_arg not supported\n");
-            return E_FAIL;
-        }
-        if(V_VT(params->rgvarg) == VT_DISPATCH) {
-            hres = args_to_dp(V_DISPATCH(params->rgvarg), lcid, &dp);
-            if(FAILED(hres))
-                return hres;
-        }
-
-        hres = function_value(&This->dispex, lcid, flags, &dp, res, ei, caller);
-
-        TRACE("function returned %08x\n", hres);
-
-        for(i = 0; i < dp.cArgs; i++)
-            VariantClear(dp.rgvarg + i);
-        heap_free(dp.rgvarg);
-        return hres;
-    }
-    case MSHTML_DISPID_CUSTOM_MIN + 1: {
-        DISPPARAMS dp = *params;
-        IDispatch *disp_this;
-        HRESULT hres;
-
-        if(!params->cArgs || params->cNamedArgs || V_VT(params->rgvarg + params->cArgs - 1) != VT_DISPATCH) {
-            FIXME("unsupported apply arguments\n");
-            return E_FAIL;
-        }
-
-        FIXME("%p.call(%s ...)\n", This, debugstr_variant(params->rgvarg + params->cArgs - 1));
-
-        hres = IDispatch_QueryInterface(V_DISPATCH(params->rgvarg + params->cArgs - 1),
-                                        tid_ids[This->info->tid], (void**)&disp_this);
-        if(FAILED(hres)) {
-            FIXME("call iface not supported\n");
-            return E_NOTIMPL;
-        }
-
-        dp.cArgs--;
-        hres = IDispatch_Invoke(disp_this, This->info->id, &IID_NULL, 0, DISPATCH_METHOD, &dp, res, ei, NULL);
-        IDispatch_Release(disp_this);
-
-        TRACE("function returned %08x\n", hres);
-        return hres;
-    }
-    }
-
-    return DISP_E_MEMBERNOTFOUND;
-}
-
 static const dispex_static_data_vtbl_t function_dispex_vtbl = {
-    function_value,
-    function_get_dispid,
-    function_dispex_invoke,
-    NULL
+    .destructor       = function_destructor,
+    .value            = function_value,
 };
 
 static const tid_t function_iface_tids[] = {0};
 
 static dispex_static_data_t function_dispex = {
-    L"Function",
+    "Function",
     &function_dispex_vtbl,
     NULL_tid,
     function_iface_tids
@@ -1045,13 +872,11 @@ static func_disp_t *create_func_disp(DispatchEx *obj, func_info_t *info)
 {
     func_disp_t *ret;
 
-    ret = heap_alloc_zero(sizeof(func_disp_t));
+    ret = calloc(1, sizeof(func_disp_t));
     if(!ret)
         return NULL;
 
-    ret->IUnknown_iface.lpVtbl = &FunctionUnkVtbl;
-    init_dispatch(&ret->dispex, &ret->IUnknown_iface,  &function_dispex, dispex_compat_mode(obj));
-    ret->ref = 1;
+    init_dispatch(&ret->dispex, &function_dispex, dispex_compat_mode(obj));
     ret->obj = obj;
     ret->info = info;
 
@@ -1071,7 +896,7 @@ static HRESULT invoke_disp_value(DispatchEx *This, IDispatch *func_disp, LCID lc
         return E_NOTIMPL;
     }
 
-    new_dp.rgvarg = heap_alloc((dp->cArgs+1)*sizeof(VARIANTARG));
+    new_dp.rgvarg = malloc((dp->cArgs + 1) * sizeof(VARIANTARG));
     if(!new_dp.rgvarg)
         return E_OUTOFMEMORY;
 
@@ -1095,7 +920,7 @@ static HRESULT invoke_disp_value(DispatchEx *This, IDispatch *func_disp, LCID lc
     else
         WARN("<<< %08lx\n", hres);
 
-    heap_free(new_dp.rgvarg);
+    free(new_dp.rgvarg);
     return hres;
 }
 
@@ -1109,7 +934,7 @@ static HRESULT get_func_obj_entry(DispatchEx *This, func_info_t *func, func_obj_
         return E_OUTOFMEMORY;
 
     if(!dynamic_data->func_disps) {
-        dynamic_data->func_disps = heap_alloc_zero(This->info->func_disp_cnt * sizeof(*dynamic_data->func_disps));
+        dynamic_data->func_disps = calloc(This->info->func_disp_cnt, sizeof(*dynamic_data->func_disps));
         if(!dynamic_data->func_disps)
             return E_OUTOFMEMORY;
     }
@@ -1151,7 +976,7 @@ static HRESULT get_builtin_func(dispex_data_t *data, DISPID id, func_info_t **re
     }
 
     WARN("invalid id %lx\n", id);
-    return DISP_E_UNKNOWNNAME;
+    return DISP_E_MEMBERNOTFOUND;
 }
 
 static HRESULT get_builtin_id(DispatchEx *This, BSTR name, DWORD grfdex, DISPID *ret)
@@ -1179,7 +1004,7 @@ static HRESULT get_builtin_id(DispatchEx *This, BSTR name, DWORD grfdex, DISPID 
             min = n+1;
     }
 
-    if(This->info->desc->vtbl && This->info->desc->vtbl->get_dispid) {
+    if(This->info->desc->vtbl->get_dispid) {
         HRESULT hres;
 
         hres = This->info->desc->vtbl->get_dispid(This, name, grfdex, ret);
@@ -1202,7 +1027,8 @@ HRESULT change_type(VARIANT *dst, VARIANT *src, VARTYPE vt, IServiceProvider *ca
         if(SUCCEEDED(hres)) {
             hres = IVariantChangeType_ChangeType(change_type, dst, src, LOCALE_NEUTRAL, vt);
             IVariantChangeType_Release(change_type);
-            return hres;
+            if(SUCCEEDED(hres))
+                return S_OK;
         }
     }
 
@@ -1211,6 +1037,14 @@ HRESULT change_type(VARIANT *dst, VARIANT *src, VARTYPE vt, IServiceProvider *ca
         if(V_VT(src) == VT_BSTR) {
             V_VT(dst) = VT_BOOL;
             V_BOOL(dst) = variant_bool(V_BSTR(src) && *V_BSTR(src));
+            return S_OK;
+        }
+        break;
+    case VT_UNKNOWN:
+    case VT_DISPATCH:
+        if(V_VT(src) == VT_EMPTY || V_VT(src) == VT_NULL) {
+            V_VT(dst) = vt;
+            V_DISPATCH(dst) = NULL;
             return S_OK;
         }
         break;
@@ -1231,7 +1065,7 @@ static HRESULT builtin_propget(DispatchEx *This, func_info_t *func, DISPPARAMS *
 
     assert(func->get_vtbl_off);
 
-    hres = IUnknown_QueryInterface(This->outer, tid_ids[func->tid], (void**)&iface);
+    hres = IDispatchEx_QueryInterface(&This->IDispatchEx_iface, tid_ids[func->tid], (void**)&iface);
     if(SUCCEEDED(hres)) {
         switch(func->prop_vt) {
 #define CASE_VT(vt,type,access) \
@@ -1288,7 +1122,7 @@ static HRESULT builtin_propput(DispatchEx *This, func_info_t *func, DISPPARAMS *
         v = &tmpv;
     }
 
-    hres = IUnknown_QueryInterface(This->outer, tid_ids[func->tid], (void**)&iface);
+    hres = IDispatchEx_QueryInterface(&This->IDispatchEx_iface, tid_ids[func->tid], (void**)&iface);
     if(SUCCEEDED(hres)) {
         switch(func->prop_vt) {
 #define CASE_VT(vt,type,access) \
@@ -1332,7 +1166,7 @@ static HRESULT invoke_builtin_function(DispatchEx *This, func_info_t *func, DISP
         return E_INVALIDARG;
     }
 
-    hres = IUnknown_QueryInterface(This->outer, tid_ids[func->tid], (void**)&iface);
+    hres = IDispatchEx_QueryInterface(&This->IDispatchEx_iface, tid_ids[func->tid], (void**)&iface);
     if(FAILED(hres))
         return hres;
 
@@ -1508,12 +1342,12 @@ static HRESULT invoke_builtin_prop(DispatchEx *This, DISPID id, LCID lcid, WORD 
     HRESULT hres;
 
     hres = get_builtin_func(This->info, id, &func);
-    if(id == DISPID_VALUE && hres == DISP_E_UNKNOWNNAME)
+    if(id == DISPID_VALUE && hres == DISP_E_MEMBERNOTFOUND)
         return dispex_value(This, lcid, flags, dp, res, ei, caller);
     if(FAILED(hres))
         return hres;
 
-    if(func->func_disp_idx != -1)
+    if(func->func_disp_idx >= 0)
         return function_invoke(This, func, flags, dp, res, ei, caller);
 
     if(func->hook) {
@@ -1602,7 +1436,7 @@ HRESULT remove_attribute(DispatchEx *This, DISPID id, VARIANT_BOOL *success)
             return hres;
 
         /* For builtin functions, we set their value to the original function. */
-        if(func->func_disp_idx != -1) {
+        if(func->func_disp_idx >= 0) {
             func_obj_entry_t *entry;
 
             if(!This->dynamic_data || !This->dynamic_data->func_disps
@@ -1658,8 +1492,7 @@ HRESULT dispex_to_string(DispatchEx *dispex, BSTR *ret)
     static const WCHAR suffix[] = L"]";
     WCHAR buf[ARRAY_SIZE(prefix) + 28 + ARRAY_SIZE(suffix)], *p = buf;
     compat_mode_t compat_mode = dispex_compat_mode(dispex);
-    const WCHAR *name = dispex->info->desc->name;
-    unsigned len;
+    const char *name = dispex->info->desc->name;
 
     if(!ret)
         return E_INVALIDARG;
@@ -1669,10 +1502,9 @@ HRESULT dispex_to_string(DispatchEx *dispex, BSTR *ret)
     if(compat_mode < COMPAT_MODE_IE9)
         p--;
     else {
-        len = wcslen(name);
-        assert(len <= 28);
-        memcpy(p, name, len * sizeof(WCHAR));
-        p += len;
+        while(*name)
+            *p++ = *name++;
+        assert(p + ARRAY_SIZE(suffix) - buf <= ARRAY_SIZE(buf));
     }
     memcpy(p, suffix, sizeof(suffix));
 
@@ -1709,28 +1541,73 @@ static HRESULT WINAPI DispatchEx_QueryInterface(IDispatchEx *iface, REFIID riid,
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
 
-    return IUnknown_QueryInterface(This->outer, riid, ppv);
+    TRACE("%s (%p)->(%s %p)\n", This->info->desc->name, This, debugstr_mshtml_guid(riid), ppv);
+
+    if(This->info->desc->vtbl->query_interface) {
+        *ppv = This->info->desc->vtbl->query_interface(This, riid);
+        if(*ppv)
+            goto ret;
+    }
+
+    if(IsEqualGUID(&IID_IUnknown, riid) || IsEqualGUID(&IID_IDispatch, riid) || IsEqualGUID(&IID_IDispatchEx, riid))
+        *ppv = &This->IDispatchEx_iface;
+    else if(IsEqualGUID(&IID_nsXPCOMCycleCollectionParticipant, riid)) {
+        *ppv = &dispex_ccp;
+        return S_OK;
+    }else if(IsEqualGUID(&IID_nsCycleCollectionISupports, riid)) {
+        *ppv = &This->IDispatchEx_iface;
+        return S_OK;
+    }else if(IsEqualGUID(&IID_IDispatchJS, riid) ||
+             IsEqualGUID(&IID_UndocumentedScriptIface, riid) ||
+             IsEqualGUID(&IID_IMarshal, riid) ||
+             IsEqualGUID(&IID_IManagedObject, riid)) {
+        *ppv = NULL;
+        return E_NOINTERFACE;
+    }else {
+        *ppv = NULL;
+        WARN("%s (%p)->(%s %p)\n", This->info->desc->name, This, debugstr_mshtml_guid(riid), ppv);
+        return E_NOINTERFACE;
+    }
+
+ret:
+    IDispatchEx_AddRef(&This->IDispatchEx_iface);
+    return S_OK;
 }
 
 static ULONG WINAPI DispatchEx_AddRef(IDispatchEx *iface)
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
+    LONG ref = ccref_incr(&This->ccref, (nsISupports*)&This->IDispatchEx_iface);
 
-    return IUnknown_AddRef(This->outer);
+    TRACE("%s (%p) ref=%ld\n", This->info->desc->name, This, ref);
+
+    return ref;
 }
 
 static ULONG WINAPI DispatchEx_Release(IDispatchEx *iface)
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
+    LONG ref = ccref_decr(&This->ccref, (nsISupports*)&This->IDispatchEx_iface, &dispex_ccp);
 
-    return IUnknown_Release(This->outer);
+    TRACE("%s (%p) ref=%ld\n", This->info->desc->name, This, ref);
+
+    /* Gecko ccref may not free the object immediately when ref count reaches 0, so we need
+     * an extra care for objects that need an immediate clean up. See Gecko's
+     * NS_IMPL_CYCLE_COLLECTING_NATIVE_RELEASE_WITH_LAST_RELEASE for details. */
+    if(!ref && This->info->desc->vtbl->last_release) {
+        ccref_incr(&This->ccref, (nsISupports*)&This->IDispatchEx_iface);
+        This->info->desc->vtbl->last_release(This);
+        ccref_decr(&This->ccref, (nsISupports*)&This->IDispatchEx_iface, &dispex_ccp);
+    }
+
+    return ref;
 }
 
 static HRESULT WINAPI DispatchEx_GetTypeInfoCount(IDispatchEx *iface, UINT *pctinfo)
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
 
-    TRACE("(%p)->(%p)\n", This, pctinfo);
+    TRACE("%s (%p)->(%p)\n", This->info->desc->name, This, pctinfo);
 
     *pctinfo = 1;
     return S_OK;
@@ -1742,7 +1619,7 @@ static HRESULT WINAPI DispatchEx_GetTypeInfo(IDispatchEx *iface, UINT iTInfo,
     DispatchEx *This = impl_from_IDispatchEx(iface);
     HRESULT hres;
 
-    TRACE("(%p)->(%u %lu %p)\n", This, iTInfo, lcid, ppTInfo);
+    TRACE("%s (%p)->(%u %lu %p)\n", This->info->desc->name, This, iTInfo, lcid, ppTInfo);
 
     hres = get_typeinfo(This->info->desc->disp_tid, ppTInfo);
     if(FAILED(hres))
@@ -1757,19 +1634,16 @@ static HRESULT WINAPI DispatchEx_GetIDsOfNames(IDispatchEx *iface, REFIID riid,
                                                 LCID lcid, DISPID *rgDispId)
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
-    UINT i;
-    HRESULT hres;
+    HRESULT hres = S_OK;
 
-    TRACE("(%p)->(%s %p %u %lu %p)\n", This, debugstr_guid(riid), rgszNames, cNames,
-          lcid, rgDispId);
+    TRACE("%s (%p)->(%s %p %u %lu %p)\n", This->info->desc->name, This, debugstr_guid(riid), rgszNames,
+          cNames, lcid, rgDispId);
 
-    for(i=0; i < cNames; i++) {
-        hres = IDispatchEx_GetDispID(&This->IDispatchEx_iface, rgszNames[i], 0, rgDispId+i);
-        if(FAILED(hres))
-            return hres;
-    }
+    /* Native ignores all cNames > 1, and doesn't even fill them */
+    if(cNames)
+        hres = IDispatchEx_GetDispID(&This->IDispatchEx_iface, rgszNames[0], 0, rgDispId);
 
-    return S_OK;
+    return hres;
 }
 
 static HRESULT WINAPI DispatchEx_Invoke(IDispatchEx *iface, DISPID dispIdMember,
@@ -1778,8 +1652,8 @@ static HRESULT WINAPI DispatchEx_Invoke(IDispatchEx *iface, DISPID dispIdMember,
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
 
-    TRACE("(%p)->(%ld %s %ld %d %p %p %p %p)\n", This, dispIdMember, debugstr_guid(riid),
-          lcid, wFlags, pDispParams, pVarResult, pExcepInfo, puArgErr);
+    TRACE("%s (%p)->(%ld %s %ld %d %p %p %p %p)\n", This->info->desc->name, This, dispIdMember,
+          debugstr_guid(riid), lcid, wFlags, pDispParams, pVarResult, pExcepInfo, puArgErr);
 
     return IDispatchEx_InvokeEx(&This->IDispatchEx_iface, dispIdMember, lcid, wFlags, pDispParams,
             pVarResult, pExcepInfo, NULL);
@@ -1791,7 +1665,7 @@ static HRESULT WINAPI DispatchEx_GetDispID(IDispatchEx *iface, BSTR bstrName, DW
     dynamic_prop_t *dprop;
     HRESULT hres;
 
-    TRACE("(%p)->(%s %lx %p)\n", This, debugstr_w(bstrName), grfdex, pid);
+    TRACE("%s (%p)->(%s %lx %p)\n", This->info->desc->name, This, debugstr_w(bstrName), grfdex, pid);
 
     if(grfdex & ~(fdexNameCaseSensitive|fdexNameCaseInsensitive|fdexNameEnsure|fdexNameImplicit|FDEX_VERSION_MASK))
         FIXME("Unsupported grfdex %lx\n", grfdex);
@@ -1817,7 +1691,7 @@ static HRESULT WINAPI DispatchEx_InvokeEx(IDispatchEx *iface, DISPID id, LCID lc
     DispatchEx *This = impl_from_IDispatchEx(iface);
     HRESULT hres;
 
-    TRACE("(%p)->(%lx %lx %x %p %p %p %p)\n", This, id, lcid, wFlags, pdp, pvarRes, pei, pspCaller);
+    TRACE("%s (%p)->(%lx %lx %x %p %p %p %p)\n", This->info->desc->name, This, id, lcid, wFlags, pdp, pvarRes, pei, pspCaller);
 
     if(!ensure_real_info(This))
         return E_OUTOFMEMORY;
@@ -1827,8 +1701,8 @@ static HRESULT WINAPI DispatchEx_InvokeEx(IDispatchEx *iface, DISPID id, LCID lc
 
     switch(get_dispid_type(id)) {
     case DISPEXPROP_CUSTOM:
-        if(!This->info->desc->vtbl || !This->info->desc->vtbl->invoke)
-            return DISP_E_UNKNOWNNAME;
+        if(!This->info->desc->vtbl->invoke)
+            return DISP_E_MEMBERNOTFOUND;
         return This->info->desc->vtbl->invoke(This, id, lcid, wFlags, pdp, pvarRes, pei, pspCaller);
 
     case DISPEXPROP_DYNAMIC: {
@@ -1836,7 +1710,7 @@ static HRESULT WINAPI DispatchEx_InvokeEx(IDispatchEx *iface, DISPID id, LCID lc
         dynamic_prop_t *prop;
 
         if(!get_dynamic_data(This) || This->dynamic_data->prop_cnt <= idx)
-            return DISP_E_UNKNOWNNAME;
+            return DISP_E_MEMBERNOTFOUND;
 
         prop = This->dynamic_data->props+idx;
 
@@ -1854,7 +1728,7 @@ static HRESULT WINAPI DispatchEx_InvokeEx(IDispatchEx *iface, DISPID id, LCID lc
             return invoke_disp_value(This, V_DISPATCH(&prop->var), lcid, wFlags, pdp, pvarRes, pei, pspCaller);
         case DISPATCH_PROPERTYGET:
             if(prop->flags & DYNPROP_DELETED)
-                return DISP_E_UNKNOWNNAME;
+                return DISP_E_MEMBERNOTFOUND;
             V_VT(pvarRes) = VT_EMPTY;
             return variant_copy(pvarRes, &prop->var);
         case DISPATCH_PROPERTYPUT:
@@ -1880,7 +1754,7 @@ static HRESULT WINAPI DispatchEx_InvokeEx(IDispatchEx *iface, DISPID id, LCID lc
     case DISPEXPROP_BUILTIN:
         if(wFlags == DISPATCH_CONSTRUCT) {
             if(id == DISPID_VALUE) {
-                if(This->info->desc->vtbl && This->info->desc->vtbl->value) {
+                if(This->info->desc->vtbl->value) {
                     return This->info->desc->vtbl->value(This, lcid, wFlags, pdp, pvarRes, pei, pspCaller);
                 }
                 FIXME("DISPATCH_CONSTRUCT flag but missing value function\n");
@@ -1903,17 +1777,14 @@ static HRESULT WINAPI DispatchEx_DeleteMemberByName(IDispatchEx *iface, BSTR nam
     DISPID id;
     HRESULT hres;
 
-    TRACE("(%p)->(%s %lx)\n", This, debugstr_w(name), grfdex);
-
-    if(dispex_compat_mode(This) < COMPAT_MODE_IE8) {
-        /* Not implemented by IE */
-        return E_NOTIMPL;
-    }
+    TRACE("%s (%p)->(%s %lx)\n", This->info->desc->name, This, debugstr_w(name), grfdex);
 
     hres = IDispatchEx_GetDispID(&This->IDispatchEx_iface, name, grfdex & ~fdexNameEnsure, &id);
     if(FAILED(hres)) {
+        compat_mode_t compat_mode = dispex_compat_mode(This);
         TRACE("property %s not found\n", debugstr_w(name));
-        return dispex_compat_mode(This) < COMPAT_MODE_IE9 ? hres : S_OK;
+        return compat_mode < COMPAT_MODE_IE8 ? E_NOTIMPL :
+               compat_mode < COMPAT_MODE_IE9 ? hres : S_OK;
     }
 
     return IDispatchEx_DeleteMemberByDispID(&This->IDispatchEx_iface, id);
@@ -1923,7 +1794,10 @@ static HRESULT WINAPI DispatchEx_DeleteMemberByDispID(IDispatchEx *iface, DISPID
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
 
-    TRACE("(%p)->(%lx)\n", This, id);
+    TRACE("%s (%p)->(%lx)\n", This->info->desc->name, This, id);
+
+    if(is_custom_dispid(id) && This->info->desc->vtbl->delete)
+        return This->info->desc->vtbl->delete(This, id);
 
     if(dispex_compat_mode(This) < COMPAT_MODE_IE8) {
         /* Not implemented by IE */
@@ -1949,7 +1823,7 @@ static HRESULT WINAPI DispatchEx_DeleteMemberByDispID(IDispatchEx *iface, DISPID
 static HRESULT WINAPI DispatchEx_GetMemberProperties(IDispatchEx *iface, DISPID id, DWORD grfdexFetch, DWORD *pgrfdex)
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
-    FIXME("(%p)->(%lx %lx %p)\n", This, id, grfdexFetch, pgrfdex);
+    FIXME("%s (%p)->(%lx %lx %p)\n", This->info->desc->name, This, id, grfdexFetch, pgrfdex);
     return E_NOTIMPL;
 }
 
@@ -1959,16 +1833,22 @@ static HRESULT WINAPI DispatchEx_GetMemberName(IDispatchEx *iface, DISPID id, BS
     func_info_t *func;
     HRESULT hres;
 
-    TRACE("(%p)->(%lx %p)\n", This, id, pbstrName);
+    TRACE("%s (%p)->(%lx %p)\n", This->info->desc->name, This, id, pbstrName);
 
     if(!ensure_real_info(This))
         return E_OUTOFMEMORY;
+
+    if(is_custom_dispid(id)) {
+        if(This->info->desc->vtbl->get_name)
+            return This->info->desc->vtbl->get_name(This, id, pbstrName);
+        return DISP_E_MEMBERNOTFOUND;
+    }
 
     if(is_dynamic_dispid(id)) {
         DWORD idx = id - DISPID_DYNPROP_0;
 
         if(!get_dynamic_data(This) || This->dynamic_data->prop_cnt <= idx)
-            return DISP_E_UNKNOWNNAME;
+            return DISP_E_MEMBERNOTFOUND;
 
         *pbstrName = SysAllocString(This->dynamic_data->props[idx].name);
         if(!*pbstrName)
@@ -1989,7 +1869,8 @@ static HRESULT WINAPI DispatchEx_GetMemberName(IDispatchEx *iface, DISPID id, BS
 
 static HRESULT next_dynamic_id(DispatchEx *dispex, DWORD idx, DISPID *ret_id)
 {
-    while(idx < dispex->dynamic_data->prop_cnt && dispex->dynamic_data->props[idx].flags & DYNPROP_DELETED)
+    while(idx < dispex->dynamic_data->prop_cnt &&
+          (dispex->dynamic_data->props[idx].flags & (DYNPROP_DELETED | DYNPROP_HIDDEN)))
         idx++;
 
     if(idx == dispex->dynamic_data->prop_cnt) {
@@ -2007,7 +1888,7 @@ static HRESULT WINAPI DispatchEx_GetNextDispID(IDispatchEx *iface, DWORD grfdex,
     func_info_t *func;
     HRESULT hres;
 
-    TRACE("(%p)->(%lx %lx %p)\n", This, grfdex, id, pid);
+    TRACE("%s (%p)->(%lx %lx %p)\n", This->info->desc->name, This, grfdex, id, pid);
 
     if(!ensure_real_info(This))
         return E_OUTOFMEMORY;
@@ -2016,27 +1897,36 @@ static HRESULT WINAPI DispatchEx_GetNextDispID(IDispatchEx *iface, DWORD grfdex,
         DWORD idx = id - DISPID_DYNPROP_0;
 
         if(!get_dynamic_data(This) || This->dynamic_data->prop_cnt <= idx)
-            return DISP_E_UNKNOWNNAME;
+            return DISP_E_MEMBERNOTFOUND;
 
         return next_dynamic_id(This, idx+1, pid);
     }
 
-    if(id == DISPID_STARTENUM) {
-        func = This->info->funcs;
-    }else {
-        hres = get_builtin_func(This->info, id, &func);
-        if(FAILED(hres))
-            return hres;
-        func++;
+    if(!is_custom_dispid(id)) {
+        if(id == DISPID_STARTENUM) {
+            func = This->info->funcs;
+        }else {
+            hres = get_builtin_func(This->info, id, &func);
+            if(FAILED(hres))
+                return hres;
+            func++;
+        }
+
+        while(func < This->info->funcs + This->info->func_cnt) {
+            if(func->func_disp_idx == -1) {
+                *pid = func->id;
+                return S_OK;
+            }
+            func++;
+        }
+
+        id = DISPID_STARTENUM;
     }
 
-    while(func < This->info->funcs + This->info->func_cnt) {
-        /* FIXME: Skip hidden properties */
-        if(func->func_disp_idx == -1) {
-            *pid = func->id;
-            return S_OK;
-        }
-        func++;
+    if(This->info->desc->vtbl->next_dispid) {
+        hres = This->info->desc->vtbl->next_dispid(This, id, pid);
+        if(hres != S_FALSE)
+            return hres;
     }
 
     if(get_dynamic_data(This) && This->dynamic_data->prop_cnt)
@@ -2049,7 +1939,7 @@ static HRESULT WINAPI DispatchEx_GetNextDispID(IDispatchEx *iface, DWORD grfdex,
 static HRESULT WINAPI DispatchEx_GetNameSpaceParent(IDispatchEx *iface, IUnknown **ppunk)
 {
     DispatchEx *This = impl_from_IDispatchEx(iface);
-    FIXME("(%p)->(%p)\n", This, ppunk);
+    FIXME("%s (%p)->(%p)\n", This->info->desc->name, This, ppunk);
     return E_NOTIMPL;
 }
 
@@ -2071,78 +1961,92 @@ static IDispatchExVtbl DispatchExVtbl = {
     DispatchEx_GetNameSpaceParent
 };
 
-BOOL dispex_query_interface(DispatchEx *This, REFIID riid, void **ppv)
+static nsresult NSAPI dispex_traverse(void *ccp, void *p, nsCycleCollectionTraversalCallback *cb)
 {
-    if(IsEqualGUID(&IID_IDispatch, riid))
-        *ppv = &This->IDispatchEx_iface;
-    else if(IsEqualGUID(&IID_IDispatchEx, riid))
-        *ppv = &This->IDispatchEx_iface;
-    else if(IsEqualGUID(&IID_IDispatchJS, riid))
-        *ppv = NULL;
-    else if(IsEqualGUID(&IID_UndocumentedScriptIface, riid))
-        *ppv = NULL;
-    else if(IsEqualGUID(&IID_IMarshal, riid))
-        *ppv = NULL;
-    else if(IsEqualGUID(&IID_IManagedObject, riid))
-        *ppv = NULL;
-    else
-        return FALSE;
-
-    if(*ppv)
-        IUnknown_AddRef((IUnknown*)*ppv);
-    return TRUE;
-}
-
-void dispex_traverse(DispatchEx *This, nsCycleCollectionTraversalCallback *cb)
-{
+    DispatchEx *This = impl_from_IDispatchEx(p);
     dynamic_prop_t *prop;
 
-    if(!This->dynamic_data)
-        return;
+    describe_cc_node(&This->ccref, This->info->desc->name, cb);
 
-    for(prop = This->dynamic_data->props; prop < This->dynamic_data->props + This->dynamic_data->prop_cnt; prop++) {
-        if(V_VT(&prop->var) == VT_DISPATCH)
-            note_cc_edge((nsISupports*)V_DISPATCH(&prop->var), "dispex_data", cb);
-    }
-
-    /* FIXME: Traverse func_disps */
-}
-
-void dispex_unlink(DispatchEx *This)
-{
-    dynamic_prop_t *prop;
+    if(This->info->desc->vtbl->traverse)
+        This->info->desc->vtbl->traverse(This, cb);
 
     if(!This->dynamic_data)
-        return;
+        return NS_OK;
 
-    for(prop = This->dynamic_data->props; prop < This->dynamic_data->props + This->dynamic_data->prop_cnt; prop++) {
-        if(V_VT(&prop->var) == VT_DISPATCH) {
-            V_VT(&prop->var) = VT_EMPTY;
-            IDispatch_Release(V_DISPATCH(&prop->var));
-        }else {
-            VariantClear(&prop->var);
+    for(prop = This->dynamic_data->props; prop < This->dynamic_data->props + This->dynamic_data->prop_cnt; prop++)
+        traverse_variant(&prop->var, "dispex_data", cb);
+
+    if(This->dynamic_data->func_disps) {
+        func_obj_entry_t *iter = This->dynamic_data->func_disps, *end = iter + This->info->func_disp_cnt;
+
+        for(iter = This->dynamic_data->func_disps; iter < end; iter++) {
+            if(!iter->func_obj)
+                continue;
+            note_cc_edge((nsISupports*)&iter->func_obj->dispex.IDispatchEx_iface, "func_obj", cb);
+            traverse_variant(&iter->val, "func_val", cb);
         }
     }
+
+    return NS_OK;
 }
 
-const void *dispex_get_vtbl(DispatchEx *dispex)
-{
-    return dispex->info->desc->vtbl;
-}
-
-void release_dispex(DispatchEx *This)
+void dispex_props_unlink(DispatchEx *This)
 {
     dynamic_prop_t *prop;
 
     if(!This->dynamic_data)
         return;
+
+    for(prop = This->dynamic_data->props; prop < This->dynamic_data->props + This->dynamic_data->prop_cnt; prop++) {
+        prop->flags |= DYNPROP_DELETED;
+        unlink_variant(&prop->var);
+    }
+
+    if(This->dynamic_data->func_disps) {
+        func_obj_entry_t *iter = This->dynamic_data->func_disps, *end = iter + This->info->func_disp_cnt;
+
+        for(iter = This->dynamic_data->func_disps; iter < end; iter++) {
+            if(!iter->func_obj)
+                continue;
+            iter->func_obj->obj = NULL;
+            IDispatchEx_Release(&iter->func_obj->dispex.IDispatchEx_iface);
+            VariantClear(&iter->val);
+        }
+
+        free(This->dynamic_data->func_disps);
+        This->dynamic_data->func_disps = NULL;
+    }
+}
+
+static nsresult NSAPI dispex_unlink(void *p)
+{
+    DispatchEx *This = impl_from_IDispatchEx(p);
+
+    if(This->info->desc->vtbl->unlink)
+        This->info->desc->vtbl->unlink(This);
+
+    dispex_props_unlink(This);
+    return NS_OK;
+}
+
+static void NSAPI dispex_delete_cycle_collectable(void *p)
+{
+    DispatchEx *This = impl_from_IDispatchEx(p);
+    dynamic_prop_t *prop;
+
+    if(This->info->desc->vtbl->unlink)
+        This->info->desc->vtbl->unlink(This);
+
+    if(!This->dynamic_data)
+        goto destructor;
 
     for(prop = This->dynamic_data->props; prop < This->dynamic_data->props + This->dynamic_data->prop_cnt; prop++) {
         VariantClear(&prop->var);
-        heap_free(prop->name);
+        free(prop->name);
     }
 
-    heap_free(This->dynamic_data->props);
+    free(This->dynamic_data->props);
 
     if(This->dynamic_data->func_disps) {
         func_obj_entry_t *iter;
@@ -2155,26 +2059,44 @@ void release_dispex(DispatchEx *This)
             VariantClear(&iter->val);
         }
 
-        heap_free(This->dynamic_data->func_disps);
+        free(This->dynamic_data->func_disps);
     }
 
-    heap_free(This->dynamic_data);
+    free(This->dynamic_data);
+
+destructor:
+    This->info->desc->vtbl->destructor(This);
 }
 
-void init_dispatch(DispatchEx *dispex, IUnknown *outer, dispex_static_data_t *data, compat_mode_t compat_mode)
+void init_dispex_cc(void)
+{
+    static const CCObjCallback dispex_ccp_callback = {
+        dispex_traverse,
+        dispex_unlink,
+        dispex_delete_cycle_collectable
+    };
+    ccp_init(&dispex_ccp, &dispex_ccp_callback);
+}
+
+const void *dispex_get_vtbl(DispatchEx *dispex)
+{
+    return dispex->info->desc->vtbl;
+}
+
+void init_dispatch(DispatchEx *dispex, dispex_static_data_t *data, compat_mode_t compat_mode)
 {
     assert(compat_mode < COMPAT_MODE_CNT);
 
     dispex->IDispatchEx_iface.lpVtbl = &DispatchExVtbl;
-    dispex->outer = outer;
     dispex->dynamic_data = NULL;
+    ccref_init(&dispex->ccref, 1);
 
-    if(data->vtbl && data->vtbl->get_compat_mode) {
+    if(data->vtbl->get_compat_mode) {
         /* delayed init */
         if(!data->delayed_init_info) {
             EnterCriticalSection(&cs_dispex_static_data);
             if(!data->delayed_init_info) {
-                dispex_data_t *info = heap_alloc_zero(sizeof(*data->delayed_init_info));
+                dispex_data_t *info = calloc(1, sizeof(*data->delayed_init_info));
                 if(info) {
                     info->desc = data;
                     data->delayed_init_info = info;

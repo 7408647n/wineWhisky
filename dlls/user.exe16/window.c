@@ -838,7 +838,15 @@ LONG WINAPI SetClassLong16( HWND16 hwnd16, INT16 offset, LONG newval )
  */
 WORD WINAPI GetWindowWord16( HWND16 hwnd, INT16 offset )
 {
-    return GetWindowWord( WIN_Handle32(hwnd), offset );
+    switch(offset)
+    {
+    case GWLP_ID:
+    case GWLP_HINSTANCE:
+    case GWLP_HWNDPARENT:
+        return GetWindowLongA( WIN_Handle32(hwnd), offset );
+    default:
+        return GetWindowWord( WIN_Handle32(hwnd), offset );
+    }
 }
 
 
@@ -847,7 +855,15 @@ WORD WINAPI GetWindowWord16( HWND16 hwnd, INT16 offset )
  */
 WORD WINAPI SetWindowWord16( HWND16 hwnd, INT16 offset, WORD newval )
 {
-    return SetWindowWord( WIN_Handle32(hwnd), offset, newval );
+    switch(offset)
+    {
+    case GWLP_ID:
+    case GWLP_HINSTANCE:
+    case GWLP_HWNDPARENT:
+        return SetWindowLongA( WIN_Handle32(hwnd), offset, newval );
+    default:
+        return SetWindowWord( WIN_Handle32(hwnd), offset, newval );
+    }
 }
 
 
@@ -1655,7 +1671,7 @@ BOOL16 WINAPI GetClassInfoEx16( HINSTANCE16 hInst16, SEGPTR name, WNDCLASSEX16 *
         wc->hCursor       = get_icon_16( wc32.hCursor );
         wc->hbrBackground = HBRUSH_16(wc32.hbrBackground);
         wc->lpszClassName = 0;
-        wc->lpszMenuName  = MapLS(wc32.lpszMenuName);  /* FIXME: leak */
+        wc->lpszMenuName  = MapLS((void *)wc32.lpszMenuName);  /* FIXME: leak */
     }
     return ret;
 }

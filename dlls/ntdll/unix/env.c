@@ -65,7 +65,6 @@ WOW_PEB *wow_peb = NULL;
 USHORT *uctable = NULL, *lctable = NULL;
 SIZE_T startup_info_size = 0;
 BOOL is_prefix_bootstrap = FALSE;
-BOOL wow64_using_32bit_prefix = FALSE;
 
 static const WCHAR bootstrapW[] = {'W','I','N','E','B','O','O','T','S','T','R','A','P','M','O','D','E'};
 
@@ -86,7 +85,7 @@ const WCHAR system_dir[] = {'\\','?','?','\\','C',':','\\','w','i','n','d','o','
 
 static CPTABLEINFO unix_cp = { CP_UTF8, 4, '?', 0xfffd, '?', '?' };
 
-static char *get_nls_file_path( ULONG type, ULONG id )
+static char *get_nls_file_path( UINT type, UINT id )
 {
     const char *dir = build_dir ? build_dir : data_dir;
     const char *name = NULL;
@@ -96,7 +95,7 @@ static char *get_nls_file_path( ULONG type, ULONG id )
     {
     case NLS_SECTION_SORTKEYS: name = "sortdefault"; break;
     case NLS_SECTION_CASEMAP:  name = "l_intl"; break;
-    case NLS_SECTION_CODEPAGE: name = tmp; sprintf( tmp, "c_%03u", id ); break;
+    case NLS_SECTION_CODEPAGE: name = tmp; snprintf( tmp, sizeof(tmp), "c_%03u", id ); break;
     case NLS_SECTION_NORMALIZE:
         switch (id)
         {
@@ -109,17 +108,19 @@ static char *get_nls_file_path( ULONG type, ULONG id )
         break;
     }
     if (!name) return NULL;
-    if (!(path = malloc( strlen(dir) + strlen(name) + 10 ))) return NULL;
-    sprintf( path, "%s/nls/%s.nls", dir, name );
+    if (asprintf( &path, "%s/nls/%s.nls", dir, name ) == -1) return NULL;
     return path;
 }
 
-static void *read_nls_file( ULONG type, ULONG id )
+static void *read_nls_file( const char *name )
 {
-    char *path = get_nls_file_path( type, id );
+    const char *dir = build_dir ? build_dir : data_dir;
+    char *path;
     struct stat st;
     void *data, *ret = NULL;
     int fd;
+
+    if (asprintf( &path, "%s/nls/%s", dir, name ) == -1) return NULL;
 
     if ((fd = open( path, O_RDONLY )) != -1)
     {
@@ -136,7 +137,7 @@ static void *read_nls_file( ULONG type, ULONG id )
         }
         close( fd );
     }
-    else ERR( "failed to load %u/%u\n", type, id );
+    else ERR( "failed to load %s\n", path );
     free( path );
     return ret;
 }
@@ -166,7 +167,7 @@ static NTSTATUS open_nls_data_file( const char *path, const WCHAR *sysdir, HANDL
     return status;
 }
 
-static NTSTATUS get_nls_section_name( ULONG type, ULONG id, WCHAR name[32] )
+static NTSTATUS get_nls_section_name( UINT type, UINT id, WCHAR name[32] )
 {
     char buffer[32];
 
@@ -181,10 +182,10 @@ static NTSTATUS get_nls_section_name( ULONG type, ULONG id, WCHAR name[32] )
         strcpy( buffer, "\\NLS\\NlsSectionLANG_INTL" );
         break;
     case NLS_SECTION_CODEPAGE:
-        sprintf( buffer, "\\NLS\\NlsSectionCP%03u", id);
+        snprintf( buffer, sizeof(buffer), "\\NLS\\NlsSectionCP%03u", id);
         break;
     case NLS_SECTION_NORMALIZE:
-        sprintf( buffer, "\\NLS\\NlsSectionNORM%08x", id);
+        snprintf( buffer, sizeof(buffer), "\\NLS\\NlsSectionNORM%08x", id);
         break;
     default:
         return STATUS_INVALID_PARAMETER_1;
@@ -202,7 +203,7 @@ static struct norm_table *nfc_table;
 
 static void init_unix_codepage(void)
 {
-    nfc_table = read_nls_file( NLS_SECTION_NORMALIZE, NormalizationC );
+    nfc_table = read_nls_file( "normnfc.nls" );
 }
 
 #elif defined(__ANDROID__)  /* Android always uses UTF-8 */
@@ -267,6 +268,7 @@ static const struct { const char *name; UINT cp; } charset_names[] =
     { "ISO88599", 28599 },
     { "KOI8R", 20866 },
     { "KOI8U", 21866 },
+    { "SJIS", 932 },
     { "TIS620", 28601 },
     { "UTF8", CP_UTF8 }
 };
@@ -298,8 +300,11 @@ static void init_unix_codepage(void)
         {
             if (charset_names[pos].cp != CP_UTF8)
             {
-                void *data = read_nls_file( NLS_SECTION_CODEPAGE, charset_names[pos].cp );
-                if (data) init_codepage_table( data, &unix_cp );
+                char buffer[16];
+                void *data;
+
+                snprintf( buffer, sizeof(buffer), "c_%03u.nls", charset_names[pos].cp );
+                if ((data = read_nls_file( buffer ))) init_codepage_table( data, &unix_cp );
             }
             return;
         }
@@ -347,6 +352,7 @@ static BOOL is_dynamic_env_var( const char *var )
             STARTS_WITH( var, "WINEHOMEDIR=" ) ||
             STARTS_WITH( var, "WINEBUILDDIR=" ) ||
             STARTS_WITH( var, "WINECONFIGDIR=" ) ||
+            STARTS_WITH( var, "WINELOADER=" ) ||
             STARTS_WITH( var, "WINEDLLDIR" ) ||
             STARTS_WITH( var, "WINEUNIXCP=" ) ||
             STARTS_WITH( var, "WINEUSERLOCALE=" ) ||
@@ -358,6 +364,13 @@ static BOOL is_dynamic_env_var( const char *var )
 
 /******************************************************************
  *      ntdll_umbstowcs  (ntdll.so)
+ *
+ * Convert a multi-byte string in the Unix code page to UTF-16. Returns the
+ * number of characters converted, which may be less than the entire source
+ * string. The destination string must not be NULL.
+ *
+ * The size of the output buffer, and the return value, are both given in
+ * characters, not bytes.
  */
 DWORD ntdll_umbstowcs( const char *src, DWORD srclen, WCHAR *dst, DWORD dstlen )
 {
@@ -375,6 +388,11 @@ DWORD ntdll_umbstowcs( const char *src, DWORD srclen, WCHAR *dst, DWORD dstlen )
 
 /******************************************************************
  *      ntdll_wcstoumbs  (ntdll.so)
+ *
+ * Convert a UTF-16 string to a multi-byte string in the Unix code page.
+ * The destination string must not be NULL.
+ *
+ * The size of the source string is given in characters, not bytes.
  */
 int ntdll_wcstoumbs( const WCHAR *src, DWORD srclen, char *dst, DWORD dstlen, BOOL strict )
 {
@@ -762,44 +780,14 @@ static BOOL unix_to_win_locale( const char *unix_name, char *win_name )
 }
 
 
-static LCID init_system_lcid( void *locale_ptr )
+static const NLS_LOCALE_DATA *get_win_locale( const NLS_LOCALE_HEADER *header, const char *win_name )
 {
-    struct
-    {
-        UINT ctypes;
-        UINT unknown1;
-        UINT unknown2;
-        UINT unknown3;
-        UINT locales;
-        UINT charmaps;
-        UINT geoids;
-        UINT scripts;
-    } *header = locale_ptr;
     WCHAR name[LOCALE_NAME_MAX_LENGTH];
-    const NLS_LOCALE_LCNAME_INDEX *lcnames;
-    const NLS_LOCALE_HEADER *locale_table;
-    const WCHAR *locale_strings;
-    int min, max;
+    const NLS_LOCALE_LCNAME_INDEX *entry;
 
-    ascii_to_unicode( name, system_locale, strlen(system_locale) + 1 );
-    locale_table = (const NLS_LOCALE_HEADER *)((char *)header + header->locales);
-    locale_strings = (const WCHAR *)((char *)locale_table + locale_table->strings_offset);
-    lcnames = (const NLS_LOCALE_LCNAME_INDEX *)((char *)locale_table + locale_table->lcnames_offset);
-    min = 0;
-    max = locale_table->nb_lcnames - 1;
-    while (min <= max)
-    {
-        int pos = (min + max) / 2;
-        int res = wcsicmp( name, locale_strings + lcnames[pos].name + 1 );
-        if (res < 0) max = pos - 1;
-        else if (res > 0) min = pos + 1;
-        else
-        {
-            ULONG offset = locale_table->locales_offset + lcnames[pos].idx * locale_table->locale_size;
-            return ((const NLS_LOCALE_DATA *)((const char *)locale_table + offset))->idefaultlanguage;
-        }
-    }
-    return MAKELANGID( LANG_ENGLISH, SUBLANG_DEFAULT );
+    ascii_to_unicode( name, win_name, strlen(win_name) + 1 );
+    if (!(entry = find_lcname_entry( header, name ))) return NULL;
+    return get_locale_data( header, entry->idx );
 }
 
 
@@ -808,6 +796,11 @@ static LCID init_system_lcid( void *locale_ptr )
  */
 static void init_locale(void)
 {
+    struct locale_nls_header *header;
+    const NLS_LOCALE_HEADER *locale_table;
+    const NLS_LOCALE_DATA *locale;
+    char *p;
+
     setlocale( LC_ALL, "" );
     if (!unix_to_win_locale( setlocale( LC_CTYPE, NULL ), system_locale )) system_locale[0] = 0;
     if (!unix_to_win_locale( setlocale( LC_MESSAGES, NULL ), user_locale )) user_locale[0] = 0;
@@ -815,9 +808,9 @@ static void init_locale(void)
 #ifdef __APPLE__
     if (!system_locale[0])
     {
-        CFLocaleRef locale = CFLocaleCopyCurrent();
-        CFStringRef lang = CFLocaleGetValue( locale, kCFLocaleLanguageCode );
-        CFStringRef country = CFLocaleGetValue( locale, kCFLocaleCountryCode );
+        CFLocaleRef mac_sys_locale = CFLocaleCopyCurrent();
+        CFStringRef lang = CFLocaleGetValue( mac_sys_locale, kCFLocaleLanguageCode );
+        CFStringRef country = CFLocaleGetValue( mac_sys_locale, kCFLocaleCountryCode );
         CFStringRef locale_string;
 
         if (country)
@@ -826,7 +819,7 @@ static void init_locale(void)
             locale_string = CFStringCreateCopy(NULL, lang);
 
         CFStringGetCString(locale_string, system_locale, sizeof(system_locale), kCFStringEncodingUTF8);
-        CFRelease(locale);
+        CFRelease(mac_sys_locale);
         CFRelease(locale_string);
     }
     if (!user_locale[0])
@@ -841,27 +834,57 @@ static void init_locale(void)
             {
                 CFStringRef lang = CFDictionaryGetValue( components, kCFLocaleLanguageCode );
                 CFStringRef country = CFDictionaryGetValue( components, kCFLocaleCountryCode );
-                CFLocaleRef locale = NULL;
+                CFStringRef script = CFDictionaryGetValue( components, kCFLocaleScriptCode );
+                CFLocaleRef mac_user_locale = NULL;
                 CFStringRef locale_string;
 
                 if (!country)
                 {
-                    locale = CFLocaleCopyCurrent();
-                    country = CFLocaleGetValue( locale, kCFLocaleCountryCode );
+                    mac_user_locale = CFLocaleCopyCurrent();
+                    country = CFLocaleGetValue( mac_user_locale, kCFLocaleCountryCode );
                 }
-                if (country)
+                if (country && script)
+                    locale_string = CFStringCreateWithFormat( NULL, NULL, CFSTR("%@-%@-%@"), lang, script, country );
+                else if (script)
+                    locale_string = CFStringCreateWithFormat( NULL, NULL, CFSTR("%@-%@"), lang, script );
+                else if (country)
                     locale_string = CFStringCreateWithFormat( NULL, NULL, CFSTR("%@-%@"), lang, country );
                 else
                     locale_string = CFStringCreateCopy( NULL, lang );
                 CFStringGetCString( locale_string, user_locale, sizeof(user_locale), kCFStringEncodingUTF8 );
                 CFRelease( locale_string );
-                if (locale) CFRelease( locale );
+                if (mac_user_locale) CFRelease( mac_user_locale );
                 CFRelease( components );
             }
         }
         if (preferred_langs) CFRelease( preferred_langs );
     }
 #endif
+
+    if ((header = read_nls_file( "locale.nls" )))
+    {
+        locale_table = (const NLS_LOCALE_HEADER *)((char *)header + header->locales);
+        while (!(locale = get_win_locale( locale_table, system_locale )))
+        {
+            if (!(p = strrchr( system_locale, '-' ))) break;
+            *p = 0;
+        }
+        if (locale && locale->idefaultlanguage != LOCALE_CUSTOM_UNSPECIFIED)
+            system_lcid = locale->idefaultlanguage;
+
+        while (!(locale = get_win_locale( locale_table, user_locale )))
+        {
+            if (!(p = strrchr( user_locale, '-' ))) break;
+            *p = 0;
+        }
+        if (locale) user_lcid = locale->idefaultlanguage;
+
+        free( header );
+    }
+    if (!system_lcid) system_lcid = MAKELANGID( LANG_ENGLISH, SUBLANG_DEFAULT );
+    if (!user_lcid) user_lcid = system_lcid;
+    user_ui_language = user_lcid;
+
     setlocale( LC_NUMERIC, "C" );  /* FIXME: oleaut32 depends on this */
 }
 
@@ -869,22 +892,18 @@ static void init_locale(void)
 /***********************************************************************
  *              init_environment
  */
-void init_environment( int argc, char *argv[], char *envp[] )
+void init_environment(void)
 {
     USHORT *case_table;
 
     init_unix_codepage();
     init_locale();
 
-    if ((case_table = read_nls_file( NLS_SECTION_CASEMAP, 0 )))
+    if ((case_table = read_nls_file( "l_intl.nls" )))
     {
         uctable = case_table + 2;
         lctable = case_table + case_table[1] + 2;
     }
-
-    main_argc = argc;
-    main_argv = argv;
-    main_envp = envp;
 }
 
 
@@ -913,7 +932,7 @@ static WCHAR *get_initial_environment( SIZE_T *pos, SIZE_T *size )
     *size = 1;
     for (e = main_envp; *e; e++) *size += strlen(*e) + 1;
 
-    if (!(env = malloc( *size * sizeof(WCHAR) ))) return NULL;
+    env = malloc( *size * sizeof(WCHAR) );
     ptr = env;
     end = env + *size - 1;
     for (e = main_envp; *e && ptr < end; e++)
@@ -1061,7 +1080,8 @@ static void add_system_dll_path_var( WCHAR **env, SIZE_T *pos, SIZE_T *size )
 static void add_dynamic_environment( WCHAR **env, SIZE_T *pos, SIZE_T *size )
 {
     const char *overrides = getenv( "WINEDLLOVERRIDES" );
-    DWORD i;
+    const char *wineloader = getenv( "WINELOADER" );
+    unsigned int i;
     char str[22];
 
     add_path_var( env, pos, size, "WINEDATADIR", data_dir );
@@ -1070,26 +1090,24 @@ static void add_dynamic_environment( WCHAR **env, SIZE_T *pos, SIZE_T *size )
     add_path_var( env, pos, size, "WINECONFIGDIR", config_dir );
     for (i = 0; dll_paths[i]; i++)
     {
-        sprintf( str, "WINEDLLDIR%u", i );
+        snprintf( str, sizeof(str), "WINEDLLDIR%u", i );
         add_path_var( env, pos, size, str, dll_paths[i] );
     }
-    sprintf( str, "WINEDLLDIR%u", i );
+    snprintf( str, sizeof(str), "WINEDLLDIR%u", i );
     append_envW( env, pos, size, str, NULL );
     add_system_dll_path_var( env, pos, size );
+    append_envA( env, pos, size, "WINELOADER", wineloader );
     append_envA( env, pos, size, "WINEUSERNAME", user_name );
     append_envA( env, pos, size, "WINEDLLOVERRIDES", overrides );
     if (unix_cp.CodePage != CP_UTF8)
     {
-        sprintf( str, "%u", unix_cp.CodePage );
+        snprintf( str, sizeof(str), "%u", unix_cp.CodePage );
         append_envA( env, pos, size, "WINEUNIXCP", str );
     }
     else append_envW( env, pos, size, "WINEUNIXCP", NULL );
     append_envA( env, pos, size, "WINEUSERLOCALE", user_locale );
     append_envA( env, pos, size, "SystemDrive", "C:" );
     append_envA( env, pos, size, "SystemRoot", "C:\\windows" );
-
-    /* CW HACK 20810: Set this environment variable so PE code can look for it. */
-    if (wow64_using_32bit_prefix) append_envA( env, pos, size, "WINEWOW6432BPREFIXMODE", "1" );
 }
 
 
@@ -1378,6 +1396,9 @@ static void get_initial_console( RTL_USER_PROCESS_PARAMETERS *params )
     wine_server_fd_to_handle( 1, GENERIC_WRITE|SYNCHRONIZE, OBJ_INHERIT, &params->hStdOutput );
     wine_server_fd_to_handle( 2, GENERIC_WRITE|SYNCHRONIZE, OBJ_INHERIT, &params->hStdError );
 
+    if (main_image_info.SubSystemType != IMAGE_SUBSYSTEM_WINDOWS_CUI)
+        return;
+
     /* mark tty handles for kernelbase, see init_console */
     if (params->hStdInput && isatty(0))
     {
@@ -1396,7 +1417,7 @@ static void get_initial_console( RTL_USER_PROCESS_PARAMETERS *params )
         params->hStdOutput = (HANDLE)((UINT_PTR)params->hStdOutput | 1);
         output_fd = 1;
     }
-    if (!params->ConsoleHandle && main_image_info.SubSystemType == IMAGE_SUBSYSTEM_WINDOWS_CUI)
+    if (!params->ConsoleHandle)
         params->ConsoleHandle = CONSOLE_HANDLE_SHELL_NO_WINDOW;
 
     if (output_fd != -1)
@@ -1556,7 +1577,7 @@ static WCHAR *build_command_line( WCHAR **wargv )
     *p = 0;
     if (p - ret >= 32767)
     {
-        ERR( "command line too long (%u)\n", (DWORD)(p - ret) );
+        ERR( "command line too long (%u)\n", (int)(p - ret) );
         NtTerminateProcess( GetCurrentProcess(), 1 );
     }
     return ret;
@@ -1582,7 +1603,7 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     UNICODE_STRING nameW;
     OBJECT_ATTRIBUTES attr;
     LARGE_INTEGER timeout;
-    NTSTATUS status;
+    unsigned int status;
     int count = 1;
 
     init_unicode_string( &nameW, eventW );
@@ -1695,7 +1716,7 @@ static inline void dup_unicode_string( const UNICODE_STRING *src, WCHAR **dst, U
     str->Length = src->Length;
     str->MaximumLength = src->MaximumLength;
     memcpy( *dst, src->Buffer, src->MaximumLength );
-    *dst += src->MaximumLength / sizeof(WCHAR);
+    *dst += (src->MaximumLength + 1) / sizeof(WCHAR);
 }
 
 
@@ -1791,7 +1812,7 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
                    + params->WindowTitle.MaximumLength
                    + params->Desktop.MaximumLength
                    + params->ShellInfo.MaximumLength
-                   + params->RuntimeInfo.MaximumLength
+                   + ((params->RuntimeInfo.MaximumLength + 1) & ~1)
                    + params->EnvironmentSize);
 
     status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&wow64_params, 0, &size,
@@ -1816,6 +1837,7 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
     wow64_params->dwFillAttribute = params->dwFillAttribute;
     wow64_params->dwFlags         = params->dwFlags;
     wow64_params->wShowWindow     = params->wShowWindow;
+    wow64_params->ProcessGroupId  = params->ProcessGroupId;
 
     dst = (WCHAR *)(wow64_params + 1);
     dup_unicode_string( &params->CurrentDirectory.DosPath, &dst, &wow64_params->CurrentDirectory.DosPath );
@@ -1850,15 +1872,24 @@ static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, void *module )
     peb->ImageSubSystemMinorVersion = main_image_info.MinorSubsystemVersion;
 
 #ifdef _WIN64
-    if (main_image_info.Machine != current_machine)
+    switch (main_image_info.Machine)
     {
+    case IMAGE_FILE_MACHINE_I386:
+    case IMAGE_FILE_MACHINE_ARMNT:
         NtCurrentTeb()->WowTebOffset = teb_offset;
         NtCurrentTeb()->Tib.ExceptionList = (void *)((char *)NtCurrentTeb() + teb_offset);
         wow_peb = (PEB32 *)((char *)peb + page_size);
-        set_thread_id( NtCurrentTeb(),  GetCurrentProcessId(), GetCurrentThreadId() );
+        set_thread_id( NtCurrentTeb(), GetCurrentProcessId(), GetCurrentThreadId() );
+        ERR( "starting %s in experimental wow64 mode\n", debugstr_us(&params->ImagePathName) );
+        break;
+    case IMAGE_FILE_MACHINE_AMD64:
+        if (main_image_info.Machine == current_machine) break;
+        ERR( "starting %s in experimental ARM64EC mode\n", debugstr_us(&params->ImagePathName) );
+        break;
     }
 #endif
 
+    virtual_set_large_address_space();
     load_global_options( &params->ImagePathName );
 
     if (wow_peb)
@@ -1921,11 +1952,18 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     add_registry_environment( &env, &env_pos, &env_size );
     env[env_pos++] = 0;
 
-    status = load_main_exe( NULL, main_argv[1], curdir, &image, module );
+    status = load_main_exe( NULL, main_argv[1], curdir, 0, &image, module );
     if (!status)
     {
+        char *loader;
+
         if (main_image_info.ImageCharacteristics & IMAGE_FILE_DLL) status = STATUS_INVALID_IMAGE_FORMAT;
-        if ((main_image_info.Machine != current_machine) && !needs_wow64()) status = STATUS_INVALID_IMAGE_FORMAT;
+        /* if we have to use a different loader, fall back to start.exe */
+        if ((loader = get_alternate_wineloader( main_image_info.Machine )))
+        {
+            free( loader );
+            status = STATUS_INVALID_IMAGE_FORMAT;
+        }
     }
 
     if (status)  /* try launching it through start.exe */
@@ -1958,6 +1996,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     params->Size            = size;
     params->Flags           = PROCESS_PARAMS_FLAG_NORMALIZED;
     params->wShowWindow     = 1; /* SW_SHOWNORMAL */
+    params->ProcessGroupId  = GetCurrentProcessId();
 
     params->CurrentDirectory.DosPath.Buffer = (WCHAR *)(params + 1);
     wcscpy( params->CurrentDirectory.DosPath.Buffer, get_dos_path( curdir ));
@@ -1990,10 +2029,11 @@ void init_startup_info(void)
 {
     WCHAR *src, *dst, *env, *image;
     void *module = NULL;
-    NTSTATUS status;
+    unsigned int status;
     SIZE_T size, info_size, env_size, env_pos;
     RTL_USER_PROCESS_PARAMETERS *params = NULL;
     startup_info_t *info;
+    USHORT machine;
 
     if (!startup_info_size)
     {
@@ -2008,6 +2048,7 @@ void init_startup_info(void)
     {
         wine_server_set_reply( req, info, startup_info_size );
         status = wine_server_call( req );
+        machine = reply->machine;
         info_size = reply->info_size;
         env_size = (wine_server_reply_size( reply ) - info_size) / sizeof(WCHAR);
     }
@@ -2054,6 +2095,7 @@ void init_startup_info(void)
     params->dwFillAttribute = info->attribute;
     params->dwFlags         = info->flags;
     params->wShowWindow     = info->show;
+    params->ProcessGroupId  = info->process_group_id;
 
     src = (WCHAR *)(info + 1);
     dst = (WCHAR *)(params + 1);
@@ -2086,9 +2128,9 @@ void init_startup_info(void)
     free( env );
     free( info );
 
-    status = load_main_exe( params->ImagePathName.Buffer, NULL,
-                            params->CommandLine.Buffer, &image, &module );
-    if (status)
+    status = load_main_exe( params->ImagePathName.Buffer, NULL, params->CommandLine.Buffer,
+                            machine, &image, &module );
+    if (!NT_SUCCESS(status))
     {
         MESSAGE( "wine: failed to start %s\n", debugstr_us(&params->ImagePathName) );
         NtTerminateProcess( GetCurrentProcess(), status );
@@ -2100,11 +2142,22 @@ void init_startup_info(void)
 }
 
 
+/* helper for create_startup_info */
+static BOOL is_console_handle( HANDLE handle )
+{
+    IO_STATUS_BLOCK io;
+    DWORD mode;
+
+    return NtDeviceIoControlFile( handle, NULL, NULL, NULL, &io, IOCTL_CONDRV_GET_MODE, NULL, 0,
+                                  &mode, sizeof(mode) ) == STATUS_SUCCESS;
+}
+
 /***********************************************************************
  *           create_startup_info
  */
-void *create_startup_info( const UNICODE_STRING *nt_image, const RTL_USER_PROCESS_PARAMETERS *params,
-                           DWORD *info_size )
+void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
+                           const RTL_USER_PROCESS_PARAMETERS *params,
+                           const pe_image_info_t *pe_info, DWORD *info_size )
 {
     startup_info_t *info;
     UNICODE_STRING dos_image = *nt_image;
@@ -2130,10 +2183,18 @@ void *create_startup_info( const UNICODE_STRING *nt_image, const RTL_USER_PROCES
 
     info->debug_flags   = params->DebugFlags;
     info->console_flags = params->ConsoleFlags;
-    info->console       = wine_server_obj_handle( params->ConsoleHandle );
-    info->hstdin        = wine_server_obj_handle( params->hStdInput );
-    info->hstdout       = wine_server_obj_handle( params->hStdOutput );
-    info->hstderr       = wine_server_obj_handle( params->hStdError );
+    if (pe_info->subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI)
+        info->console   = wine_server_obj_handle( params->ConsoleHandle );
+    if ((process_flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) ||
+        (pe_info->subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI && !(params->dwFlags & STARTF_USESTDHANDLES)))
+    {
+        if (pe_info->subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI || !is_console_handle( params->hStdInput ))
+            info->hstdin    = wine_server_obj_handle( params->hStdInput );
+        if (pe_info->subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI || !is_console_handle( params->hStdOutput ))
+            info->hstdout   = wine_server_obj_handle( params->hStdOutput );
+        if (pe_info->subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI || !is_console_handle( params->hStdError ))
+            info->hstderr   = wine_server_obj_handle( params->hStdError );
+    }
     info->x             = params->dwX;
     info->y             = params->dwY;
     info->xsize         = params->dwXSize;
@@ -2143,6 +2204,7 @@ void *create_startup_info( const UNICODE_STRING *nt_image, const RTL_USER_PROCES
     info->attribute     = params->dwFillAttribute;
     info->flags         = params->dwFlags;
     info->show          = params->wShowWindow;
+    info->process_group_id = params->ProcessGroupId;
 
     ptr = info + 1;
     info->curdir_len = append_string( &ptr, params, &params->CurrentDirectory.DosPath );
@@ -2208,9 +2270,7 @@ NTSTATUS WINAPI NtInitializeNlsFiles( void **ptr, LCID *lcid, LARGE_INTEGER *siz
     SIZE_T mapsize;
     NTSTATUS status;
 
-    if (!(path = malloc( strlen(dir) + sizeof("/nls/locale.nls") ))) return STATUS_NO_MEMORY;
-    strcpy( path, dir );
-    strcat( path, "/nls/locale.nls" );
+    if (asprintf( &path, "%s/nls/locale.nls", dir ) == -1) return STATUS_NO_MEMORY;
     status = open_nls_data_file( path, system_dir, &file );
     free( path );
     if (!status)
@@ -2223,7 +2283,6 @@ NTSTATUS WINAPI NtInitializeNlsFiles( void **ptr, LCID *lcid, LARGE_INTEGER *siz
         status = map_section( handle, ptr, &mapsize, PAGE_READONLY );
         NtClose( handle );
     }
-    if (!status && !system_lcid) system_lcid = init_system_lcid( *ptr );
     *lcid = system_lcid;
     return status;
 }
@@ -2386,4 +2445,25 @@ ULONG WINAPI RtlNtStatusToDosError( NTSTATUS status )
         return LOWORD( status );
 
     return map_status( status );
+}
+
+/**********************************************************************
+ *      RtlGetLastWin32Error  (ntdll.so)
+ */
+DWORD WINAPI RtlGetLastWin32Error(void)
+{
+    return NtCurrentTeb()->LastErrorValue;
+}
+
+/**********************************************************************
+ *      RtlSetLastWin32Error  (ntdll.so)
+ */
+void WINAPI RtlSetLastWin32Error( DWORD err )
+{
+    TEB *teb = NtCurrentTeb();
+#ifdef _WIN64
+    WOW_TEB *wow_teb = get_wow_teb( teb );
+    if (wow_teb) wow_teb->LastErrorValue = err;
+#endif
+    teb->LastErrorValue = err;
 }

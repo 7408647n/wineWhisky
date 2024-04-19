@@ -19,6 +19,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#if 0
+#pragma makedep unix
+#endif
+
 #include "config.h"
 
 #include <assert.h>
@@ -42,8 +46,6 @@
 # endif
 #endif
 
-#include "windef.h"
-#include "winbase.h"
 #include "x11drv.h"
 #include "winternl.h"
 #include "wine/debug.h"
@@ -752,7 +754,7 @@ void execute_rop( X11DRV_PDEVICE *physdev, Pixmap src_pixmap, GC gc, const RECT 
 /***********************************************************************
  *           X11DRV_PatBlt
  */
-BOOL CDECL X11DRV_PatBlt( PHYSDEV dev, struct bitblt_coords *dst, DWORD rop )
+BOOL X11DRV_PatBlt( PHYSDEV dev, struct bitblt_coords *dst, DWORD rop )
 {
     X11DRV_PDEVICE *physDev = get_x11drv_dev( dev );
     BOOL usePat = (((rop >> 4) & 0x0f0000) != (rop & 0x0f0000));
@@ -804,8 +806,8 @@ BOOL CDECL X11DRV_PatBlt( PHYSDEV dev, struct bitblt_coords *dst, DWORD rop )
 /***********************************************************************
  *           X11DRV_StretchBlt
  */
-BOOL CDECL X11DRV_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
-                              PHYSDEV src_dev, struct bitblt_coords *src, DWORD rop )
+BOOL X11DRV_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
+                        PHYSDEV src_dev, struct bitblt_coords *src, DWORD rop )
 {
     X11DRV_PDEVICE *physDevDst = get_x11drv_dev( dst_dev );
     X11DRV_PDEVICE *physDevSrc = get_x11drv_dev( src_dev );
@@ -924,12 +926,12 @@ BOOL CDECL X11DRV_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
 }
 
 
-static void CDECL free_heap_bits( struct gdi_image_bits *bits )
+static void free_heap_bits( struct gdi_image_bits *bits )
 {
-    HeapFree( GetProcessHeap(), 0, bits->ptr );
+    free( bits->ptr );
 }
 
-static void CDECL free_ximage_bits( struct gdi_image_bits *bits )
+static void free_ximage_bits( struct gdi_image_bits *bits )
 {
     XFree( bits->ptr );
 }
@@ -1188,7 +1190,7 @@ DWORD copy_image_bits( BITMAPINFO *info, BOOL is_r8g8b8, XImage *image,
     {
         width_bytes = (width_bytes + 3) & ~3;
         info->bmiHeader.biSizeImage = height * width_bytes;
-        if (!(dst_bits->ptr = HeapAlloc( GetProcessHeap(), 0, info->bmiHeader.biSizeImage )))
+        if (!(dst_bits->ptr = malloc( info->bmiHeader.biSizeImage )))
             return ERROR_OUTOFMEMORY;
         dst_bits->is_copy = TRUE;
         dst_bits->free = free_heap_bits;
@@ -1218,9 +1220,9 @@ DWORD copy_image_bits( BITMAPINFO *info, BOOL is_r8g8b8, XImage *image,
 /***********************************************************************
  *           X11DRV_PutImage
  */
-DWORD CDECL X11DRV_PutImage( PHYSDEV dev, HRGN clip, BITMAPINFO *info,
-                             const struct gdi_image_bits *bits, struct bitblt_coords *src,
-                             struct bitblt_coords *dst, DWORD rop )
+DWORD X11DRV_PutImage( PHYSDEV dev, HRGN clip, BITMAPINFO *info,
+                       const struct gdi_image_bits *bits, struct bitblt_coords *src,
+                       struct bitblt_coords *dst, DWORD rop )
 {
     X11DRV_PDEVICE *physdev = get_x11drv_dev( dev );
     DWORD ret;
@@ -1310,8 +1312,8 @@ update_format:
 /***********************************************************************
  *           X11DRV_GetImage
  */
-DWORD CDECL X11DRV_GetImage( PHYSDEV dev, BITMAPINFO *info,
-                             struct gdi_image_bits *bits, struct bitblt_coords *src )
+DWORD X11DRV_GetImage( PHYSDEV dev, BITMAPINFO *info,
+                       struct gdi_image_bits *bits, struct bitblt_coords *src )
 {
     X11DRV_PDEVICE *physdev = get_x11drv_dev( dev );
     DWORD ret = ERROR_SUCCESS;
@@ -1495,7 +1497,9 @@ Pixmap create_pixmap_from_image( HDC hdc, const XVisualInfo *vis, const BITMAPIN
         {
             if (src_info->bmiHeader.biBitCount == 1 && !src_info->bmiHeader.biClrUsed)
                 memcpy( src_info->bmiColors, default_colortable, sizeof(default_colortable) );
-            SetDIBits( hdc, dib, 0, abs(info->bmiHeader.biHeight), bits->ptr, src_info, coloruse );
+            NtGdiSetDIBitsToDeviceInternal( hdc, 0, 0, 0, 0, 0, 0, 0,
+                                            abs(info->bmiHeader.biHeight), bits->ptr, src_info, coloruse,
+                                            0, 0, FALSE, dib ); /* SetDIBits */
             dst_bits.free = NULL;
             dst_bits.is_copy = TRUE;
             err = put_pixmap_image( pixmap, vis, dst_info, &dst_bits );
@@ -1748,7 +1752,7 @@ static void update_surface_region( struct x11drv_window_surface *surface )
     {
         XShapeCombineRectangles( gdi_display, surface->window, ShapeBounding, 0, 0,
                                  (XRectangle *)data->Buffer, data->rdh.nCount, ShapeSet, YXBanded );
-        HeapFree( GetProcessHeap(), 0, data );
+        free( data );
     }
 
     NtGdiDeleteObjectApp( rgn );
@@ -1890,7 +1894,7 @@ static void x11drv_surface_set_region( struct window_surface *window_surface, HR
         {
             XSetClipRectangles( gdi_display, surface->gc, 0, 0,
                                 (XRectangle *)data->Buffer, data->rdh.nCount, YXBanded );
-            HeapFree( GetProcessHeap(), 0, data );
+            free( data );
         }
     }
     window_surface->funcs->unlock( window_surface );
@@ -1912,7 +1916,7 @@ static void x11drv_surface_flush( struct window_surface *window_surface )
     coords.width  = surface->header.rect.right - surface->header.rect.left;
     coords.height = surface->header.rect.bottom - surface->header.rect.top;
     SetRect( &coords.visrect, 0, 0, coords.width, coords.height );
-    if (IntersectRect( &coords.visrect, &coords.visrect, &surface->bounds ))
+    if (intersect_rect( &coords.visrect, &coords.visrect, &surface->bounds ))
     {
         TRACE( "flushing %p %dx%d bounds %s bits %p\n",
                surface, coords.width, coords.height,
@@ -1974,7 +1978,7 @@ static void x11drv_surface_destroy( struct window_surface *window_surface )
     if (surface->gc) XFreeGC( gdi_display, surface->gc );
     if (surface->image)
     {
-        if (surface->image->data != surface->bits) HeapFree( GetProcessHeap(), 0, surface->bits );
+        if (surface->image->data != surface->bits) free( surface->bits );
 #ifdef HAVE_LIBXXSHM
         if (surface->shminfo.shmid != -1)
         {
@@ -1983,12 +1987,12 @@ static void x11drv_surface_destroy( struct window_surface *window_surface )
         }
         else
 #endif
-        HeapFree( GetProcessHeap(), 0, surface->image->data );
+        free( surface->image->data );
         surface->image->data = NULL;
         XDestroyImage( surface->image );
     }
     if (surface->region) NtGdiDeleteObjectApp( surface->region );
-    HeapFree( GetProcessHeap(), 0, surface );
+    free( surface );
 }
 
 static const struct window_surface_funcs x11drv_surface_funcs =
@@ -2013,8 +2017,7 @@ struct window_surface *create_surface( Window window, const XVisualInfo *vis, co
     int width = rect->right - rect->left, height = rect->bottom - rect->top;
     int colors = format->bits_per_pixel <= 8 ? 1 << format->bits_per_pixel : 3;
 
-    surface = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY,
-                         FIELD_OFFSET( struct x11drv_window_surface, info.bmiColors[colors] ));
+    surface = calloc( 1, FIELD_OFFSET( struct x11drv_window_surface, info.bmiColors[colors] ));
     if (!surface) return NULL;
     surface->info.bmiHeader.biSize        = sizeof(surface->info.bmiHeader);
     surface->info.bmiHeader.biWidth       = width;
@@ -2042,7 +2045,7 @@ struct window_surface *create_surface( Window window, const XVisualInfo *vis, co
         surface->image = XCreateImage( gdi_display, vis->visual, vis->depth, ZPixmap, 0, NULL,
                                        width, height, 32, 0 );
         if (!surface->image) goto failed;
-        surface->image->data = HeapAlloc( GetProcessHeap(), 0, surface->info.bmiHeader.biSizeImage );
+        surface->image->data = malloc( surface->info.bmiHeader.biSizeImage );
         if (!surface->image->data) goto failed;
     }
 
@@ -2056,8 +2059,7 @@ struct window_surface *create_surface( Window window, const XVisualInfo *vis, co
     if (surface->byteswap || format->bits_per_pixel == 4 || format->bits_per_pixel == 8)
     {
         /* allocate separate surface bits if byte swapping or palette mapping is required */
-        if (!(surface->bits  = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY,
-                                          surface->info.bmiHeader.biSizeImage )))
+        if (!(surface->bits  = calloc( 1, surface->info.bmiHeader.biSizeImage )))
             goto failed;
     }
     else surface->bits = surface->image->data;

@@ -522,6 +522,21 @@ obj_handle_t find_inherited_handle( struct process *process, const struct object
     return 0;
 }
 
+/* return number of open handles to the object in the process */
+unsigned int get_obj_handle_count( struct process *process, const struct object *obj )
+{
+    struct handle_table *table = process->handles;
+    struct handle_entry *ptr;
+    unsigned int count = 0;
+    int i;
+
+    if (!table) return 0;
+
+    for (i = 0, ptr = table->entries; i <= table->last; i++, ptr++)
+        if (ptr->ptr == obj) ++count;
+    return count;
+}
+
 /* get/set the handle reserved flags */
 /* return the old flags (or -1 on error) */
 static int set_handle_flags( struct process *process, obj_handle_t handle, int mask, int flags )
@@ -553,7 +568,7 @@ obj_handle_t duplicate_handle( struct process *src, obj_handle_t src_handle, str
 {
     obj_handle_t res;
     struct handle_entry *entry;
-    unsigned int src_access;
+    unsigned int src_access, src_flags;
     struct object *obj = get_handle_obj( src, src_handle, 0, NULL );
 
     if (!obj) return 0;
@@ -561,6 +576,7 @@ obj_handle_t duplicate_handle( struct process *src, obj_handle_t src_handle, str
         src_access = entry->access;
     else  /* pseudo-handle, give it full access */
         src_access = obj->ops->map_access( obj, GENERIC_ALL );
+    src_flags = (src_access & RESERVED_ALL) >> RESERVED_SHIFT;
     src_access &= ~RESERVED_ALL;
 
     if (options & DUPLICATE_SAME_ACCESS)
@@ -597,6 +613,9 @@ obj_handle_t duplicate_handle( struct process *src, obj_handle_t src_handle, str
         else
             res = alloc_handle_entry( dst, obj, access, attr );
     }
+
+    if (res && (options & DUPLICATE_SAME_ATTRIBUTES))
+        set_handle_flags( dst, res, ~0u, src_flags );
 
     release_object( obj );
     return res;
@@ -868,13 +887,19 @@ DECL_HANDLER(get_system_handles)
     }
 }
 
-DECL_HANDLER(make_temporary)
+DECL_HANDLER(set_object_permanence)
 {
+    const unsigned int access = req->permanent ? 0 : DELETE;
     struct object *obj;
 
-    if (!(obj = get_handle_obj( current->process, req->handle, 0, NULL ))) return;
+    if (!(obj = get_handle_obj( current->process, req->handle, access, NULL ))) return;
 
-    if (obj->is_permanent)
+    if (req->permanent && !obj->is_permanent)
+    {
+        grab_object( obj );
+        make_object_permanent( obj );
+    }
+    else if (!req->permanent && obj->is_permanent)
     {
         make_object_temporary( obj );
         release_object( obj );

@@ -29,7 +29,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
-#ifdef HAVE_SECURITY_SECURITY_H
+#ifdef __APPLE__
 #include <Security/Security.h>
 #endif
 #ifdef SONAME_LIBGNUTLS
@@ -625,7 +625,7 @@ static void load_root_certs(void)
 {
     unsigned int i;
 
-#ifdef HAVE_SECURITY_SECURITY_H
+#ifdef __APPLE__
     const SecTrustSettingsDomain domains[] = {
         kSecTrustSettingsDomainSystem,
         kSecTrustSettingsDomainAdmin,
@@ -694,6 +694,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     close_cert_store,
     enum_root_certs,
 };
+
+C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );
 
 #ifdef _WIN64
 
@@ -795,5 +797,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     close_cert_store,
     wow64_enum_root_certs,
 };
+
+C_ASSERT( ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count );
 
 #endif  /* _WIN64 */

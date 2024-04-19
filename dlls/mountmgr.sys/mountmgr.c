@@ -21,8 +21,6 @@
 #include <stdarg.h>
 #include <stdlib.h>
 
-#define NONAMELESSUNION
-
 #include "mountmgr.h"
 #include "winreg.h"
 #include "unixlib.h"
@@ -46,13 +44,11 @@ struct mount_point
 static struct list mount_points_list = LIST_INIT(mount_points_list);
 static HKEY mount_key;
 
-unixlib_handle_t mountmgr_handle = 0;
-
 void set_mount_point_id( struct mount_point *mount, const void *id, unsigned int id_len )
 {
-    RtlFreeHeap( GetProcessHeap(), 0, mount->id );
+    free( mount->id );
     mount->id_len = max( MIN_ID_LEN, id_len );
-    if ((mount->id = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, mount->id_len )))
+    if ((mount->id = calloc( mount->id_len, 1 )))
     {
         memcpy( mount->id, id, id_len );
         RegSetValueExW( mount_key, mount->link.Buffer, 0, REG_BINARY, mount->id, mount->id_len );
@@ -67,7 +63,7 @@ static struct mount_point *add_mount_point( DEVICE_OBJECT *device, UNICODE_STRIN
     WCHAR *str;
     UINT len = (lstrlenW(link) + 1) * sizeof(WCHAR) + device_name->Length + sizeof(WCHAR);
 
-    if (!(mount = RtlAllocateHeap( GetProcessHeap(), 0, sizeof(*mount) + len ))) return NULL;
+    if (!(mount = malloc( sizeof(*mount) + len ))) return NULL;
 
     str = (WCHAR *)(mount + 1);
     lstrcpyW( str, link );
@@ -118,8 +114,8 @@ void delete_mount_point( struct mount_point *mount )
     list_remove( &mount->entry );
     RegDeleteValueW( mount_key, mount->link.Buffer );
     IoDeleteSymbolicLink( &mount->link );
-    RtlFreeHeap( GetProcessHeap(), 0, mount->id );
-    RtlFreeHeap( GetProcessHeap(), 0, mount );
+    free( mount->id );
+    free( mount );
 }
 
 /* check if a given mount point matches the requested specs */
@@ -188,7 +184,7 @@ static NTSTATUS query_mount_points( void *buff, SIZE_T insize,
         return STATUS_BUFFER_OVERFLOW;
     }
 
-    input = HeapAlloc( GetProcessHeap(), 0, insize );
+    input = malloc( insize );
     if (!input)
         return STATUS_NO_MEMORY;
     memcpy( input, buff, insize );
@@ -219,7 +215,7 @@ static NTSTATUS query_mount_points( void *buff, SIZE_T insize,
     }
     info->Size = pos;
     iosb->Information = pos;
-    HeapFree( GetProcessHeap(), 0, input );
+    free( input );
     return STATUS_SUCCESS;
 }
 
@@ -300,7 +296,7 @@ static NTSTATUS define_shell_folder( const void *in_buff, SIZE_T insize )
 
     for (;;)
     {
-        if (!(buffer = HeapAlloc( GetProcessHeap(), 0, size )))
+        if (!(buffer = malloc( size )))
         {
             status = STATUS_NO_MEMORY;
             goto done;
@@ -309,12 +305,12 @@ static NTSTATUS define_shell_folder( const void *in_buff, SIZE_T insize )
         if (status == STATUS_NO_SUCH_FILE) status = STATUS_SUCCESS;
         if (status == STATUS_SUCCESS) break;
         if (status != STATUS_BUFFER_TOO_SMALL) goto done;
-        HeapFree( GetProcessHeap(), 0, buffer );
+        free( buffer );
     }
 
     if (input->create_backup)
     {
-        if (!(backup = HeapAlloc( GetProcessHeap(), 0, strlen(buffer) + sizeof(".backup" ) )))
+        if (!(backup = malloc( strlen(buffer) + sizeof(".backup" ) )))
         {
             status = STATUS_NO_MEMORY;
             goto done;
@@ -329,8 +325,8 @@ static NTSTATUS define_shell_folder( const void *in_buff, SIZE_T insize )
     status = MOUNTMGR_CALL( set_shell_folder, &params );
 
 done:
-    HeapFree( GetProcessHeap(), 0, buffer );
-    HeapFree( GetProcessHeap(), 0, backup );
+    free( buffer );
+    free( backup );
     return status;
 }
 
@@ -350,7 +346,7 @@ static NTSTATUS query_shell_folder( void *buff, SIZE_T insize, SIZE_T outsize, I
 
     for (;;)
     {
-        if (!(buffer = HeapAlloc( GetProcessHeap(), 0, size ))) return STATUS_NO_MEMORY;
+        if (!(buffer = malloc( size ))) return STATUS_NO_MEMORY;
         status = wine_nt_to_unix_file_name( &attr, buffer, &size, FILE_OPEN );
         if (!status)
         {
@@ -360,10 +356,10 @@ static NTSTATUS query_shell_folder( void *buff, SIZE_T insize, SIZE_T outsize, I
             break;
         }
         if (status != STATUS_BUFFER_TOO_SMALL) break;
-        HeapFree( GetProcessHeap(), 0, buffer );
+        free( buffer );
     }
 
-    HeapFree( GetProcessHeap(), 0, buffer );
+    free( buffer );
     return status;
 }
 
@@ -380,20 +376,20 @@ static void WINAPI query_dhcp_request_params( TP_CALLBACK_INSTANCE *instance, vo
     /* sanity checks */
     if (FIELD_OFFSET(struct mountmgr_dhcp_request_params, params[query->count]) > insize)
     {
-        irp->IoStatus.u.Status = STATUS_INVALID_PARAMETER;
+        irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
         goto err;
     }
 
     for (i = 0; i < query->count; i++)
         if (query->params[i].offset + query->params[i].size > insize)
         {
-            irp->IoStatus.u.Status = STATUS_INVALID_PARAMETER;
+            irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
             goto err;
         }
 
     if (!memchr( query->unix_name, 0, sizeof(query->unix_name) ))
     {
-        irp->IoStatus.u.Status = STATUS_INVALID_PARAMETER;
+        irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
         goto err;
     }
 
@@ -409,11 +405,11 @@ static void WINAPI query_dhcp_request_params( TP_CALLBACK_INSTANCE *instance, vo
         {
             if (offset >= sizeof(query->size)) query->size = offset;
             offset = sizeof(query->size);
-            irp->IoStatus.u.Status = STATUS_BUFFER_OVERFLOW;
+            irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
             goto err;
         }
     }
-    irp->IoStatus.u.Status = STATUS_SUCCESS;
+    irp->IoStatus.Status = STATUS_SUCCESS;
 
 err:
     irp->IoStatus.Information = offset;
@@ -432,14 +428,15 @@ static void WINAPI query_symbol_file_callback( TP_CALLBACK_INSTANCE *instance, v
     NTSTATUS status = MOUNTMGR_CALL( query_symbol_file, &params );
 
     irp->IoStatus.Information = info;
-    irp->IoStatus.u.Status = status;
+    irp->IoStatus.Status = status;
     IoCompleteRequest( irp, IO_NO_INCREMENT );
 }
 
-static void device_op( void )
+/* NT APC called from Unix side to add/remove devices */
+static void CALLBACK device_op( ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3 )
 {
     struct device_info info;
-    struct dequeue_device_op_params params = { &info };
+    struct dequeue_device_op_params params = { arg1, &info };
 
     if (MOUNTMGR_CALL( dequeue_device_op, &params )) return;
 
@@ -529,7 +526,7 @@ static NTSTATUS WINAPI mountmgr_ioctl( DEVICE_OBJECT *device, IRP *irp )
         }
 
         if (TrySubmitThreadpoolCallback( query_dhcp_request_params, irp, NULL ))
-            return (irp->IoStatus.u.Status = STATUS_PENDING);
+            return (irp->IoStatus.Status = STATUS_PENDING);
         status = STATUS_NO_MEMORY;
         break;
     case IOCTL_MOUNTMGR_QUERY_SYMBOL_FILE:
@@ -539,7 +536,7 @@ static NTSTATUS WINAPI mountmgr_ioctl( DEVICE_OBJECT *device, IRP *irp )
             break;
         }
         if (TrySubmitThreadpoolCallback( query_symbol_file_callback, irp, NULL ))
-            return (irp->IoStatus.u.Status = STATUS_PENDING);
+            return (irp->IoStatus.Status = STATUS_PENDING);
         status = STATUS_NO_MEMORY;
         break;
     case IOCTL_MOUNTMGR_READ_CREDENTIAL:
@@ -595,20 +592,21 @@ static NTSTATUS WINAPI mountmgr_ioctl( DEVICE_OBJECT *device, IRP *irp )
         status = STATUS_NOT_SUPPORTED;
         break;
     }
-    irp->IoStatus.u.Status = status;
+    irp->IoStatus.Status = status;
     IoCompleteRequest( irp, IO_NO_INCREMENT );
     return status;
 }
 
 static DWORD WINAPI device_op_thread( void *arg )
 {
-    for (;;) device_op();
+    for (;;) SleepEx( INFINITE, TRUE );  /* wait for APCs */
     return 0;
 }
 
 static DWORD WINAPI run_loop_thread( void *arg )
 {
-    return MOUNTMGR_CALL( run_loop, NULL );
+    struct run_loop_params params = {.op_thread = arg, .op_apc = device_op};
+    return MOUNTMGR_CALL( run_loop, &params );
 }
 
 
@@ -618,8 +616,11 @@ NTSTATUS WINAPI DriverEntry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
 #ifdef _WIN64
     HKEY wow64_ports_key = NULL;
 #endif
-    void *instance;
-    UNICODE_STRING nameW, linkW;
+    UNICODE_STRING device_mount_point_manager = RTL_CONSTANT_STRING( L"\\Device\\MountPointManager" );
+    UNICODE_STRING object_mount_point_manager = RTL_CONSTANT_STRING( L"\\??\\MountPointManager" );
+    UNICODE_STRING driver_harddisk = RTL_CONSTANT_STRING( L"\\Driver\\Harddisk" );
+    UNICODE_STRING driver_serial = RTL_CONSTANT_STRING( L"\\Driver\\Serial" );
+    UNICODE_STRING driver_parallel = RTL_CONSTANT_STRING( L"\\Driver\\Parallel" );
     DEVICE_OBJECT *device;
     HKEY devicemap_key;
     NTSTATUS status;
@@ -627,17 +628,13 @@ NTSTATUS WINAPI DriverEntry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
 
     TRACE( "%s\n", debugstr_w(path->Buffer) );
 
-    RtlPcToFileHeader( DriverEntry, &instance );
-    status = NtQueryVirtualMemory( GetCurrentProcess(), instance, MemoryWineUnixFuncs,
-                                   &mountmgr_handle, sizeof(mountmgr_handle), NULL );
+    status = __wine_init_unix_call();
     if (status) return status;
 
     driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = mountmgr_ioctl;
 
-    RtlInitUnicodeString( &nameW, L"\\Device\\MountPointManager" );
-    RtlInitUnicodeString( &linkW, L"\\??\\MountPointManager" );
-    if (!(status = IoCreateDevice( driver, 0, &nameW, 0, 0, FALSE, &device )))
-        status = IoCreateSymbolicLink( &linkW, &nameW );
+    if (!(status = IoCreateDevice( driver, 0, &device_mount_point_manager, 0, 0, FALSE, &device )))
+        status = IoCreateSymbolicLink( &object_mount_point_manager, &device_mount_point_manager );
     if (status)
     {
         FIXME( "failed to create device error %lx\n", status );
@@ -651,8 +648,7 @@ NTSTATUS WINAPI DriverEntry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
                           KEY_ALL_ACCESS, NULL, &devicemap_key, NULL ))
         RegCloseKey( devicemap_key );
 
-    RtlInitUnicodeString( &nameW, L"\\Driver\\Harddisk" );
-    status = IoCreateDriver( &nameW, harddisk_driver_entry );
+    status = IoCreateDriver( &driver_harddisk, harddisk_driver_entry );
 
     thread = CreateThread( NULL, 0, device_op_thread, NULL, 0, NULL );
     CloseHandle( CreateThread( NULL, 0, run_loop_thread, thread, 0, NULL ));
@@ -667,11 +663,8 @@ NTSTATUS WINAPI DriverEntry( DRIVER_OBJECT *driver, UNICODE_STRING *path )
     RegCloseKey( wow64_ports_key );
 #endif
 
-    RtlInitUnicodeString( &nameW, L"\\Driver\\Serial" );
-    IoCreateDriver( &nameW, serial_driver_entry );
-
-    RtlInitUnicodeString( &nameW, L"\\Driver\\Parallel" );
-    IoCreateDriver( &nameW, parallel_driver_entry );
+    IoCreateDriver( &driver_serial, serial_driver_entry );
+    IoCreateDriver( &driver_parallel, parallel_driver_entry );
 
     return status;
 }

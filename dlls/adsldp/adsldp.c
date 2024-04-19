@@ -21,8 +21,6 @@
 #include <stdarg.h>
 
 #define COBJMACROS
-#define NONAMELESSUNION
-
 #include "windef.h"
 #include "winbase.h"
 #include "initguid.h"
@@ -99,7 +97,7 @@ static ULONG WINAPI ldap_Release(IParseDisplayName *iface)
     if (!ref)
     {
         TRACE("destroying %p\n", iface);
-        heap_free(ldap);
+        free(ldap);
     }
 
     return ref;
@@ -147,7 +145,7 @@ static HRESULT LDAP_create(REFIID riid, void **obj)
     LDAP_PARSE *ldap;
     HRESULT hr;
 
-    ldap = heap_alloc(sizeof(*ldap));
+    ldap = malloc(sizeof(*ldap));
     if (!ldap) return E_OUTOFMEMORY;
 
     ldap->IParseDisplayName_iface.lpVtbl = &LDAP_PARSE_vtbl;
@@ -204,7 +202,7 @@ static ULONG WINAPI sysinfo_Release(IADsADSystemInfo *iface)
     if (!ref)
     {
         TRACE("destroying %p\n", iface);
-        heap_free(sysinfo);
+        free(sysinfo);
     }
 
     return ref;
@@ -363,7 +361,7 @@ static HRESULT ADSystemInfo_create(REFIID riid, void **obj)
     AD_sysinfo *sysinfo;
     HRESULT hr;
 
-    sysinfo = heap_alloc(sizeof(*sysinfo));
+    sysinfo = malloc(sizeof(*sysinfo));
     if (!sysinfo) return E_OUTOFMEMORY;
 
     sysinfo->IADsADSystemInfo_iface.lpVtbl = &IADsADSystemInfo_vtbl;
@@ -400,6 +398,7 @@ typedef struct
     {
         ADS_SCOPEENUM scope;
         int pagesize;
+        int size_limit;
         BOOL cache_results;
         BOOL attribtypes_only;
         BOOL tombstone;
@@ -483,7 +482,7 @@ static void free_attributes(LDAP_namespace *ldap)
         ldap_value_freeW(ldap->attrs[i].values);
     }
 
-    heap_free(ldap->attrs);
+    free(ldap->attrs);
     ldap->attrs = NULL;
     ldap->attrs_count = 0;
 }
@@ -501,7 +500,7 @@ static ULONG WINAPI ldapns_Release(IADs *iface)
         SysFreeString(ldap->object);
         free_attributes(ldap);
         free_attribute_types(ldap->at, ldap->at_single_count + ldap->at_multiple_count);
-        heap_free(ldap);
+        free(ldap);
     }
 
     return ref;
@@ -692,13 +691,13 @@ static HRESULT add_attribute(LDAP_namespace *ldap, WCHAR *name, WCHAR **values)
 
     if (!ldap->attrs)
     {
-        ldap->attrs = heap_alloc(256 * sizeof(ldap->attrs[0]));
+        ldap->attrs = malloc(256 * sizeof(ldap->attrs[0]));
         if (!ldap->attrs) return E_OUTOFMEMORY;
         ldap->attrs_count_allocated = 256;
     }
     else if (ldap->attrs_count_allocated < ldap->attrs_count + 1)
     {
-        new_attrs = heap_realloc(ldap->attrs, (ldap->attrs_count_allocated * 2) * sizeof(*new_attrs));
+        new_attrs = realloc(ldap->attrs, (ldap->attrs_count_allocated * 2) * sizeof(*new_attrs));
         if (!new_attrs) return E_OUTOFMEMORY;
 
         ldap->attrs_count_allocated *= 2;
@@ -742,7 +741,7 @@ static HRESULT WINAPI ldapns_GetInfoEx(IADs *iface, VARIANT prop, LONG reserved)
     count = sa->rgsabound[0].cElements;
     if (count)
     {
-        props = heap_alloc((count + 1) * sizeof(props[0]));
+        props = malloc((count + 1) * sizeof(props[0]));
         if (!props)
         {
             hr = E_OUTOFMEMORY;
@@ -797,7 +796,7 @@ static HRESULT WINAPI ldapns_GetInfoEx(IADs *iface, VARIANT prop, LONG reserved)
 
 exit:
     if (res) ldap_msgfree(res);
-    heap_free(props);
+    free(props);
     SafeArrayUnaccessData(sa);
     return hr;
 }
@@ -1154,13 +1153,13 @@ static HRESULT WINAPI search_SetSearchPreference(IDirectorySearch *iface, PADS_S
                 break;
             }
 
-            switch (prefs[i].vValue.u.Integer)
+            switch (prefs[i].vValue.Integer)
             {
             case ADS_SCOPE_BASE:
             case ADS_SCOPE_ONELEVEL:
             case ADS_SCOPE_SUBTREE:
-                TRACE("SEARCH_SCOPE: %ld\n", prefs[i].vValue.u.Integer);
-                ldap->search.scope = prefs[i].vValue.u.Integer;
+                TRACE("SEARCH_SCOPE: %ld\n", prefs[i].vValue.Integer);
+                ldap->search.scope = prefs[i].vValue.Integer;
                 prefs[i].dwStatus = ADS_STATUS_S_OK;
                 break;
 
@@ -1185,8 +1184,8 @@ static HRESULT WINAPI search_SetSearchPreference(IDirectorySearch *iface, PADS_S
                 break;
             }
 
-            TRACE("SECURITY_MASK: %08lx\n", prefs[i].vValue.u.Integer);
-            security_mask = prefs[i].vValue.u.Integer;
+            TRACE("SECURITY_MASK: %08lx\n", prefs[i].vValue.Integer);
+            security_mask = prefs[i].vValue.Integer;
             if (!security_mask)
                 security_mask = ADS_SECURITY_INFO_OWNER;
 
@@ -1228,8 +1227,8 @@ static HRESULT WINAPI search_SetSearchPreference(IDirectorySearch *iface, PADS_S
                 break;
             }
 
-            TRACE("PAGESIZE: %ld\n", prefs[i].vValue.u.Integer);
-            ldap->search.pagesize = prefs[i].vValue.u.Integer;
+            TRACE("PAGESIZE: %ld\n", prefs[i].vValue.Integer);
+            ldap->search.pagesize = prefs[i].vValue.Integer;
             prefs[i].dwStatus = ADS_STATUS_S_OK;
             break;
 
@@ -1241,8 +1240,8 @@ static HRESULT WINAPI search_SetSearchPreference(IDirectorySearch *iface, PADS_S
                 break;
             }
 
-            TRACE("CACHE_RESULTS: %ld\n", prefs[i].vValue.u.Boolean);
-            ldap->search.cache_results = prefs[i].vValue.u.Boolean;
+            TRACE("CACHE_RESULTS: %ld\n", prefs[i].vValue.Boolean);
+            ldap->search.cache_results = prefs[i].vValue.Boolean;
             prefs[i].dwStatus = ADS_STATUS_S_OK;
             break;
 
@@ -1254,8 +1253,8 @@ static HRESULT WINAPI search_SetSearchPreference(IDirectorySearch *iface, PADS_S
                 break;
             }
 
-            TRACE("ATTRIBTYPES_ONLY: %ld\n", prefs[i].vValue.u.Boolean);
-            ldap->search.attribtypes_only = prefs[i].vValue.u.Boolean;
+            TRACE("ATTRIBTYPES_ONLY: %ld\n", prefs[i].vValue.Boolean);
+            ldap->search.attribtypes_only = prefs[i].vValue.Boolean;
             prefs[i].dwStatus = ADS_STATUS_S_OK;
             break;
 
@@ -1267,8 +1266,21 @@ static HRESULT WINAPI search_SetSearchPreference(IDirectorySearch *iface, PADS_S
                 break;
             }
 
-            TRACE("TOMBSTONE: %ld\n", prefs[i].vValue.u.Boolean);
-            ldap->search.tombstone = prefs[i].vValue.u.Boolean;
+            TRACE("TOMBSTONE: %ld\n", prefs[i].vValue.Boolean);
+            ldap->search.tombstone = prefs[i].vValue.Boolean;
+            prefs[i].dwStatus = ADS_STATUS_S_OK;
+            break;
+
+        case ADS_SEARCHPREF_SIZE_LIMIT:
+            if (prefs[i].vValue.dwType != ADSTYPE_INTEGER)
+            {
+                FIXME("ADS_SEARCHPREF_SIZE_LIMIT: unsupported dwType %d\n", prefs[i].vValue.dwType);
+                prefs[i].dwStatus = ADS_STATUS_INVALID_SEARCHPREFVALUE;
+                break;
+            }
+
+            TRACE("SIZE_LIMIT: %ld\n", prefs[i].vValue.Integer);
+            ldap->search.size_limit = prefs[i].vValue.Integer;
             prefs[i].dwStatus = ADS_STATUS_S_OK;
             break;
 
@@ -1295,7 +1307,7 @@ static HRESULT WINAPI search_ExecuteSearch(IDirectorySearch *iface, LPWSTR filte
 
     if (!res) return E_ADS_BAD_PARAMETER;
 
-    ldap_ctx = heap_alloc_zero(sizeof(*ldap_ctx));
+    ldap_ctx = calloc(1, sizeof(*ldap_ctx));
     if (!ldap_ctx) return E_OUTOFMEMORY;
 
     if (count == 0xffffffff)
@@ -1304,14 +1316,14 @@ static HRESULT WINAPI search_ExecuteSearch(IDirectorySearch *iface, LPWSTR filte
     {
         if (count && !names)
         {
-            heap_free(ldap_ctx);
+            free(ldap_ctx);
             return E_ADS_BAD_PARAMETER;
         }
 
-        props = heap_alloc((count + 1) * sizeof(props[0]));
+        props = malloc((count + 1) * sizeof(props[0]));
         if (!props)
         {
-            heap_free(ldap_ctx);
+            free(ldap_ctx);
             return E_OUTOFMEMORY;
         }
 
@@ -1339,7 +1351,7 @@ static HRESULT WINAPI search_ExecuteSearch(IDirectorySearch *iface, LPWSTR filte
     {
         ldap_ctx->page = ldap_search_init_pageW(ldap->ld, ldap->object, ldap->search.scope,
                                                 filter, props, ldap->search.attribtypes_only,
-                                                ctrls, NULL, 0, 0, NULL);
+                                                ctrls, NULL, 0, ldap->search.size_limit, NULL);
         if (ldap_ctx->page)
             err = ldap_get_next_page_s(ldap->ld, ldap_ctx->page, NULL,
                                        ldap->search.pagesize, &count, &ldap_ctx->res);
@@ -1348,14 +1360,15 @@ static HRESULT WINAPI search_ExecuteSearch(IDirectorySearch *iface, LPWSTR filte
     }
     else
         err = ldap_search_ext_sW(ldap->ld, ldap->object, ldap->search.scope, filter, props,
-                                 ldap->search.attribtypes_only, ctrls, NULL, NULL, 0, &ldap_ctx->res);
-    heap_free(props);
+                                 ldap->search.attribtypes_only, ctrls, NULL, NULL, ldap->search.size_limit,
+                                 &ldap_ctx->res);
+    free(props);
     if (err != LDAP_SUCCESS)
     {
         TRACE("ldap_search_sW error %#lx\n", err);
         if (ldap_ctx->page)
             ldap_search_abandon_page(ldap->ld, ldap_ctx->page);
-        heap_free(ldap_ctx);
+        free(ldap_ctx);
         return HRESULT_FROM_WIN32(map_ldap_error(err));
     }
 
@@ -1516,7 +1529,7 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             return E_ADS_COLUMN_NOT_SET;
         count = ldap_count_valuesW(values);
 
-        col->pADsValues = heap_alloc_zero(count * sizeof(col->pADsValues[0]));
+        col->pADsValues = calloc(count, sizeof(col->pADsValues[0]));
         if (!col->pADsValues)
         {
             ldap_value_freeW(values);
@@ -1527,7 +1540,7 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
         {
             TRACE("=> %s\n", debugstr_w(values[i]));
             col->pADsValues[i].dwType = type;
-            col->pADsValues[i].u.CaseIgnoreString = values[i];
+            col->pADsValues[i].CaseIgnoreString = values[i];
         }
 
         col->hReserved = values;
@@ -1541,7 +1554,7 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             return E_ADS_COLUMN_NOT_SET;
         count = ldap_count_valuesW(values);
 
-        col->pADsValues = heap_alloc_zero(count * sizeof(col->pADsValues[0]));
+        col->pADsValues = calloc(count, sizeof(col->pADsValues[0]));
         if (!col->pADsValues)
         {
             ldap_value_freeW(values);
@@ -1553,15 +1566,15 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             col->pADsValues[i].dwType = type;
 
             if (!wcsicmp(values[i], L"TRUE"))
-                col->pADsValues[i].u.Boolean = 1;
+                col->pADsValues[i].Boolean = 1;
             else if (!wcsicmp(values[i], L"FALSE"))
-                col->pADsValues[i].u.Boolean = 0;
+                col->pADsValues[i].Boolean = 0;
             else
             {
                 FIXME("not recognized boolean value %s\n", debugstr_w(values[i]));
-                col->pADsValues[i].u.Boolean = 0;
+                col->pADsValues[i].Boolean = 0;
             }
-            TRACE("%s => %ld\n", debugstr_w(values[i]), col->pADsValues[i].u.Boolean);
+            TRACE("%s => %ld\n", debugstr_w(values[i]), col->pADsValues[i].Boolean);
         }
 
         ldap_value_freeW(values);
@@ -1577,7 +1590,7 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             return E_ADS_COLUMN_NOT_SET;
         count = ldap_count_values_len(values);
 
-        col->pADsValues = heap_alloc_zero(count * sizeof(col->pADsValues[0]));
+        col->pADsValues = calloc(count, sizeof(col->pADsValues[0]));
         if (!col->pADsValues)
         {
             ldap_value_free_len(values);
@@ -1590,13 +1603,13 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
 
             if (type == ADSTYPE_LARGE_INTEGER)
             {
-                col->pADsValues[i].u.LargeInteger.QuadPart = _atoi64(values[i]->bv_val);
-                TRACE("%s => %s\n", debugstr_an(values[i]->bv_val, values[i]->bv_len), wine_dbgstr_longlong(col->pADsValues[i].u.LargeInteger.QuadPart));
+                col->pADsValues[i].LargeInteger.QuadPart = _atoi64(values[i]->bv_val);
+                TRACE("%s => %s\n", debugstr_an(values[i]->bv_val, values[i]->bv_len), wine_dbgstr_longlong(col->pADsValues[i].LargeInteger.QuadPart));
             }
             else
             {
-                col->pADsValues[i].u.Integer = atol(values[i]->bv_val);
-                TRACE("%s => %ld\n", debugstr_an(values[i]->bv_val, values[i]->bv_len), col->pADsValues[i].u.Integer);
+                col->pADsValues[i].Integer = atol(values[i]->bv_val);
+                TRACE("%s => %ld\n", debugstr_an(values[i]->bv_val, values[i]->bv_len), col->pADsValues[i].Integer);
             }
         }
 
@@ -1613,7 +1626,7 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             return E_ADS_COLUMN_NOT_SET;
         count = ldap_count_values_len(values);
 
-        col->pADsValues = heap_alloc_zero(count * sizeof(col->pADsValues[0]));
+        col->pADsValues = calloc(count, sizeof(col->pADsValues[0]));
         if (!col->pADsValues)
         {
             ldap_value_free_len(values);
@@ -1624,8 +1637,8 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
         {
             TRACE("=> %s\n", debugstr_an(values[i]->bv_val, values[i]->bv_len));
             col->pADsValues[i].dwType = type;
-            col->pADsValues[i].u.OctetString.dwLength = values[i]->bv_len;
-            col->pADsValues[i].u.OctetString.lpValue = (BYTE *)values[i]->bv_val;
+            col->pADsValues[i].OctetString.dwLength = values[i]->bv_len;
+            col->pADsValues[i].OctetString.lpValue = (BYTE *)values[i]->bv_val;
         }
 
         col->hReserved = values;
@@ -1639,7 +1652,7 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             return E_ADS_COLUMN_NOT_SET;
         count = ldap_count_values_len(values);
 
-        col->pADsValues = heap_alloc_zero(count * sizeof(col->pADsValues[0]));
+        col->pADsValues = calloc(count, sizeof(col->pADsValues[0]));
         if (!col->pADsValues)
         {
             ldap_value_free_len(values);
@@ -1651,12 +1664,12 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             col->pADsValues[i].dwType = type;
             if (values[i]->bv_len < 14 ||
                 _snscanf_l(values[i]->bv_val, values[i]->bv_len, "%04hu%02hu%02hu%02hu%02hu%02hu", NULL,
-                           &col->pADsValues[i].u.UTCTime.wYear, &col->pADsValues[i].u.UTCTime.wMonth,
-                           &col->pADsValues[i].u.UTCTime.wDay, &col->pADsValues[i].u.UTCTime.wHour,
-                           &col->pADsValues[i].u.UTCTime.wMinute, &col->pADsValues[i].u.UTCTime.wSecond) != 6)
+                           &col->pADsValues[i].UTCTime.wYear, &col->pADsValues[i].UTCTime.wMonth,
+                           &col->pADsValues[i].UTCTime.wDay, &col->pADsValues[i].UTCTime.wHour,
+                           &col->pADsValues[i].UTCTime.wMinute, &col->pADsValues[i].UTCTime.wSecond) != 6)
             {
                 FIXME("not recognized UTCTime: %s\n", debugstr_an(values[i]->bv_val, values[i]->bv_len));
-                memset(&col->pADsValues[i].u.UTCTime, 0, sizeof(col->pADsValues[i].u.UTCTime));
+                memset(&col->pADsValues[i].UTCTime, 0, sizeof(col->pADsValues[i].UTCTime));
                 continue;
             }
 
@@ -1665,9 +1678,9 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
                     FIXME("not handled time zone: %s\n", debugstr_an(values[i]->bv_val + 14, values[i]->bv_len - 14));
 
             TRACE("%s => %02u.%02u.%04u %02u:%02u:%02u\n", debugstr_an(values[i]->bv_val, values[i]->bv_len),
-                  col->pADsValues[i].u.UTCTime.wDay, col->pADsValues[i].u.UTCTime.wMonth,
-                  col->pADsValues[i].u.UTCTime.wYear, col->pADsValues[i].u.UTCTime.wHour,
-                  col->pADsValues[i].u.UTCTime.wMinute, col->pADsValues[i].u.UTCTime.wSecond);
+                  col->pADsValues[i].UTCTime.wDay, col->pADsValues[i].UTCTime.wMonth,
+                  col->pADsValues[i].UTCTime.wYear, col->pADsValues[i].UTCTime.wHour,
+                  col->pADsValues[i].UTCTime.wMinute, col->pADsValues[i].UTCTime.wSecond);
         }
 
         ldap_value_free_len(values);
@@ -1693,7 +1706,7 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             return E_ADS_COLUMN_NOT_SET;
         count = ldap_count_valuesW(values);
 
-        col->pADsValues = heap_alloc_zero(count * (sizeof(col->pADsValues[0]) + sizeof(col->pADsValues[0].u.pDNWithBinary[0])));
+        col->pADsValues = calloc(count, sizeof(col->pADsValues[0]) + sizeof(col->pADsValues[0].pDNWithBinary[0]));
         if (!col->pADsValues)
         {
             ldap_value_freeW(values);
@@ -1708,19 +1721,19 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
             DWORD n;
 
             col->pADsValues[i].dwType = type;
-            col->pADsValues[i].u.pDNWithBinary = dnb++;
+            col->pADsValues[i].pDNWithBinary = dnb++;
 
             if ((p[0] != 'b' && p[0] != 'B') || p[1] != ':')
                 FIXME("wrong DN with binary tag '%c%c'\n", p[0], p[1]);
             p += 2;
 
-            col->pADsValues[i].u.pDNWithBinary->dwLength = wcstol(p, &p, 10) / 2;
+            col->pADsValues[i].pDNWithBinary->dwLength = wcstol(p, &p, 10) / 2;
             if (*p != ':')
                 FIXME("wrong DN with binary separator '%c'\n", *p);
             p++;
-            col->pADsValues[i].u.pDNWithBinary->lpBinaryValue = (BYTE *)p;
+            col->pADsValues[i].pDNWithBinary->lpBinaryValue = (BYTE *)p;
             /* decode values in-place */
-            for (n = 0; n < col->pADsValues[i].u.pDNWithBinary->dwLength; n++, p += 2)
+            for (n = 0; n < col->pADsValues[i].pDNWithBinary->dwLength; n++, p += 2)
             {
                 BYTE b;
 
@@ -1732,16 +1745,16 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
                 }
 
                 b = (hex2bin[p[0]] << 4) | hex2bin[p[1]];
-                col->pADsValues[i].u.pDNWithBinary->lpBinaryValue[n] = b;
+                col->pADsValues[i].pDNWithBinary->lpBinaryValue[n] = b;
             }
             if (*p != ':')
                 FIXME("wrong DN with binary separator '%c'\n", *p);
-            col->pADsValues[i].u.pDNWithBinary->pszDNString = p + 1;
+            col->pADsValues[i].pDNWithBinary->pszDNString = p + 1;
 
             TRACE("%s => %lu,%s,%s\n", debugstr_w(values[i]),
-                  col->pADsValues[i].u.pDNWithBinary->dwLength,
-                  debugstr_an((char *)col->pADsValues[i].u.pDNWithBinary->lpBinaryValue, col->pADsValues[i].u.pDNWithBinary->dwLength),
-                  debugstr_w(col->pADsValues[i].u.pDNWithBinary->pszDNString));
+                  col->pADsValues[i].pDNWithBinary->dwLength,
+                  debugstr_an((char *)col->pADsValues[i].pDNWithBinary->lpBinaryValue, col->pADsValues[i].pDNWithBinary->dwLength),
+                  debugstr_w(col->pADsValues[i].pDNWithBinary->pszDNString));
         }
 
         col->hReserved = values;
@@ -1751,7 +1764,7 @@ static HRESULT add_column_values(LDAP_namespace *ldap, struct ldap_search_contex
 
     col->dwADsType = type;
     col->dwNumValues = count;
-    col->pszAttrName = strdupW(name);
+    col->pszAttrName = wcsdup(name);
 
     return S_OK;
 }
@@ -1774,7 +1787,7 @@ static HRESULT WINAPI search_GetColumn(IDirectorySearch *iface, ADS_SEARCH_HANDL
     {
         WCHAR *dn = ldap_get_dnW(ldap->ld, ldap_ctx->entry);
 
-        col->pADsValues = heap_alloc(sizeof(col->pADsValues[0]));
+        col->pADsValues = malloc(sizeof(col->pADsValues[0]));
         if (!col->pADsValues)
         {
             hr = E_OUTOFMEMORY;
@@ -1784,24 +1797,24 @@ static HRESULT WINAPI search_GetColumn(IDirectorySearch *iface, ADS_SEARCH_HANDL
         count = sizeof(L"LDAP://") + (wcslen(ldap->host) + 1 /* '/' */) * sizeof(WCHAR);
         if (dn) count += wcslen(dn) * sizeof(WCHAR);
 
-        col->pADsValues[0].u.CaseIgnoreString = heap_alloc(count);
-        if (!col->pADsValues[0].u.CaseIgnoreString)
+        col->pADsValues[0].CaseIgnoreString = malloc(count);
+        if (!col->pADsValues[0].CaseIgnoreString)
         {
             hr = E_OUTOFMEMORY;
             goto exit;
         }
 
-        wcscpy(col->pADsValues[0].u.CaseIgnoreString, L"LDAP://");
-        wcscat(col->pADsValues[0].u.CaseIgnoreString, ldap->host);
-        wcscat(col->pADsValues[0].u.CaseIgnoreString, L"/");
-        if (dn) wcscat(col->pADsValues[0].u.CaseIgnoreString, dn);
+        wcscpy(col->pADsValues[0].CaseIgnoreString, L"LDAP://");
+        wcscat(col->pADsValues[0].CaseIgnoreString, ldap->host);
+        wcscat(col->pADsValues[0].CaseIgnoreString, L"/");
+        if (dn) wcscat(col->pADsValues[0].CaseIgnoreString, dn);
         col->pADsValues[0].dwType = ADSTYPE_CASE_IGNORE_STRING;
         col->dwADsType = ADSTYPE_CASE_IGNORE_STRING;
         col->dwNumValues = 1;
-        col->pszAttrName = strdupW(name);
+        col->pszAttrName = wcsdup(name);
         col->hReserved = NULL;
 
-        TRACE("=> %s\n", debugstr_w(col->pADsValues[0].u.CaseIgnoreString));
+        TRACE("=> %s\n", debugstr_w(col->pADsValues[0].CaseIgnoreString));
         hr = S_OK;
 exit:
         ldap_memfreeW(dn);
@@ -1818,9 +1831,9 @@ static HRESULT WINAPI search_FreeColumn(IDirectorySearch *iface, PADS_SEARCH_COL
     if (!col) return E_ADS_BAD_PARAMETER;
 
     if (!wcsicmp(col->pszAttrName, L"ADsPath"))
-        heap_free(col->pADsValues[0].u.CaseIgnoreString);
-    heap_free(col->pADsValues);
-    heap_free(col->pszAttrName);
+        free(col->pADsValues[0].CaseIgnoreString);
+    free(col->pADsValues);
+    free(col->pszAttrName);
 
     if (col->hReserved)
     {
@@ -1848,7 +1861,7 @@ static HRESULT WINAPI search_CloseSearchHandle(IDirectorySearch *iface, ADS_SEAR
         ldap_msgfree(ldap_ctx->res);
     if (ldap_ctx->ber)
         ber_free(ldap_ctx->ber, 0);
-    heap_free(ldap_ctx);
+    free(ldap_ctx);
 
     return S_OK;
 }
@@ -1956,7 +1969,7 @@ static HRESULT LDAPNamespace_create(REFIID riid, void **obj)
     LDAP_namespace *ldap;
     HRESULT hr;
 
-    ldap = heap_alloc(sizeof(*ldap));
+    ldap = malloc(sizeof(*ldap));
     if (!ldap) return E_OUTOFMEMORY;
 
     ldap->IADs_iface.lpVtbl = &IADs_vtbl;
@@ -1972,6 +1985,7 @@ static HRESULT LDAPNamespace_create(REFIID riid, void **obj)
     ldap->attrs = NULL;
     ldap->search.scope = ADS_SCOPE_SUBTREE;
     ldap->search.pagesize = 0;
+    ldap->search.size_limit = 0;
     ldap->search.cache_results = TRUE;
     ldap->search.attribtypes_only = FALSE;
     ldap->search.tombstone = FALSE;
@@ -2045,7 +2059,7 @@ static ULONG WINAPI factory_Release(IClassFactory *iface)
     TRACE("(%p) ref %lu\n", iface, ref);
 
     if (!ref)
-        heap_free(factory);
+        free(factory);
 
     return ref;
 }
@@ -2084,7 +2098,7 @@ static HRESULT factory_constructor(const struct class_info *info, REFIID riid, v
     class_factory *factory;
     HRESULT hr;
 
-    factory = heap_alloc(sizeof(*factory));
+    factory = malloc(sizeof(*factory));
     if (!factory) return E_OUTOFMEMORY;
 
     factory->IClassFactory_iface.lpVtbl = &factory_vtbl;

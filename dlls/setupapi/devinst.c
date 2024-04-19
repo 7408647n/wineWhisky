@@ -32,7 +32,6 @@
 #include "winsvc.h"
 #include "setupapi.h"
 #include "wine/debug.h"
-#include "wine/heap.h"
 #include "wine/list.h"
 #include "cfgmgr32.h"
 #include "winioctl.h"
@@ -96,6 +95,7 @@ static const WCHAR Capabilities[] = {'C','a','p','a','b','i','l','i','t','i','e'
 static const WCHAR UINumber[] = {'U','I','N','u','m','b','e','r',0};
 static const WCHAR UpperFilters[] = {'U','p','p','e','r','F','i','l','t','e','r','s',0};
 static const WCHAR LowerFilters[] = {'L','o','w','e','r','F','i','l','t','e','r','s',0};
+static const WCHAR ContainerId[] = {'C','o','n','t','a','i','n','e','r','I','d',0};
 static const WCHAR Phantom[] = {'P','h','a','n','t','o','m',0};
 static const WCHAR SymbolicLink[] = {'S','y','m','b','o','l','i','c','L','i','n','k',0};
 static const WCHAR Control[] = {'C','o','n','t','r','o','l',0};
@@ -248,14 +248,14 @@ static DEVINST alloc_devnode(struct device *device)
     {
         if (devnode_table)
         {
+            devnode_table = realloc(devnode_table, devnode_table_size * 2 * sizeof(*devnode_table));
+            memset(devnode_table + devnode_table_size, 0, devnode_table_size * sizeof(*devnode_table));
             devnode_table_size *= 2;
-            devnode_table = heap_realloc_zero(devnode_table,
-                devnode_table_size * sizeof(*devnode_table));
         }
         else
         {
             devnode_table_size = 256;
-            devnode_table = heap_alloc_zero(devnode_table_size * sizeof(*devnode_table));
+            devnode_table = calloc(devnode_table_size, sizeof(*devnode_table));
         }
     }
 
@@ -295,7 +295,7 @@ static WCHAR *get_iface_key_path(struct device_iface *iface)
     WCHAR *path, *ptr;
     size_t len = lstrlenW(DeviceClasses) + 1 + 38 + 1 + lstrlenW(iface->symlink);
 
-    if (!(path = heap_alloc((len + 1) * sizeof(WCHAR))))
+    if (!(path = malloc((len + 1) * sizeof(WCHAR))))
     {
         SetLastError(ERROR_OUTOFMEMORY);
         return NULL;
@@ -326,7 +326,7 @@ static WCHAR *get_refstr_key_path(struct device_iface *iface)
     if (iface->refstr)
         len += lstrlenW(iface->refstr);
 
-    if (!(path = heap_alloc((len + 1) * sizeof(WCHAR))))
+    if (!(path = malloc((len + 1) * sizeof(WCHAR))))
     {
         SetLastError(ERROR_OUTOFMEMORY);
         return NULL;
@@ -392,7 +392,7 @@ static LPWSTR SETUPDI_CreateSymbolicLinkPath(LPCWSTR instanceId,
         /* space for a hash between string and reference string: */
         len += lstrlenW(ReferenceString) + 1;
     }
-    ret = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
+    ret = malloc(len * sizeof(WCHAR));
     if (ret)
     {
         int printed = swprintf(ret, len, fmt, instanceId, guidStr);
@@ -449,7 +449,7 @@ static struct device_iface *SETUPDI_CreateDeviceInterface(struct device *device,
             return iface;
     }
 
-    iface = heap_alloc(sizeof(*iface));
+    iface = malloc(sizeof(*iface));
     symlink = SETUPDI_CreateSymbolicLinkPath(device->instanceId, class, refstr);
 
     if (!iface || !symlink)
@@ -458,7 +458,7 @@ static struct device_iface *SETUPDI_CreateDeviceInterface(struct device *device,
         goto err;
     }
 
-    if (refstr && !(refstr2 = strdupW(refstr)))
+    if (refstr && !(refstr2 = wcsdup(refstr)))
     {
         SetLastError(ERROR_OUTOFMEMORY);
         goto err;
@@ -482,7 +482,7 @@ static struct device_iface *SETUPDI_CreateDeviceInterface(struct device *device,
     }
     RegSetValueExW(key, DeviceInstance, 0, REG_SZ, (BYTE *)device->instanceId,
         lstrlenW(device->instanceId) * sizeof(WCHAR));
-    heap_free(path);
+    free(path);
 
     iface->class_key = key;
 
@@ -503,7 +503,7 @@ static struct device_iface *SETUPDI_CreateDeviceInterface(struct device *device,
     if (is_linked(key))
         iface->flags |= SPINT_ACTIVE;
 
-    heap_free(path);
+    free(path);
 
     iface->refstr_key = key;
 
@@ -511,18 +511,18 @@ static struct device_iface *SETUPDI_CreateDeviceInterface(struct device *device,
     return iface;
 
 err:
-    heap_free(iface);
-    heap_free(refstr2);
-    heap_free(symlink);
-    heap_free(path);
+    free(iface);
+    free(refstr2);
+    free(symlink);
+    free(path);
     return NULL;
 }
 
 static BOOL SETUPDI_SetInterfaceSymbolicLink(struct device_iface *iface,
     const WCHAR *symlink)
 {
-    heap_free(iface->symlink);
-    if ((iface->symlink = strdupW(symlink)))
+    free(iface->symlink);
+    if ((iface->symlink = wcsdup(symlink)))
         return TRUE;
     return FALSE;
 }
@@ -654,6 +654,7 @@ static const struct PropertyMapEntry PropertyMap[] = {
     { REG_DWORD, "UINumber", UINumber },
     { REG_MULTI_SZ, "UpperFilters", UpperFilters },
     { REG_MULTI_SZ, "LowerFilters", LowerFilters },
+    [SPDRP_BASE_CONTAINERID] = { REG_SZ, "ContainerId", ContainerId },
 };
 
 static BOOL SETUPDI_SetDeviceRegistryPropertyW(struct device *device,
@@ -689,9 +690,9 @@ static void delete_device_iface(struct device_iface *iface)
     list_remove(&iface->entry);
     RegCloseKey(iface->refstr_key);
     RegCloseKey(iface->class_key);
-    heap_free(iface->refstr);
-    heap_free(iface->symlink);
-    heap_free(iface);
+    free(iface->refstr);
+    free(iface->symlink);
+    free(iface);
 }
 
 /* remove all interfaces associated with the device, including those not
@@ -820,8 +821,8 @@ static void delete_device(struct device *device)
     }
 
     RegCloseKey(device->key);
-    heap_free(device->instanceId);
-    heap_free(device->drivers);
+    free(device->instanceId);
+    free(device->drivers);
 
     LIST_FOR_EACH_ENTRY_SAFE(iface, next, &device->interfaces,
             struct device_iface, entry)
@@ -830,7 +831,7 @@ static void delete_device(struct device *device)
     }
     free_devnode(device->devnode);
     list_remove(&device->entry);
-    heap_free(device);
+    free(device);
 }
 
 /* Create a new device, or return a device already in the set. */
@@ -855,16 +856,16 @@ static struct device *create_device(struct DeviceInfoSet *set,
         }
     }
 
-    if (!(device = heap_alloc_zero(sizeof(*device))))
+    if (!(device = calloc(1, sizeof(*device))))
     {
         SetLastError(ERROR_OUTOFMEMORY);
         return NULL;
     }
 
-    if (!(device->instanceId = strdupW(instanceid)))
+    if (!(device->instanceId = wcsdup(instanceid)))
     {
         SetLastError(ERROR_OUTOFMEMORY);
-        heap_free(device);
+        free(device);
         return NULL;
     }
 
@@ -1495,7 +1496,7 @@ SetupDiCreateDeviceInfoListExW(const GUID *ClassGuid,
         return INVALID_HANDLE_VALUE;
     }
 
-    list = HeapAlloc(GetProcessHeap(), 0, size);
+    list = malloc(size);
     if (!list)
     {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
@@ -2184,7 +2185,7 @@ HDEVINFO WINAPI SetupDiGetClassDevsA(const GUID *class, LPCSTR enumstr, HWND par
     if (enumstr)
     {
         int len = MultiByteToWideChar(CP_ACP, 0, enumstr, -1, NULL, 0);
-        enumstrW = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
+        enumstrW = malloc(len * sizeof(WCHAR));
         if (!enumstrW)
         {
             ret = INVALID_HANDLE_VALUE;
@@ -2194,7 +2195,7 @@ HDEVINFO WINAPI SetupDiGetClassDevsA(const GUID *class, LPCSTR enumstr, HWND par
     }
     ret = SetupDiGetClassDevsExW(class, enumstrW, parent, flags, NULL, NULL,
             NULL);
-    HeapFree(GetProcessHeap(), 0, enumstrW);
+    free(enumstrW);
 
 end:
     return ret;
@@ -2218,7 +2219,7 @@ HDEVINFO WINAPI SetupDiGetClassDevsExA(
     if (enumstr)
     {
         int len = MultiByteToWideChar(CP_ACP, 0, enumstr, -1, NULL, 0);
-        enumstrW = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
+        enumstrW = malloc(len * sizeof(WCHAR));
         if (!enumstrW)
         {
             ret = INVALID_HANDLE_VALUE;
@@ -2229,10 +2230,10 @@ HDEVINFO WINAPI SetupDiGetClassDevsExA(
     if (machine)
     {
         int len = MultiByteToWideChar(CP_ACP, 0, machine, -1, NULL, 0);
-        machineW = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
+        machineW = malloc(len * sizeof(WCHAR));
         if (!machineW)
         {
-            HeapFree(GetProcessHeap(), 0, enumstrW);
+            free(enumstrW);
             ret = INVALID_HANDLE_VALUE;
             goto end;
         }
@@ -2240,8 +2241,8 @@ HDEVINFO WINAPI SetupDiGetClassDevsExA(
     }
     ret = SetupDiGetClassDevsExW(class, enumstrW, parent, flags, deviceset,
             machineW, reserved);
-    HeapFree(GetProcessHeap(), 0, enumstrW);
-    HeapFree(GetProcessHeap(), 0, machineW);
+    free(enumstrW);
+    free(machineW);
 
 end:
     return ret;
@@ -2541,13 +2542,13 @@ static void SETUPDI_EnumerateDevices(HDEVINFO DeviceInfoSet, const GUID *class,
                 {
                     SETUPDI_EnumerateMatchingDevices(DeviceInfoSet, enumstr, enumStrKey, class, flags);
                 }
-                else if ((bus = strdupW(enumstr)))
+                else if ((bus = wcsdup(enumstr)))
                 {
                     device = wcschr(bus, '\\');
                     *device++ = 0;
 
                     SETUPDI_EnumerateMatchingDeviceInstances(DeviceInfoSet, bus, device, enumStrKey, class, flags);
-                    HeapFree(GetProcessHeap(), 0, bus);
+                    free(bus);
                 }
 
                 RegCloseKey(enumStrKey);
@@ -2963,7 +2964,7 @@ BOOL WINAPI SetupDiDestroyDeviceInfoList(HDEVINFO devinfo)
     {
         delete_device(device);
     }
-    heap_free(set);
+    free(set);
 
     SetLastError(ERROR_SUCCESS);
     return TRUE;
@@ -2974,15 +2975,15 @@ BOOL WINAPI SetupDiDestroyDeviceInfoList(HDEVINFO devinfo)
  */
 BOOL WINAPI SetupDiGetDeviceInterfaceDetailA(HDEVINFO devinfo, SP_DEVICE_INTERFACE_DATA *iface_data,
         SP_DEVICE_INTERFACE_DETAIL_DATA_A *DeviceInterfaceDetailData,
-        DWORD DeviceInterfaceDetailDataSize, DWORD *RequiredSize, SP_DEVINFO_DATA *device_data)
+        DWORD DeviceInterfaceDetailDataSize, DWORD *ret_size, SP_DEVINFO_DATA *device_data)
 {
     struct device_iface *iface;
     DWORD bytesNeeded = FIELD_OFFSET(SP_DEVICE_INTERFACE_DETAIL_DATA_A, DevicePath[1]);
     BOOL ret = FALSE;
 
-    TRACE("devinfo %p, iface_data %p, detail_data %p, size %ld, needed %p, device_data %p.\n",
+    TRACE("devinfo %p, iface_data %p, detail_data %p, size %ld, ret_size %p, device_data %p.\n",
             devinfo, iface_data, DeviceInterfaceDetailData, DeviceInterfaceDetailDataSize,
-            RequiredSize, device_data);
+            ret_size, device_data);
 
     if (!(iface = get_device_iface(devinfo, iface_data)))
         return FALSE;
@@ -3001,7 +3002,11 @@ BOOL WINAPI SetupDiGetDeviceInterfaceDetailA(HDEVINFO devinfo, SP_DEVICE_INTERFA
 
     if (iface->symlink)
         bytesNeeded += WideCharToMultiByte(CP_ACP, 0, iface->symlink, -1,
-                NULL, 0, NULL, NULL);
+                NULL, 0, NULL, NULL) - 1;
+
+    if (ret_size)
+        *ret_size = bytesNeeded;
+
     if (DeviceInterfaceDetailDataSize >= bytesNeeded)
     {
         if (iface->symlink)
@@ -3017,8 +3022,6 @@ BOOL WINAPI SetupDiGetDeviceInterfaceDetailA(HDEVINFO devinfo, SP_DEVICE_INTERFA
     }
     else
     {
-        if (RequiredSize)
-            *RequiredSize = bytesNeeded;
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
     }
 
@@ -3033,16 +3036,16 @@ BOOL WINAPI SetupDiGetDeviceInterfaceDetailA(HDEVINFO devinfo, SP_DEVICE_INTERFA
  */
 BOOL WINAPI SetupDiGetDeviceInterfaceDetailW(HDEVINFO devinfo, SP_DEVICE_INTERFACE_DATA *iface_data,
         SP_DEVICE_INTERFACE_DETAIL_DATA_W *DeviceInterfaceDetailData,
-        DWORD DeviceInterfaceDetailDataSize, DWORD *RequiredSize, SP_DEVINFO_DATA *device_data)
+        DWORD DeviceInterfaceDetailDataSize, DWORD *ret_size, SP_DEVINFO_DATA *device_data)
 {
     struct device_iface *iface;
     DWORD bytesNeeded = offsetof(SP_DEVICE_INTERFACE_DETAIL_DATA_W, DevicePath)
         + sizeof(WCHAR); /* include NULL terminator */
     BOOL ret = FALSE;
 
-    TRACE("devinfo %p, iface_data %p, detail_data %p, size %ld, needed %p, device_data %p.\n",
+    TRACE("devinfo %p, iface_data %p, detail_data %p, size %ld, ret_size %p, device_data %p.\n",
             devinfo, iface_data, DeviceInterfaceDetailData, DeviceInterfaceDetailDataSize,
-            RequiredSize, device_data);
+            ret_size, device_data);
 
     if (!(iface = get_device_iface(devinfo, iface_data)))
         return FALSE;
@@ -3062,6 +3065,10 @@ BOOL WINAPI SetupDiGetDeviceInterfaceDetailW(HDEVINFO devinfo, SP_DEVICE_INTERFA
 
     if (iface->symlink)
         bytesNeeded += sizeof(WCHAR) * lstrlenW(iface->symlink);
+
+    if (ret_size)
+        *ret_size = bytesNeeded;
+
     if (DeviceInterfaceDetailDataSize >= bytesNeeded)
     {
         if (iface->symlink)
@@ -3073,8 +3080,6 @@ BOOL WINAPI SetupDiGetDeviceInterfaceDetailW(HDEVINFO devinfo, SP_DEVICE_INTERFA
     }
     else
     {
-        if (RequiredSize)
-            *RequiredSize = bytesNeeded;
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
     }
 
@@ -3734,7 +3739,7 @@ static BOOL call_coinstallers(WCHAR *list, DI_FUNCTION function, HDEVINFO devinf
             {
                 procname = strdupWtoA(procnameW + 1);
                 coinst_proc = (void *)GetProcAddress(module, procname);
-                heap_free(procname);
+                free(procname);
             }
             else
                 coinst_proc = (void *)GetProcAddress(module, "CoDeviceInstall");
@@ -3793,10 +3798,10 @@ BOOL WINAPI SetupDiCallClassInstaller(DI_FUNCTION function, HDEVINFO devinfo, SP
         SETUPDI_GuidToString(&device->class, guidstr);
         if (!RegGetValueW(coinst_key, NULL, guidstr, RRF_RT_REG_MULTI_SZ, NULL, NULL, &size))
         {
-            path = heap_alloc(size);
+            path = malloc(size);
             if (!RegGetValueW(coinst_key, NULL, guidstr, RRF_RT_REG_MULTI_SZ, NULL, path, &size))
                 coret = call_coinstallers(path, function, devinfo, device_data);
-            heap_free(path);
+            free(path);
         }
         RegCloseKey(coinst_key);
     }
@@ -3808,10 +3813,10 @@ BOOL WINAPI SetupDiCallClassInstaller(DI_FUNCTION function, HDEVINFO devinfo, SP
     {
         if (!RegGetValueW(coinst_key, NULL, coinstallers32W, RRF_RT_REG_MULTI_SZ, NULL, NULL, &size))
         {
-            path = heap_alloc(size);
+            path = malloc(size);
             if (!RegGetValueW(coinst_key, NULL, coinstallers32W, RRF_RT_REG_MULTI_SZ, NULL, path, &size))
                 coret = call_coinstallers(path, function, devinfo, device_data);
-            heap_free(path);
+            free(path);
         }
         RegCloseKey(coinst_key);
     }
@@ -3820,7 +3825,7 @@ BOOL WINAPI SetupDiCallClassInstaller(DI_FUNCTION function, HDEVINFO devinfo, SP
     {
         if (!RegGetValueW(class_key, NULL, installer32W, RRF_RT_REG_SZ, NULL, NULL, &size))
         {
-            path = heap_alloc(size);
+            path = malloc(size);
             if (!RegGetValueW(class_key, NULL, installer32W, RRF_RT_REG_SZ, NULL, path, &size))
             {
                 TRACE("Found class installer %s.\n", debugstr_w(path));
@@ -3833,7 +3838,7 @@ BOOL WINAPI SetupDiCallClassInstaller(DI_FUNCTION function, HDEVINFO devinfo, SP
                     {
                         procname = strdupWtoA(procnameW + 1);
                         classinst_proc = (void *)GetProcAddress(module, procname);
-                        heap_free(procname);
+                        free(procname);
                     }
                     else
                         classinst_proc = (void *)GetProcAddress(module, "ClassInstall");
@@ -3846,7 +3851,7 @@ BOOL WINAPI SetupDiCallClassInstaller(DI_FUNCTION function, HDEVINFO devinfo, SP
                     FreeLibrary(module);
                 }
             }
-            heap_free(path);
+            free(path);
         }
         RegCloseKey(class_key);
     }
@@ -4243,7 +4248,7 @@ BOOL WINAPI SetupDiGetINFClassA(PCSTR inf, LPGUID class_guid, PSTR class_name,
 
     if (class_name && size)
     {
-        if (!(class_nameW = HeapAlloc(GetProcessHeap(), 0, size * sizeof(WCHAR))))
+        if (!(class_nameW = malloc(size * sizeof(WCHAR))))
         {
             RtlFreeUnicodeString(&infW);
             SetLastError(ERROR_NOT_ENOUGH_MEMORY);
@@ -4263,7 +4268,7 @@ BOOL WINAPI SetupDiGetINFClassA(PCSTR inf, LPGUID class_guid, PSTR class_name,
     else
         if(required_size) *required_size = required_sizeW;
 
-    HeapFree(GetProcessHeap(), 0, class_nameW);
+    free(class_nameW);
     RtlFreeUnicodeString(&infW);
     return retval;
 }
@@ -4601,7 +4606,7 @@ static BOOL device_matches_id(const struct device *device, const WCHAR *id_type,
 
     if (!RegGetValueW(device->key, NULL, id_type, RRF_RT_REG_MULTI_SZ, NULL, NULL, &size))
     {
-        device_ids = heap_alloc(size);
+        device_ids = malloc(size);
         if (!RegGetValueW(device->key, NULL, id_type, RRF_RT_REG_MULTI_SZ, NULL, device_ids, &size))
         {
             for (p = device_ids, i = 0; *p; p += lstrlenW(p) + 1, i++)
@@ -4609,12 +4614,12 @@ static BOOL device_matches_id(const struct device *device, const WCHAR *id_type,
                 if (!wcsicmp(p, id))
                 {
                     *driver_rank += min(i, 0xff);
-                    heap_free(device_ids);
+                    free(device_ids);
                     return TRUE;
                 }
             }
         }
-        heap_free(device_ids);
+        free(device_ids);
     }
 
     return FALSE;
@@ -4712,7 +4717,7 @@ static void enum_compat_drivers_from_file(struct device *device, const WCHAR *pa
                         driver.rank, debugstr_w(driver.manufacturer), debugstr_w(driver.description));
 
                 driver_count++;
-                drivers = heap_realloc(drivers, driver_count * sizeof(*drivers));
+                drivers = realloc(drivers, driver_count * sizeof(*drivers));
                 drivers[driver_count - 1] = driver;
             }
         }
@@ -5157,6 +5162,7 @@ BOOL WINAPI SetupDiInstallDevice(HDEVINFO devinfo, SP_DEVINFO_DATA *device_data)
     static const WCHAR addserviceW[] = {'A','d','d','S','e','r','v','i','c','e',0};
     static const WCHAR rootW[] = {'r','o','o','t','\\',0};
     WCHAR section_ext[LINE_LEN], subsection[LINE_LEN], inf_path[MAX_PATH], *extptr, *filepart;
+    static const DWORD config_flags = 0;
     UINT install_flags = SPINST_ALL;
     HKEY driver_key, device_key;
     SC_HANDLE manager, service;
@@ -5203,6 +5209,10 @@ BOOL WINAPI SetupDiInstallDevice(HDEVINFO devinfo, SP_DEVINFO_DATA *device_data)
         SetupCloseInfFile(hinf);
         return FALSE;
     }
+
+    if (!SETUPDI_SetDeviceRegistryPropertyW(device, SPDRP_CONFIGFLAGS,
+            (BYTE *)&config_flags, sizeof(config_flags)))
+        ERR("Failed to set config flags, error %#lx.\n", GetLastError());
 
     if (device->params.Flags & DI_NOFILECOPY)
         install_flags &= ~SPINST_FILES;
@@ -5277,4 +5287,24 @@ BOOL WINAPI SetupDiInstallDevice(HDEVINFO devinfo, SP_DEVINFO_DATA *device_data)
     }
 
     return TRUE;
+}
+
+BOOL WINAPI SetupDiGetCustomDevicePropertyA(HDEVINFO devinfo, SP_DEVINFO_DATA *data, const char *name, DWORD flags,
+        DWORD *reg_type, BYTE *buffer, DWORD bufsize, DWORD *required)
+{
+    FIXME("devinfo %p, data %p, name %s, flags %#lx, reg_type %p, buffer %p, bufsize %lu, required %p stub.\n",
+            devinfo, data, debugstr_a(name), flags, reg_type, buffer, bufsize, required);
+
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+}
+
+BOOL WINAPI SetupDiGetCustomDevicePropertyW(HDEVINFO devinfo, SP_DEVINFO_DATA *data, const WCHAR *name, DWORD flags,
+        DWORD *reg_type, BYTE *buffer, DWORD bufsize, DWORD *required)
+{
+    FIXME("devinfo %p, data %p, name %s, flags %#lx, reg_type %p, buffer %p, bufsize %lu, required %p stub.\n",
+            devinfo, data, debugstr_w(name), flags, reg_type, buffer, bufsize, required);
+
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
 }

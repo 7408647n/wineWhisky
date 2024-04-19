@@ -35,6 +35,8 @@
 
 #include <locale.h>
 
+#define _MAX__TIME64_T     (((__time64_t)0x00000007 << 32) | 0x93406FFF)
+
 #ifdef __i386__
 #include "pshpack1.h"
 struct thiscall_thunk
@@ -90,6 +92,7 @@ typedef unsigned char MSVCRT_bool;
 
 typedef struct cs_queue
 {
+    void *ctx;
     struct cs_queue *next;
     BOOL free;
     int unknown;
@@ -97,7 +100,6 @@ typedef struct cs_queue
 
 typedef struct
 {
-    ULONG_PTR unk_thread_id;
     cs_queue unk_active;
     void *unknown[2];
     cs_queue *head;
@@ -162,6 +164,31 @@ typedef struct {
     Context *ctx;
 } _Context;
 
+typedef struct _StructuredTaskCollection
+{
+    void *unk1;
+    unsigned int unk2;
+    void *unk3;
+    Context *context;
+    volatile LONG count;
+    volatile LONG finished;
+    void *unk4;
+    void *event;
+} _StructuredTaskCollection;
+
+typedef struct _UnrealizedChore
+{
+    const vtable_ptr *vtable;
+    void (__cdecl *proc)(struct _UnrealizedChore*);
+    struct _StructuredTaskCollection *task_collection;
+    void (__cdecl *proc_wrapper)(struct _UnrealizedChore*);
+    void *unk[6];
+} _UnrealizedChore;
+
+typedef struct {
+    long *cancelling;
+} _Cancellation_beacon;
+
 static char* (CDECL *p_setlocale)(int category, const char* locale);
 static struct MSVCRT_lconv* (CDECL *p_localeconv)(void);
 static size_t (CDECL *p_wcstombs_s)(size_t *ret, char* dest, size_t sz, const wchar_t* src, size_t max);
@@ -199,6 +226,12 @@ static float (__cdecl *p_nexttowardf)(float, double);
 static double (__cdecl *p_nexttowardl)(double, double);
 static wctrans_t (__cdecl *p_wctrans)(const char*);
 static wint_t (__cdecl *p_towctrans)(wint_t, wctrans_t);
+static int (__cdecl *p_strcmp)(const char *, const char *);
+static int (__cdecl *p_strncmp)(const char *, const char *, size_t);
+static struct tm* (__cdecl *p_gmtime32)(__time32_t*);
+static errno_t    (__cdecl *p_gmtime32_s)(struct tm*, __time32_t*);
+static struct tm* (__cdecl *p_gmtime64)(__time64_t*);
+static errno_t    (__cdecl *p_gmtime64_s)(struct tm*, __time64_t*);
 
 /* make sure we use the correct errno */
 #undef errno
@@ -224,6 +257,18 @@ static void (__thiscall *p__Condition_variable_notify_all)(_Condition_variable*)
 
 static Context* (__cdecl *p_Context_CurrentContext)(void);
 static _Context* (__cdecl *p__Context__CurrentContext)(_Context*);
+static MSVCRT_bool (__cdecl *p_Context_IsCurrentTaskCollectionCanceling)(void);
+
+static _StructuredTaskCollection* (__thiscall *p__StructuredTaskCollection_ctor)(_StructuredTaskCollection*, void*);
+static void (__thiscall *p__StructuredTaskCollection_dtor)(_StructuredTaskCollection*);
+static void (__thiscall *p__StructuredTaskCollection__Schedule)(_StructuredTaskCollection*, _UnrealizedChore*);
+static int (__stdcall *p__StructuredTaskCollection__RunAndWait)(_StructuredTaskCollection*, _UnrealizedChore*);
+static void (__thiscall *p__StructuredTaskCollection__Cancel)(_StructuredTaskCollection*);
+static MSVCRT_bool (__thiscall *p__StructuredTaskCollection__IsCanceling)(_StructuredTaskCollection*);
+
+static _Cancellation_beacon* (__thiscall *p__Cancellation_beacon_ctor)(_Cancellation_beacon*);
+static void (__thiscall *p__Cancellation_beacon_dtor)(_Cancellation_beacon*);
+static MSVCRT_bool (__thiscall *p__Cancellation_beacon__Confirm_cancel)(_Cancellation_beacon*);
 
 #define SETNOFAIL(x,y) x = (void*)GetProcAddress(module,y)
 #define SET(x,y) do { SETNOFAIL(x,y); ok(x != NULL, "Export '%s' not found\n", y); } while(0)
@@ -257,6 +302,10 @@ static BOOL init(void)
     p_errno = (void*)GetProcAddress(module, "_errno");
     p_wcreate_locale = (void*)GetProcAddress(module, "_wcreate_locale");
     p_free_locale = (void*)GetProcAddress(module, "_free_locale");
+    p_gmtime64 = (void*)GetProcAddress(module, "_gmtime64");
+    p_gmtime64_s = (void*)GetProcAddress(module, "_gmtime64_s");
+    p_gmtime32 = (void*)GetProcAddress(module, "_gmtime32");
+    p_gmtime32_s = (void*)GetProcAddress(module, "_gmtime32_s");
     SET(p_wctype, "wctype");
     SET(p_fegetenv, "fegetenv");
     SET(p_fesetenv, "fesetenv");
@@ -278,7 +327,22 @@ static BOOL init(void)
     SET(p_wctrans, "wctrans");
     SET(p_towctrans, "towctrans");
     SET(p__Context__CurrentContext, "?_CurrentContext@_Context@details@Concurrency@@SA?AV123@XZ");
+    SET(p_strcmp, "strcmp");
+    SET(p_strncmp, "strncmp");
+    SET(p_Context_IsCurrentTaskCollectionCanceling, "?IsCurrentTaskCollectionCanceling@Context@Concurrency@@SA_NXZ");
     if(sizeof(void*) == 8) { /* 64-bit initialization */
+        SET(p__StructuredTaskCollection_ctor,
+                "??0_StructuredTaskCollection@details@Concurrency@@QEAA@PEAV_CancellationTokenState@12@@Z");
+        SET(p__StructuredTaskCollection_dtor,
+                "??1_StructuredTaskCollection@details@Concurrency@@QEAA@XZ");
+        SET(p__StructuredTaskCollection__Schedule,
+                "?_Schedule@_StructuredTaskCollection@details@Concurrency@@QEAAXPEAV_UnrealizedChore@23@@Z");
+        SET(p__StructuredTaskCollection__RunAndWait,
+                "?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QEAA?AW4_TaskCollectionStatus@23@PEAV_UnrealizedChore@23@@Z");
+        SET(p__StructuredTaskCollection__Cancel,
+                "?_Cancel@_StructuredTaskCollection@details@Concurrency@@QEAAXXZ");
+        SET(p__StructuredTaskCollection__IsCanceling,
+                "?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QEAA_NXZ");
         SET(p_critical_section_ctor,
                 "??0critical_section@Concurrency@@QEAA@XZ");
         SET(p_critical_section_dtor,
@@ -311,8 +375,26 @@ static BOOL init(void)
                 "?notify_all@_Condition_variable@details@Concurrency@@QEAAXXZ");
         SET(p_Context_CurrentContext,
                 "?CurrentContext@Context@Concurrency@@SAPEAV12@XZ");
+        SET(p__Cancellation_beacon_ctor,
+                "??0_Cancellation_beacon@details@Concurrency@@QEAA@XZ");
+        SET(p__Cancellation_beacon_dtor,
+                "??1_Cancellation_beacon@details@Concurrency@@QEAA@XZ");
+        SET(p__Cancellation_beacon__Confirm_cancel,
+                "?_Confirm_cancel@_Cancellation_beacon@details@Concurrency@@QEAA_NXZ");
     } else {
 #ifdef __arm__
+        SET(p__StructuredTaskCollection_ctor,
+                "??0_StructuredTaskCollection@details@Concurrency@@QAA@PAV_CancellationTokenState@12@@Z");
+        SET(p__StructuredTaskCollection_dtor,
+                "??1_StructuredTaskCollection@details@Concurrency@@QAA@XZ");
+        SET(p__StructuredTaskCollection__Schedule,
+                "?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAAXPAV_UnrealizedChore@23@@Z");
+        SET(p__StructuredTaskCollection__RunAndWait,
+                "?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAA?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z");
+        SET(p__StructuredTaskCollection__Cancel,
+                "?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAAXXZ");
+        SET(p__StructuredTaskCollection__IsCanceling,
+                "?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAA_NXZ");
         SET(p_critical_section_ctor,
                 "??0critical_section@Concurrency@@QAA@XZ");
         SET(p_critical_section_dtor,
@@ -343,7 +425,25 @@ static BOOL init(void)
                 "?notify_one@_Condition_variable@details@Concurrency@@QAAXXZ");
         SET(p__Condition_variable_notify_all,
                 "?notify_all@_Condition_variable@details@Concurrency@@QAAXXZ");
+        SET(p__Cancellation_beacon_ctor,
+                "??0_Cancellation_beacon@details@Concurrency@@QAA@XZ");
+        SET(p__Cancellation_beacon_dtor,
+                "??1_Cancellation_beacon@details@Concurrency@@QAA@XZ");
+        SET(p__Cancellation_beacon__Confirm_cancel,
+                "?_Confirm_cancel@_Cancellation_beacon@details@Concurrency@@QAA_NXZ");
 #else
+        SET(p__StructuredTaskCollection_ctor,
+                "??0_StructuredTaskCollection@details@Concurrency@@QAE@PAV_CancellationTokenState@12@@Z");
+        SET(p__StructuredTaskCollection_dtor,
+                "??1_StructuredTaskCollection@details@Concurrency@@QAE@XZ");
+        SET(p__StructuredTaskCollection__Schedule,
+                "?_Schedule@_StructuredTaskCollection@details@Concurrency@@QAEXPAV_UnrealizedChore@23@@Z");
+        SET(p__StructuredTaskCollection__RunAndWait,
+                "?_RunAndWait@_StructuredTaskCollection@details@Concurrency@@QAG?AW4_TaskCollectionStatus@23@PAV_UnrealizedChore@23@@Z");
+        SET(p__StructuredTaskCollection__Cancel,
+                "?_Cancel@_StructuredTaskCollection@details@Concurrency@@QAEXXZ");
+        SET(p__StructuredTaskCollection__IsCanceling,
+                "?_IsCanceling@_StructuredTaskCollection@details@Concurrency@@QAE_NXZ");
         SET(p_critical_section_ctor,
                 "??0critical_section@Concurrency@@QAE@XZ");
         SET(p_critical_section_dtor,
@@ -374,6 +474,12 @@ static BOOL init(void)
                 "?notify_one@_Condition_variable@details@Concurrency@@QAEXXZ");
         SET(p__Condition_variable_notify_all,
                 "?notify_all@_Condition_variable@details@Concurrency@@QAEXXZ");
+        SET(p__Cancellation_beacon_ctor,
+                "??0_Cancellation_beacon@details@Concurrency@@QAE@XZ");
+        SET(p__Cancellation_beacon_dtor,
+                "??1_Cancellation_beacon@details@Concurrency@@QAE@XZ");
+        SET(p__Cancellation_beacon__Confirm_cancel,
+                "?_Confirm_cancel@_Cancellation_beacon@details@Concurrency@@QAE_NXZ");
 #endif
         SET(p_Context_CurrentContext,
                 "?CurrentContext@Context@Concurrency@@SAPAV12@XZ");
@@ -527,6 +633,14 @@ static void test____lc_locale_name_func(void)
                     i, j, wine_dbgstr_w(lc_names[j]), wine_dbgstr_w(lc_names[1]));
         }
     }
+
+    p_setlocale(LC_ALL, "zh-Hans");
+    lc_names = p____lc_locale_name_func();
+    ok(!lstrcmpW(lc_names[1], L"zh-Hans"), "lc_names[1] expected zh-Hans got %s\n", wine_dbgstr_w(lc_names[1]));
+
+    p_setlocale(LC_ALL, "zh-Hant");
+    lc_names = p____lc_locale_name_func();
+    ok(!lstrcmpW(lc_names[1], L"zh-Hant"), "lc_names[1] expected zh-Hant got %s\n", wine_dbgstr_w(lc_names[1]));
 
     p_setlocale(LC_ALL, "C");
     lc_names = p____lc_locale_name_func();
@@ -1270,6 +1384,413 @@ static void test_CurrentContext(void)
     ok(ret == &_ctx, "expected %p, got %p\n", &_ctx, ret);
 }
 
+static void _UnrealizedChore_ctor(_UnrealizedChore *chore, void (__cdecl *proc)(_UnrealizedChore*))
+{
+    memset(chore, 0, sizeof(*chore));
+    chore->proc = proc;
+}
+
+struct chore
+{
+    _UnrealizedChore chore;
+    BOOL executed;
+    HANDLE start_event;
+    HANDLE set_event;
+    HANDLE wait_event;
+    DWORD main_tid;
+    BOOL check_canceling;
+};
+
+static void __cdecl chore_proc(_UnrealizedChore *_this)
+{
+    struct chore *chore = CONTAINING_RECORD(_this, struct chore, chore);
+    _Cancellation_beacon beacon, beacon2;
+
+    if (chore->start_event)
+    {
+        DWORD ret = WaitForSingleObject(chore->start_event, 5000);
+        ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %ld\n", ret);
+    }
+
+    ok(!chore->executed, "Chore was already executed\n");
+
+    if (chore->main_tid)
+    {
+        ok(GetCurrentThreadId() == chore->main_tid,
+                "Main chore is not running on the main thread: 0x%lx != 0x%lx\n",
+                GetCurrentThreadId(), chore->main_tid);
+    }
+
+    if (chore->check_canceling)
+    {
+        MSVCRT_bool canceling = call_func1(
+                p__StructuredTaskCollection__IsCanceling,
+                chore->chore.task_collection);
+        ok(!canceling, "Task is already canceling\n");
+
+        ok(!p_Context_IsCurrentTaskCollectionCanceling(),
+                "IsCurrentTaskCollectionCanceling returned TRUE\n");
+
+        call_func1(p__Cancellation_beacon_ctor, &beacon);
+        ok(!*beacon.cancelling, "beacon signalled %lx\n", *beacon.cancelling);
+
+        call_func1(p__Cancellation_beacon_ctor, &beacon2);
+        ok(beacon.cancelling != beacon2.cancelling, "beacons point to the same data\n");
+        ok(!*beacon.cancelling, "beacon signalled %lx\n", *beacon.cancelling);
+
+        canceling = call_func1(p__Cancellation_beacon__Confirm_cancel, &beacon);
+        ok(!canceling, "_Confirm_cancel returned TRUE\n");
+        ok(*beacon.cancelling == -1, "beacon signalled %lx\n", *beacon.cancelling);
+        *beacon.cancelling = 0;
+    }
+
+    if (!chore->wait_event)
+        chore->executed = TRUE;
+
+    if (chore->set_event)
+    {
+        BOOL b = SetEvent(chore->set_event);
+        ok(b, "SetEvent failed\n");
+    }
+
+    if (chore->wait_event)
+    {
+        DWORD ret = WaitForSingleObject(chore->wait_event, 5000);
+        ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %ld\n", ret);
+        chore->executed = TRUE;
+    }
+
+    if (chore->check_canceling)
+    {
+        MSVCRT_bool canceling = call_func1(
+                p__StructuredTaskCollection__IsCanceling,
+                chore->chore.task_collection);
+        ok(canceling, "Task is not canceling\n");
+
+        ok(p_Context_IsCurrentTaskCollectionCanceling(),
+                "IsCurrentTaskCollectionCanceling returned FALSE\n");
+
+        ok(*beacon.cancelling == 1, "beacon not signalled (%lx)\n", *beacon.cancelling);
+        canceling = call_func1(p__Cancellation_beacon__Confirm_cancel, &beacon);
+        ok(canceling, "_Confirm_cancel returned FALSE\n");
+        ok(*beacon.cancelling == 1, "beacon not signalled (%lx)\n", *beacon.cancelling);
+        call_func1(p__Cancellation_beacon_dtor, &beacon);
+        ok(*beacon2.cancelling == 1, "beacon not signalled (%lx)\n", *beacon2.cancelling);
+        call_func1(p__Cancellation_beacon_dtor, &beacon2);
+
+        call_func1(p__Cancellation_beacon_ctor, &beacon);
+        ok(*beacon.cancelling == 1, "beacon not signalled (%lx)\n", *beacon.cancelling);
+        canceling = call_func1(p__Cancellation_beacon__Confirm_cancel, &beacon);
+        ok(canceling, "_Confirm_cancel returned FALSE\n");
+        ok(*beacon.cancelling == 1, "beacon not signalled (%lx)\n", *beacon.cancelling);
+        call_func1(p__Cancellation_beacon_dtor, &beacon);
+    }
+}
+
+static void chore_ctor(struct chore *chore)
+{
+    memset(chore, 0, sizeof(*chore));
+    _UnrealizedChore_ctor(&chore->chore, chore_proc);
+}
+
+static void test_StructuredTaskCollection(void)
+{
+    HANDLE chore_start_evt, chore_evt1, chore_evt2;
+    _StructuredTaskCollection task_coll;
+    struct chore chore1, chore2;
+    _Cancellation_beacon beacon;
+    DWORD main_thread_id;
+    Context *context;
+    int status;
+    DWORD ret;
+    BOOL b;
+
+    main_thread_id = GetCurrentThreadId();
+    context = p_Context_CurrentContext();
+
+    memset(&task_coll, 0x55, sizeof(task_coll));
+    call_func2(p__StructuredTaskCollection_ctor, &task_coll, NULL);
+    todo_wine ok(task_coll.unk2 == 0x1fffffff,
+            "_StructuredTaskCollection ctor set wrong unk2: 0x%x != 0x1fffffff\n", task_coll.unk2);
+    ok(task_coll.unk3 == NULL,
+            "_StructuredTaskCollection ctor set wrong unk3: %p != NULL\n", task_coll.unk3);
+    ok(task_coll.context == NULL,
+            "_StructuredTaskCollection ctor set wrong context: %p != NULL\n", task_coll.context);
+    ok(task_coll.count == 0,
+            "_StructuredTaskCollection ctor set wrong count: %ld != 0\n", task_coll.count);
+    ok(task_coll.finished == LONG_MIN,
+            "_StructuredTaskCollection ctor set wrong finished: %ld != %ld\n", task_coll.finished, LONG_MIN);
+    ok(task_coll.unk4 == NULL,
+            "_StructuredTaskCollection ctor set wrong unk4: %p != NULL\n", task_coll.unk4);
+
+    chore_start_evt = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(chore_start_evt != NULL, "CreateEvent failed: 0x%lx\n", GetLastError());
+    chore_evt1 = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(chore_evt1 != NULL, "CreateEvent failed: 0x%lx\n", GetLastError());
+    chore_evt2 = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(chore_evt2 != NULL, "CreateEvent failed: 0x%lx\n", GetLastError());
+
+    /* test running chores (only main) */
+    chore_ctor(&chore1);
+    chore1.main_tid = main_thread_id;
+
+    status = p__StructuredTaskCollection__RunAndWait(&task_coll, &chore1.chore);
+    ok(status == 1, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
+    ok(chore1.executed, "Scheduled chore was not executed\n");
+    call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+
+    /* test running chores (main + scheduled) */
+    call_func2(p__StructuredTaskCollection_ctor, &task_coll, NULL);
+    ResetEvent(chore_start_evt);
+    chore_ctor(&chore1);
+    chore1.start_event = chore_start_evt;
+    chore_ctor(&chore2);
+    chore2.main_tid = main_thread_id;
+
+    call_func2(p__StructuredTaskCollection__Schedule, &task_coll, &chore1.chore);
+    ok(chore1.chore.task_collection == &task_coll, "Wrong chore #1 task_collection: expected %p, actual %p\n",
+            &task_coll, chore1.chore.task_collection);
+    ok(chore1.chore.proc_wrapper != NULL, "Chore #1 proc_wrapper was not set\n");
+    ok(task_coll.count == 1, "Wrong chore count: %ld != 1\n", task_coll.count);
+    ok(task_coll.context == context, "Unexpected context: %p != %p\n", task_coll.context, context);
+
+    b = SetEvent(chore_start_evt);
+    ok(b, "SetEvent failed\n");
+
+    status = p__StructuredTaskCollection__RunAndWait(&task_coll, &chore2.chore);
+    ok(status == 1, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
+    ok(chore1.executed, "Scheduled chore was not executed\n");
+    ok(chore2.executed, "Main chore was not executed\n");
+    call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+
+    /* test that scheduled chores may run in parallel */
+    call_func2(p__StructuredTaskCollection_ctor, &task_coll, NULL);
+    ResetEvent(chore_start_evt);
+    chore_ctor(&chore1);
+    chore1.start_event = chore_start_evt;
+    chore1.set_event = chore_evt2;
+    chore1.wait_event = chore_evt1;
+    chore_ctor(&chore2);
+    chore2.start_event = chore_start_evt;
+    chore2.set_event = chore_evt1;
+    chore2.wait_event = chore_evt2;
+
+    call_func2(p__StructuredTaskCollection__Schedule, &task_coll, &chore1.chore);
+    ok(chore1.chore.task_collection == &task_coll, "Wrong chore #1 task_collection: expected %p, actual %p\n",
+            &task_coll, chore1.chore.task_collection);
+    ok(chore1.chore.proc_wrapper != NULL, "Chore #1 proc_wrapper was not set\n");
+    ok(task_coll.count == 1, "Wrong chore count: %ld != 1\n", task_coll.count);
+    ok(task_coll.context == context, "Unexpected context: %p != %p\n", task_coll.context, context);
+
+    call_func2(p__StructuredTaskCollection__Schedule, &task_coll, &chore2.chore);
+    ok(chore2.chore.task_collection == &task_coll, "Wrong chore #2 task_collection: expected %p, actual %p\n",
+            &task_coll, chore2.chore.task_collection);
+    ok(chore2.chore.proc_wrapper != NULL, "Chore #2 proc_wrapper was not set\n");
+    ok(task_coll.count == 2, "Wrong chore count: %ld != 2\n", task_coll.count);
+    ok(task_coll.context == context, "Unexpected context: %p != %p\n", task_coll.context, context);
+
+    b = SetEvent(chore_start_evt);
+    ok(b, "SetEvent failed\n");
+
+    status = p__StructuredTaskCollection__RunAndWait(&task_coll, NULL);
+    ok(status == 1, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
+    ok(chore1.executed, "Chore #1 was not executed\n");
+    ok(chore2.executed, "Chore #2 was not executed\n");
+    call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+
+    /* test that scheduled chores are executed even if _RunAndWait is not called */
+    call_func2(p__StructuredTaskCollection_ctor, &task_coll, NULL);
+    ResetEvent(chore_start_evt);
+    chore_ctor(&chore1);
+    chore1.start_event = chore_start_evt;
+    chore1.set_event = chore_evt1;
+
+    call_func2(p__StructuredTaskCollection__Schedule, &task_coll, &chore1.chore);
+    ok(chore1.chore.task_collection == &task_coll, "Wrong chore #1 task_collection: expected %p, actual %p\n",
+            &task_coll, chore1.chore.task_collection);
+    ok(chore1.chore.proc_wrapper != NULL, "Chore #1 proc_wrapper was not set\n");
+    ok(task_coll.count == 1, "Wrong chore count: %ld != 1\n", task_coll.count);
+    ok(task_coll.context == context, "Unexpected context: %p != %p\n", task_coll.context, context);
+
+    b = SetEvent(chore_start_evt);
+    ok(b, "SetEvent failed\n");
+
+    ret = WaitForSingleObject(chore_evt1, 5000);
+    ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %ld\n", ret);
+    ok(chore1.executed, "Chore was not executed\n");
+
+    status = p__StructuredTaskCollection__RunAndWait(&task_coll, NULL);
+    ok(status == 1, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
+    ok(chore1.chore.task_collection == NULL, "Chore's task collection was not reset after execution\n");
+    call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+
+    /* test that finished chores can be scheduled again */
+    call_func2(p__StructuredTaskCollection_ctor, &task_coll, NULL);
+    ResetEvent(chore_start_evt);
+    chore1.set_event = NULL;
+    chore1.executed = FALSE;
+
+    call_func2(p__StructuredTaskCollection__Schedule, &task_coll, &chore1.chore);
+    ok(chore1.chore.task_collection == &task_coll, "Wrong chore #1 task_collection: expected %p, actual %p\n",
+            &task_coll, chore1.chore.task_collection);
+    ok(chore1.chore.proc_wrapper != NULL, "Chore #1 proc_wrapper was not set\n");
+    ok(task_coll.count == 1, "Wrong chore count: %ld != 1\n", task_coll.count);
+    ok(task_coll.context == context, "Unexpected context: %p != %p\n", task_coll.context, context);
+
+    b = SetEvent(chore_start_evt);
+    ok(b, "SetEvent failed\n");
+
+    status = p__StructuredTaskCollection__RunAndWait(&task_coll, NULL);
+    ok(status == 1, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
+    ok(chore1.executed, "Chore was not executed\n");
+    call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+
+    /* test that running chores can be canceled */
+    call_func2(p__StructuredTaskCollection_ctor, &task_coll, NULL);
+    ResetEvent(chore_start_evt);
+    chore_ctor(&chore1);
+    chore1.check_canceling = TRUE;
+    chore1.wait_event = chore_evt2;
+    chore1.set_event = chore_evt1;
+
+    call_func2(p__StructuredTaskCollection__Schedule, &task_coll, &chore1.chore);
+
+    ret = WaitForSingleObject(chore_evt1, 5000);
+    ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %ld\n", ret);
+
+    ok(!p_Context_IsCurrentTaskCollectionCanceling(),
+            "IsCurrentTaskCollectionCanceling returned TRUE\n");
+    call_func1(p__Cancellation_beacon_ctor, &beacon);
+    ok(!*beacon.cancelling, "beacon signalled\n");
+
+    call_func1(p__StructuredTaskCollection__Cancel, &task_coll);
+    ok(!p_Context_IsCurrentTaskCollectionCanceling(),
+            "IsCurrentTaskCollectionCanceling returned TRUE\n");
+    ok(!*beacon.cancelling, "beacon signalled\n");
+
+    b = SetEvent(chore_evt2);
+    ok(b, "SetEvent failed\n");
+    ok(!*beacon.cancelling, "beacon signalled\n");
+
+    status = p__StructuredTaskCollection__RunAndWait(&task_coll, NULL);
+    ok(status == 2, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
+    ok(!*beacon.cancelling, "beacon signalled\n");
+    call_func1(p__Cancellation_beacon_dtor, &beacon);
+    call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+
+    /* cancel task collection without scheduled tasks */
+    call_func2(p__StructuredTaskCollection_ctor, &task_coll, NULL);
+    call_func1(p__StructuredTaskCollection__Cancel, &task_coll);
+    ok(task_coll.context == context, "Unexpected context: %p != %p\n", task_coll.context, context);
+    chore_ctor(&chore1);
+    status = p__StructuredTaskCollection__RunAndWait(&task_coll, NULL);
+    ok(status == 2, "_StructuredTaskCollection::_RunAndWait failed: %d\n", status);
+    ok(!chore1.executed, "Canceled collection executed chore\n");
+    call_func1(p__StructuredTaskCollection_dtor, &task_coll);
+
+    CloseHandle(chore_start_evt);
+    CloseHandle(chore_evt1);
+    CloseHandle(chore_evt2);
+}
+
+static void test_strcmp(void)
+{
+    int ret = p_strcmp( "abc", "abcd" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strcmp( "", "abc" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strcmp( "abc", "ab\xa0" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strcmp( "ab\xb0", "ab\xa0" );
+    ok( ret == 1, "wrong ret %d\n", ret );
+    ret = p_strcmp( "ab\xc2", "ab\xc2" );
+    ok( ret == 0, "wrong ret %d\n", ret );
+
+    ret = p_strncmp( "abc", "abcd", 3 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = p_strncmp( "", "abc", 3 );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strncmp( "abc", "ab\xa0", 4 );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strncmp( "ab\xb0", "ab\xa0", 3 );
+    ok( ret == 1, "wrong ret %d\n", ret );
+    ret = p_strncmp( "ab\xb0", "ab\xa0", 2 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = p_strncmp( "ab\xc2", "ab\xc2", 3 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = p_strncmp( "abc", "abd", 0 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = p_strncmp( "abc", "abc", 12 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+}
+
+static void test_gmtime64(void)
+{
+    struct tm *ptm, tm;
+    __time64_t t;
+    int ret;
+
+    t = -1;
+    memset(&tm, 0xcc, sizeof(tm));
+    ptm = p_gmtime64(&t);
+    ok(!!ptm, "got NULL.\n");
+    ret = p_gmtime64_s(&tm, &t);
+    ok(!ret, "got %d.\n", ret);
+    ok(tm.tm_year == 69 && tm.tm_hour == 23 && tm.tm_min == 59 && tm.tm_sec == 59, "got %d, %d, %d, %d.\n",
+            tm.tm_year, tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+    t = -43200;
+    memset(&tm, 0xcc, sizeof(tm));
+    ptm = p_gmtime64(&t);
+    ok(!!ptm, "got NULL.\n");
+    ret = p_gmtime64_s(&tm, &t);
+    ok(!ret, "got %d.\n", ret);
+    ok(tm.tm_year == 69 && tm.tm_hour == 12 && tm.tm_min == 0 && tm.tm_sec == 0, "got %d, %d, %d, %d.\n",
+            tm.tm_year, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    ptm = p_gmtime32((__time32_t *)&t);
+    ok(!!ptm, "got NULL.\n");
+    memset(&tm, 0xcc, sizeof(tm));
+    ret = p_gmtime32_s(&tm, (__time32_t *)&t);
+    ok(!ret, "got %d.\n", ret);
+    todo_wine_if(tm.tm_year == 69 && tm.tm_hour == 12)
+    ok(tm.tm_year == 70 && tm.tm_hour == -12 && tm.tm_min == 0 && tm.tm_sec == 0, "got %d, %d, %d, %d.\n",
+            tm.tm_year, tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+    t = -43201;
+    ptm = p_gmtime64(&t);
+    ok(!ptm, "got non-NULL.\n");
+    memset(&tm, 0xcc, sizeof(tm));
+    ret = p_gmtime64_s(&tm, &t);
+    ok(ret == EINVAL, "got %d.\n", ret);
+    ok(tm.tm_year == -1 && tm.tm_hour == -1 && tm.tm_min == -1 && tm.tm_sec == -1, "got %d, %d, %d, %d.\n",
+            tm.tm_year, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    ptm = p_gmtime32((__time32_t *)&t);
+    ok(!ptm, "got NULL.\n");
+    memset(&tm, 0xcc, sizeof(tm));
+    ret = p_gmtime32_s(&tm, (__time32_t *)&t);
+    ok(ret == EINVAL, "got %d.\n", ret);
+    ok(tm.tm_year == -1 && tm.tm_hour == -1 && tm.tm_min == -1 && tm.tm_sec == -1, "got %d, %d, %d, %d.\n",
+            tm.tm_year, tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+    t = _MAX__TIME64_T + 46800;
+    memset(&tm, 0xcc, sizeof(tm));
+    ptm = p_gmtime64(&t);
+    ok(!!ptm, "got NULL.\n");
+    ret = p_gmtime64_s(&tm, &t);
+    ok(!ret, "got %d.\n", ret);
+    ok(tm.tm_year == 1101 && tm.tm_hour == 20 && tm.tm_min == 59 && tm.tm_sec == 59, "got %d, %d, %d, %d.\n",
+            tm.tm_year, tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+    t = _MAX__TIME64_T + 46801;
+    ptm = p_gmtime64(&t);
+    ok(!ptm, "got non-NULL.\n");
+    memset(&tm, 0xcc, sizeof(tm));
+    ret = p_gmtime64_s(&tm, &t);
+    ok(ret == EINVAL, "got %d.\n", ret);
+    ok(tm.tm_year == -1 && tm.tm_hour == -1 && tm.tm_min == -1 && tm.tm_sec == -1, "got %d, %d, %d, %d.\n",
+            tm.tm_year, tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
+
 START_TEST(msvcr120)
 {
     if (!init()) return;
@@ -1292,4 +1813,7 @@ START_TEST(msvcr120)
     test_nexttoward();
     test_towctrans();
     test_CurrentContext();
+    test_StructuredTaskCollection();
+    test_strcmp();
+    test_gmtime64();
 }

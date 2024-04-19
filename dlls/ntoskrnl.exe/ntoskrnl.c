@@ -23,13 +23,11 @@
 
 #include <assert.h>
 
-#define NONAMELESSUNION
-#define NONAMELESSSTRUCT
-
 #include "ntoskrnl_private.h"
 #include "excpt.h"
 #include "winreg.h"
 #include "ntsecapi.h"
+#include "evntprov.h"
 #include "ddk/csq.h"
 #include "wine/server.h"
 #include "wine/heap.h"
@@ -466,7 +464,7 @@ static ULONG get_irp_output_size( IRP *irp )
             break;
     }
 
-    if (NT_ERROR(irp->IoStatus.u.Status))
+    if (NT_ERROR(irp->IoStatus.Status))
         return 0;
     return irp->IoStatus.Information;
 }
@@ -493,7 +491,7 @@ static NTSTATUS WINAPI dispatch_irp_completion( DEVICE_OBJECT *device, IRP *irp,
     SERVER_START_REQ( set_irp_result )
     {
         req->handle   = wine_server_obj_handle( irp_data->handle );
-        req->status   = irp->IoStatus.u.Status;
+        req->status   = irp->IoStatus.Status;
         req->size     = irp->IoStatus.Information;
         if (out_size) wine_server_add_data( req, irp->UserBuffer, out_size );
         status = wine_server_call( req );
@@ -832,7 +830,6 @@ static NTSTATUS dispatch_volume( struct dispatch_context *context )
     irp->Tail.Overlay.Thread = (PETHREAD)KeGetCurrentThread();
     irp->Tail.Overlay.OriginalFileObject = file;
     irp->RequestorMode = UserMode;
-    context->in_buff = NULL;
 
     irp->Flags |= IRP_DEALLOCATE_BUFFER;  /* deallocate out_buff */
     return dispatch_irp( device, irp, context );
@@ -945,7 +942,7 @@ NTSTATUS CDECL wine_ntoskrnl_main_loop( HANDLE stop_event )
 
     for (;;)
     {
-        NtCurrentTeb()->Reserved5[1] = NULL;
+        NtCurrentTeb()->Instrumentation[1] = NULL;
         if (!context.in_buff && !(context.in_buff = HeapAlloc( GetProcessHeap(), 0, context.in_size )))
         {
             ERR( "failed to allocate buffer\n" );
@@ -974,7 +971,7 @@ NTSTATUS CDECL wine_ntoskrnl_main_loop( HANDLE stop_event )
 
                     req->prev        = wine_server_obj_handle( context.irp_data->handle );
                     req->pending     = irp->PendingReturned;
-                    req->iosb_status = irp->IoStatus.u.Status;
+                    req->iosb_status = irp->IoStatus.Status;
                     req->result      = irp->IoStatus.Information;
                     if (out_size) wine_server_add_data( req, irp->UserBuffer, out_size );
                 }
@@ -996,7 +993,7 @@ NTSTATUS CDECL wine_ntoskrnl_main_loop( HANDLE stop_event )
                 context.params  = reply->params;
                 context.in_size = reply->in_size;
                 client_tid = reply->client_tid;
-                NtCurrentTeb()->Reserved5[1] = wine_server_get_ptr( reply->client_thread );
+                NtCurrentTeb()->Instrumentation[1] = wine_server_get_ptr( reply->client_thread );
             }
             else
             {
@@ -1104,7 +1101,7 @@ void WINAPI IoInitializeIrp( IRP *irp, USHORT size, CCHAR stack_size )
     InitializeListHead( &irp->ThreadListEntry );
     irp->StackCount = stack_size;
     irp->CurrentLocation = stack_size + 1;
-    irp->Tail.Overlay.s.u2.CurrentStackLocation =
+    irp->Tail.Overlay.CurrentStackLocation =
             (PIO_STACK_LOCATION)(irp + 1) + stack_size;
 }
 
@@ -1117,7 +1114,7 @@ void WINAPI IoReuseIrp(IRP *irp, NTSTATUS iostatus)
     AllocationFlags = irp->AllocationFlags;
     IoInitializeIrp(irp, irp->Size, irp->StackCount);
     irp->AllocationFlags = AllocationFlags;
-    irp->IoStatus.u.Status = iostatus;
+    irp->IoStatus.Status = iostatus;
 }
 
 /***********************************************************************
@@ -1509,7 +1506,7 @@ static void build_driver_keypath( const WCHAR *name, UNICODE_STRING *keypath )
 static NTSTATUS WINAPI unhandled_irp( DEVICE_OBJECT *device, IRP *irp )
 {
     TRACE( "(%p, %p)\n", device, irp );
-    irp->IoStatus.u.Status = STATUS_INVALID_DEVICE_REQUEST;
+    irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
     IoCompleteRequest( irp, IO_NO_INCREMENT );
     return STATUS_INVALID_DEVICE_REQUEST;
 }
@@ -1796,7 +1793,7 @@ NTSTATUS WINAPI IoDeleteSymbolicLink( UNICODE_STRING *name )
     attr.SecurityDescriptor       = NULL;
     attr.SecurityQualityOfService = NULL;
 
-    if (!(status = NtOpenSymbolicLinkObject( &handle, 0, &attr )))
+    if (!(status = NtOpenSymbolicLinkObject( &handle, DELETE, &attr )))
     {
         NtMakeTemporaryObject( handle );
         NtClose( handle );
@@ -1846,7 +1843,7 @@ NTSTATUS WINAPI IoCallDriver( DEVICE_OBJECT *device, IRP *irp )
     NTSTATUS status;
 
     --irp->CurrentLocation;
-    irpsp = --irp->Tail.Overlay.s.u2.CurrentStackLocation;
+    irpsp = --irp->Tail.Overlay.CurrentStackLocation;
     irpsp->DeviceObject = device;
     dispatch = device->DriverObject->MajorFunction[irpsp->MajorFunction];
 
@@ -2058,10 +2055,10 @@ VOID WINAPI IoCompleteRequest( IRP *irp, UCHAR priority_boost )
 
     TRACE( "%p %u\n", irp, priority_boost );
 
-    status = irp->IoStatus.u.Status;
+    status = irp->IoStatus.Status;
     while (irp->CurrentLocation <= irp->StackCount)
     {
-        irpsp = irp->Tail.Overlay.s.u2.CurrentStackLocation;
+        irpsp = irp->Tail.Overlay.CurrentStackLocation;
         routine = irpsp->CompletionRoutine;
         call_flag = 0;
         if (routine)
@@ -2074,7 +2071,7 @@ VOID WINAPI IoCompleteRequest( IRP *irp, UCHAR priority_boost )
                 call_flag = 1;
         }
         ++irp->CurrentLocation;
-        ++irp->Tail.Overlay.s.u2.CurrentStackLocation;
+        ++irp->Tail.Overlay.CurrentStackLocation;
         if (irp->CurrentLocation <= irp->StackCount)
             device = IoGetCurrentIrpStackLocation(irp)->DeviceObject;
         else
@@ -2185,45 +2182,113 @@ LONG FASTCALL NTOSKRNL_InterlockedIncrement( LONG volatile *dest )
     return InterlockedIncrement( dest );
 }
 
+#ifdef __i386__
+
+/*************************************************************************
+ *           RtlUshortByteSwap   (NTOSKRNL.EXE.@)
+ */
+__ASM_FASTCALL_FUNC(RtlUshortByteSwap, 4,
+                    "movb %ch,%al\n\t"
+                    "movb %cl,%ah\n\t"
+                    "ret")
+
+/*************************************************************************
+ *           RtlUlongByteSwap   (NTOSKRNL.EXE.@)
+ */
+__ASM_FASTCALL_FUNC(RtlUlongByteSwap, 4,
+                    "movl %ecx,%eax\n\t"
+                    "bswap %eax\n\t"
+                    "ret")
+
+/*************************************************************************
+ *           RtlUlonglongByteSwap   (NTOSKRNL.EXE.@)
+ */
+__ASM_FASTCALL_FUNC(RtlUlonglongByteSwap, 8,
+                    "movl 4(%esp),%edx\n\t"
+                    "bswap %edx\n\t"
+                    "movl 8(%esp),%eax\n\t"
+                    "bswap %eax\n\t"
+                    "ret $8")
+
+#endif  /* __i386__ */
+
+/***********************************************************************
+ *           ExAllocatePool2   (NTOSKRNL.EXE.@)
+ */
+void * WINAPI ExAllocatePool2( POOL_FLAGS flags, SIZE_T size, ULONG tag )
+{
+    /* FIXME: handle page alignment constraints */
+    void *ret = HeapAlloc( ntoskrnl_heap, 0, size );
+    TRACE( "(0x%I64x, %Iu, %s) -> %p\n", flags, size, debugstr_fourcc(tag), ret );
+    return ret;
+}
+
+static POOL_FLAGS pool_type_to_flags( POOL_TYPE type )
+{
+    switch (type & 7)
+    {
+    case NonPagedPool:
+    case NonPagedPoolMustSucceed:
+        return POOL_FLAG_NON_PAGED;
+    case PagedPool:
+        return POOL_FLAG_PAGED;
+    case NonPagedPoolCacheAligned:
+    case NonPagedPoolCacheAlignedMustS:
+        return POOL_FLAG_NON_PAGED|POOL_FLAG_CACHE_ALIGNED;
+    case PagedPoolCacheAligned:
+        return POOL_FLAG_PAGED|POOL_FLAG_CACHE_ALIGNED;
+    default:
+        return 0;
+    }
+}
 
 /***********************************************************************
  *           ExAllocatePool   (NTOSKRNL.EXE.@)
  */
 PVOID WINAPI ExAllocatePool( POOL_TYPE type, SIZE_T size )
 {
-    return ExAllocatePoolWithTag( type, size, 0 );
-}
+    POOL_FLAGS flags = pool_type_to_flags( type );
+    if (type & POOL_RAISE_IF_ALLOCATION_FAILURE)
+        flags |= POOL_FLAG_RAISE_ON_FAILURE;
 
+    return ExAllocatePool2( flags, size, 0 );
+}
 
 /***********************************************************************
  *           ExAllocatePoolWithQuota   (NTOSKRNL.EXE.@)
  */
 PVOID WINAPI ExAllocatePoolWithQuota( POOL_TYPE type, SIZE_T size )
 {
-    return ExAllocatePoolWithTag( type, size, 0 );
-}
+    POOL_FLAGS flags = pool_type_to_flags( type ) | POOL_FLAG_USE_QUOTA;
+    if (!(type & POOL_QUOTA_FAIL_INSTEAD_OF_RAISE))
+        flags |= POOL_FLAG_RAISE_ON_FAILURE;
 
+    return ExAllocatePool2( flags, size, 0 );
+}
 
 /***********************************************************************
  *           ExAllocatePoolWithTag   (NTOSKRNL.EXE.@)
  */
 PVOID WINAPI ExAllocatePoolWithTag( POOL_TYPE type, SIZE_T size, ULONG tag )
 {
-    /* FIXME: handle page alignment constraints */
-    void *ret = HeapAlloc( ntoskrnl_heap, 0, size );
-    TRACE( "%Iu pool %u -> %p\n", size, type, ret );
-    return ret;
-}
+    POOL_FLAGS flags = pool_type_to_flags( type );
+    if (type & POOL_RAISE_IF_ALLOCATION_FAILURE)
+        flags |= POOL_FLAG_RAISE_ON_FAILURE;
 
+    return ExAllocatePool2( flags, size, tag );
+}
 
 /***********************************************************************
  *           ExAllocatePoolWithQuotaTag   (NTOSKRNL.EXE.@)
  */
 PVOID WINAPI ExAllocatePoolWithQuotaTag( POOL_TYPE type, SIZE_T size, ULONG tag )
 {
-    return ExAllocatePoolWithTag( type, size, tag );
-}
+    POOL_FLAGS flags = pool_type_to_flags( type ) | POOL_FLAG_USE_QUOTA;
+    if (!(type & POOL_QUOTA_FAIL_INSTEAD_OF_RAISE))
+        flags |= POOL_FLAG_RAISE_ON_FAILURE;
 
+    return ExAllocatePool2( flags, size, tag );
+}
 
 /***********************************************************************
  *           ExCreateCallback   (NTOSKRNL.EXE.@)
@@ -2251,6 +2316,14 @@ void WINAPI ExUnregisterCallback(void *callback_registration)
 }
 
 /***********************************************************************
+ *           ExNotifyCallback   (NTOSKRNL.EXE.@)
+ */
+void WINAPI ExNotifyCallback(void *obj, void *arg1, void *arg2)
+{
+    FIXME("(%p, %p, %p): stub\n", obj, arg1, arg2);
+}
+
+/***********************************************************************
  *           ExFreePool   (NTOSKRNL.EXE.@)
  */
 void WINAPI ExFreePool( void *ptr )
@@ -2272,20 +2345,20 @@ static void initialize_lookaside_list( GENERAL_LOOKASIDE *lookaside, PALLOCATE_F
                                        ULONG type, SIZE_T size, ULONG tag )
 {
 
-    RtlInitializeSListHead( &lookaside->u.ListHead );
+    RtlInitializeSListHead( &lookaside->ListHead );
     lookaside->Depth                 = 4;
     lookaside->MaximumDepth          = 256;
     lookaside->TotalAllocates        = 0;
-    lookaside->u2.AllocateMisses     = 0;
+    lookaside->AllocateMisses     = 0;
     lookaside->TotalFrees            = 0;
-    lookaside->u3.FreeMisses         = 0;
+    lookaside->FreeMisses         = 0;
     lookaside->Type                  = type;
     lookaside->Tag                   = tag;
     lookaside->Size                  = size;
-    lookaside->u4.Allocate           = allocate ? allocate : ExAllocatePoolWithTag;
-    lookaside->u5.Free               = free ? free : ExFreePool;
+    lookaside->Allocate           = allocate ? allocate : ExAllocatePoolWithTag;
+    lookaside->Free               = free ? free : ExFreePool;
     lookaside->LastTotalAllocates    = 0;
-    lookaside->u6.LastAllocateMisses = 0;
+    lookaside->LastAllocateMisses = 0;
 
     /* FIXME: insert in global list of lookadside lists */
 }
@@ -2323,8 +2396,8 @@ void WINAPI ExInitializePagedLookasideList(PPAGED_LOOKASIDE_LIST lookaside,
 static void delete_lookaside_list( GENERAL_LOOKASIDE *lookaside )
 {
     void *entry;
-    while ((entry = RtlInterlockedPopEntrySList(&lookaside->u.ListHead)))
-        lookaside->u5.FreeEx(entry, (LOOKASIDE_LIST_EX*)lookaside);
+    while ((entry = RtlInterlockedPopEntrySList(&lookaside->ListHead)))
+        lookaside->FreeEx(entry, (LOOKASIDE_LIST_EX*)lookaside);
 }
 
 /***********************************************************************
@@ -2491,7 +2564,7 @@ POBJECT_TYPE PsThreadType = &thread_type;
  */
 PRKTHREAD WINAPI KeGetCurrentThread(void)
 {
-    struct _KTHREAD *thread = NtCurrentTeb()->Reserved5[1];
+    struct _KTHREAD *thread = NtCurrentTeb()->Instrumentation[1];
 
     if (!thread)
     {
@@ -2504,7 +2577,7 @@ PRKTHREAD WINAPI KeGetCurrentThread(void)
         kernel_object_from_handle( handle, PsThreadType, (void**)&thread );
         if (handle != GetCurrentThread()) NtClose( handle );
 
-        NtCurrentTeb()->Reserved5[1] = thread;
+        NtCurrentTeb()->Instrumentation[1] = thread;
     }
 
     return thread;
@@ -2561,6 +2634,15 @@ LONG WINAPI KeInsertQueue(PRKQUEUE Queue, PLIST_ENTRY Entry)
     return 0;
 }
 
+/***********************************************************************
+ *           KeInsertQueueDpc   (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI KeInsertQueueDpc(PRKDPC Dpc, PVOID SystemArgument1, PVOID SystemArgument2)
+{
+    FIXME( "stub: (%p %p %p)\n", Dpc, SystemArgument1, SystemArgument2 );
+    return TRUE;
+}
+
 /**********************************************************************
  *           KeQueryActiveProcessors   (NTOSKRNL.EXE.@)
  *
@@ -2585,6 +2667,16 @@ ULONG WINAPI KeQueryActiveProcessorCountEx(USHORT group_number)
     return GetActiveProcessorCount(group_number);
 }
 
+ULONG WINAPI KeQueryActiveProcessorCount(PKAFFINITY active_processors)
+{
+    TRACE("active_processors %p.\n", active_processors);
+
+    if(active_processors)
+        *active_processors = KeQueryActiveProcessors();
+
+    return KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
+}
+
 /**********************************************************************
  *           KeQueryInterruptTime   (NTOSKRNL.EXE.@)
  *
@@ -2599,6 +2691,15 @@ ULONGLONG WINAPI KeQueryInterruptTime( void )
     return totaltime.QuadPart;
 }
 
+/***********************************************************************
+ *           KeQueryPriorityThread   (NTOSKRNL.EXE.@)
+ */
+KPRIORITY WINAPI KeQueryPriorityThread( PKTHREAD Thread )
+{
+    FIXME("(%p): stub.\n", Thread);
+    /* priority must be a value between 0 and 31 */
+    return 15;
+}
 
 /***********************************************************************
  *           KeQuerySystemTime   (NTOSKRNL.EXE.@)
@@ -2839,7 +2940,7 @@ PHYSICAL_ADDRESS WINAPI MmGetPhysicalAddress(void *virtual_address)
  */
 PVOID WINAPI MmMapIoSpace( PHYSICAL_ADDRESS PhysicalAddress, DWORD NumberOfBytes, DWORD CacheType )
 {
-    FIXME( "stub: 0x%08lx%08lx, %ld, %ld\n", PhysicalAddress.u.HighPart, PhysicalAddress.u.LowPart, NumberOfBytes, CacheType );
+    FIXME( "stub: 0x%08lx%08lx, %ld, %ld\n", PhysicalAddress.HighPart, PhysicalAddress.LowPart, NumberOfBytes, CacheType );
     return NULL;
 }
 
@@ -3293,8 +3394,7 @@ PVOID WINAPI MmGetSystemRoutineAddress(PUNICODE_STRING SystemRoutineName)
         pFunc = GetProcAddress( hMod, routineNameA.Buffer );
         if (!pFunc)
         {
-           hMod = GetModuleHandleW( halW );
-
+           hMod = LoadLibraryW( halW );
            if (hMod) pFunc = GetProcAddress( hMod, routineNameA.Buffer );
         }
         RtlFreeAnsiString( &routineNameA );
@@ -3355,11 +3455,54 @@ VOID WINAPI KeSetImportanceDpc(PRKDPC dpc, KDPC_IMPORTANCE importance)
 }
 
 /***********************************************************************
+ *          KeSetTargetProcessorDpcEx   (NTOSKRNL.EXE.@)
+ */
+VOID WINAPI KeSetTargetProcessorDpcEx(PRKDPC dpc, PPROCESSOR_NUMBER process_number)
+{
+    FIXME("%p, %p stub\n", dpc, process_number);
+}
+
+/***********************************************************************
  *          KeSetTargetProcessorDpc   (NTOSKRNL.EXE.@)
  */
 VOID WINAPI KeSetTargetProcessorDpc(PRKDPC dpc, CCHAR number)
 {
     FIXME("%p, %d stub\n", dpc, number);
+}
+
+/***********************************************************************
+ *          KeGetCurrentProcessorNumberEx   (NTOSKRNL.EXE.@)
+ */
+ULONG WINAPI KeGetCurrentProcessorNumberEx(PPROCESSOR_NUMBER process_number)
+{
+    ULONG cur_number = NtGetCurrentProcessorNumber();
+
+    FIXME("%p semi-stub\n", process_number);
+
+    if (process_number)
+    {
+        process_number->Group = 0;
+        process_number->Reserved = 0;
+        process_number->Number = cur_number;
+    }
+
+    return cur_number;
+}
+
+/***********************************************************************
+ *          KeQueryMaximumProcessorCountEx   (NTOSKRNL.EXE.@)
+ */
+ULONG WINAPI KeQueryMaximumProcessorCountEx(USHORT group_number)
+{
+    return GetMaximumProcessorCount(group_number);
+}
+
+/***********************************************************************
+ *          KeQueryMaximumProcessorCount   (NTOSKRNL.EXE.@)
+ */
+ULONG WINAPI KeQueryMaximumProcessorCount(void)
+{
+    return KeQueryMaximumProcessorCountEx(0);
 }
 
 /***********************************************************************
@@ -3393,7 +3536,15 @@ NTSTATUS WINAPI IoWMIOpenBlock(LPCGUID guid, ULONG desired_access, PVOID *data_b
  */
 NTSTATUS WINAPI PsSetLoadImageNotifyRoutine(PLOAD_IMAGE_NOTIFY_ROUTINE routine)
 {
-    FIXME("routine %p, semi-stub.\n", routine);
+    return PsSetLoadImageNotifyRoutineEx(routine, 0);
+}
+
+/*****************************************************
+ *           PsSetLoadImageNotifyRoutineEx   (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI PsSetLoadImageNotifyRoutineEx(PLOAD_IMAGE_NOTIFY_ROUTINE routine, ULONG_PTR flags)
+{
+    FIXME("routine %p, flags %Ix semi-stub.\n", routine, flags);
 
     if (load_image_notify_routine_count == ARRAY_SIZE(load_image_notify_routines))
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -3418,6 +3569,15 @@ BOOLEAN WINAPI IoSetThreadHardErrorMode(BOOLEAN EnableHardErrors)
 BOOLEAN WINAPI Ke386IoSetAccessProcess(PEPROCESS *process, ULONG flag)
 {
     FIXME("(%p %ld) stub\n", process, flag);
+    return FALSE;
+}
+
+/*****************************************************
+ *           Ke386QueryIoAccessMap  (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI Ke386QueryIoAccessMap(ULONG flag, PVOID buffer)
+{
+    FIXME("(%ld %p) stub\n", flag, buffer);
     return FALSE;
 }
 
@@ -3514,6 +3674,14 @@ BOOLEAN WINAPI KeAreApcsDisabled(void)
     unsigned int critical_region = KeGetCurrentThread()->critical_region;
     TRACE( "%u\n", critical_region );
     return !!critical_region;
+}
+
+/***********************************************************************
+ *           KeAreAllApcsDisabled    (NTOSKRNL.@)
+ */
+BOOLEAN WINAPI KeAreAllApcsDisabled(void)
+{
+    return KeAreApcsDisabled();
 }
 
 /***********************************************************************
@@ -3823,8 +3991,8 @@ static HMODULE load_driver( const WCHAR *driver_name, const UNICODE_STRING *keyn
         RtlInitUnicodeString(&module_name, str);
         nt = RtlImageNtHeader(module);
         memset(&info, 0, sizeof(info));
-        info.u.s.ImageAddressingMode = IMAGE_ADDRESSING_MODE_32BIT;
-        info.u.s.SystemModeImage = TRUE;
+        info.ImageAddressingMode = IMAGE_ADDRESSING_MODE_32BIT;
+        info.SystemModeImage = TRUE;
         info.ImageSize = nt->OptionalHeader.SizeOfImage;
         info.ImageBase = module;
 
@@ -3989,6 +4157,19 @@ NTSTATUS WINAPI ZwUnloadDriver( const UNICODE_STRING *service_name )
 }
 
 /***********************************************************************
+ *           IoCreateFileEx (NTOSKRNL.EXE.@)
+ */
+NTSTATUS WINAPI IoCreateFileEx(HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr,
+                              IO_STATUS_BLOCK *io, LARGE_INTEGER *alloc_size, ULONG attributes, ULONG sharing,
+                              ULONG disposition, ULONG create_options, VOID *ea_buffer, ULONG ea_length,
+                              CREATE_FILE_TYPE file_type, VOID *parameters, ULONG options, void *driverctx)
+{
+    FIXME(": semi-stub\n");
+    return NtCreateFile(handle, access, attr, io, alloc_size, attributes, sharing, disposition,
+                        create_options, ea_buffer, ea_length);
+}
+
+/***********************************************************************
  *           IoCreateFile (NTOSKRNL.EXE.@)
  */
 NTSTATUS WINAPI IoCreateFile(HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr,
@@ -3996,19 +4177,10 @@ NTSTATUS WINAPI IoCreateFile(HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUT
                               ULONG disposition, ULONG create_options, VOID *ea_buffer, ULONG ea_length,
                               CREATE_FILE_TYPE file_type, VOID *parameters, ULONG options )
 {
-    FIXME(": stub\n");
-    return STATUS_NOT_IMPLEMENTED;
+    FIXME(": semi-stub\n");
+    return IoCreateFileEx(handle, access, attr, io, alloc_size, attributes, sharing, disposition,
+                          create_options, ea_buffer, ea_length, file_type, parameters, options, NULL);
 }
-
-/***********************************************************************
- *           IoCreateNotificationEvent (NTOSKRNL.EXE.@)
- */
-PKEVENT WINAPI IoCreateNotificationEvent(UNICODE_STRING *name, HANDLE *handle)
-{
-    FIXME( "stub: %s %p\n", debugstr_us(name), handle );
-    return NULL;
-}
-
 
 /**************************************************************************
  *		__chkstk (NTOSKRNL.@)
@@ -4445,6 +4617,45 @@ NTSTATUS WINAPI KdEnableDebugger(void)
 {
     FIXME(": stub.\n");
     return STATUS_DEBUGGER_INACTIVE;
+}
+
+KPROCESSOR_MODE WINAPI ExGetPreviousMode(void)
+{
+    TRACE("\n");
+    return PsIsSystemThread((PETHREAD)KeGetCurrentThread()) ? KernelMode : UserMode;
+}
+
+#ifdef __x86_64__
+
+void WINAPI KfRaiseIrql(KIRQL new, KIRQL *old)
+{
+    FIXME("new %u old %p: stub.\n", new, old);
+}
+
+void WINAPI KeLowerIrql(KIRQL new)
+{
+    FIXME("new %u: stub.\n", new);
+}
+
+#endif
+
+typedef void (WINAPI *PETW_CLASSIC_CALLBACK)(
+    const GUID *guid, UCHAR control_code, void *enable_context, void *callback_context);
+
+NTSTATUS WINAPI EtwRegisterClassicProvider(const GUID *provider, ULONG type, PETW_CLASSIC_CALLBACK callback,
+                                           void *context, REGHANDLE *handle)
+{
+    FIXME("provider %s, type %lu, enable_callback %p, context %p, handle %p\n", debugstr_guid(provider), type,
+          callback, context, handle);
+
+    *handle = 0xdeadbeef;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI EtwUnregister(REGHANDLE handle)
+{
+    FIXME("handle %I64x\n", handle);
+    return STATUS_SUCCESS;
 }
 
 /*****************************************************

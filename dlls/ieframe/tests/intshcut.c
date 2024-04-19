@@ -173,11 +173,17 @@ static void test_ReadAndWriteProperties(void)
     WCHAR fileNameW[MAX_PATH];
     static WCHAR iconPath[] = L"file:///C:/arbitrary/icon/path";
     char testurl[] = "http://some/bogus/url.html";
+    PROPVARIANT pv[2], pvread[2];
 
     ps[0].ulKind = PRSPEC_PROPID;
-    U(ps[0]).propid = PID_IS_ICONFILE;
+    ps[0].propid = PID_IS_ICONFILE;
     ps[1].ulKind = PRSPEC_PROPID;
-    U(ps[1]).propid = PID_IS_ICONINDEX;
+    ps[1].propid = PID_IS_ICONINDEX;
+
+    pv[0].vt = VT_LPWSTR;
+    pv[0].pwszVal = iconPath;
+    pv[1].vt = VT_I4;
+    pv[1].lVal = iconIndex;
 
     /* Make sure we have a valid temporary directory */
     GetTempPathW(MAX_PATH, fileNameW);
@@ -190,7 +196,6 @@ static void test_ReadAndWriteProperties(void)
         IPersistFile *pf;
         IPropertyStorage *pPropStgWrite;
         IPropertySetStorage *pPropSetStg;
-        PROPVARIANT pv[2];
 
         /* We need to set a URL -- IPersistFile refuses to save without one. */
         hr = urlA->lpVtbl->SetURL(urlA, testurl, 0);
@@ -205,10 +210,6 @@ static void test_ReadAndWriteProperties(void)
 
         IPersistFile_Release(pf);
 
-        pv[0].vt = VT_LPWSTR;
-        U(pv[0]).pwszVal = iconPath;
-        pv[1].vt = VT_I4;
-        U(pv[1]).lVal = iconIndex;
         hr = urlA->lpVtbl->QueryInterface(urlA, &IID_IPropertySetStorage, (void **) &pPropSetStg);
         ok(hr == S_OK, "Unable to get an IPropertySetStorage, hr=0x%lx\n", hr);
 
@@ -218,10 +219,39 @@ static void test_ReadAndWriteProperties(void)
         hr = IPropertyStorage_WriteMultiple(pPropStgWrite, 2, ps, pv, 0);
         ok(hr == S_OK, "Unable to set properties, hr=0x%lx\n", hr);
 
+        memset(pvread, 0, sizeof(pvread));
+        hr = IPropertyStorage_ReadMultiple(pPropStgWrite, 2, ps, pvread);
+        ok(hr == S_OK, "Unable to read properties, hr=0x%lx\n", hr);
+        ok(pvread[1].vt == VT_I4, "got %d\n", pvread[1].vt);
+        ok(pvread[1].lVal == iconIndex, "Read wrong icon index: %d\n", pvread[1].iVal);
+        ok(pvread[0].vt == VT_LPWSTR, "got %d\n", pvread[0].vt);
+        ok(lstrcmpW(pvread[0].pwszVal, iconPath) == 0, "Wrong icon path read: %s\n", wine_dbgstr_w(pvread[0].pwszVal));
+        PropVariantClear(&pvread[0]);
+        PropVariantClear(&pvread[1]);
+
         hr = IPropertyStorage_Commit(pPropStgWrite, STGC_DEFAULT);
         ok(hr == S_OK, "Failed to commit properties, hr=0x%lx\n", hr);
 
         pPropStgWrite->lpVtbl->Release(pPropStgWrite);
+
+        /* Test with STGM_WRITE */
+        hr = IPropertySetStorage_Open(pPropSetStg, &FMTID_Intshcut, STGM_WRITE, &pPropStgWrite);
+        ok(hr == S_OK, "Unable to get an IPropertyStorage for writing, hr=0x%lx\n", hr);
+
+        if (hr == S_OK)
+        {
+            memset(pvread, 0, sizeof(pvread));
+            hr = IPropertyStorage_ReadMultiple(pPropStgWrite, 2, ps, pvread);
+            ok(hr == S_OK, "Unable to read properties, hr=0x%lx\n", hr);
+            ok(pvread[1].vt == VT_I4, "got %d\n", pvread[1].vt);
+            ok(pvread[1].lVal == iconIndex, "Read wrong icon index: %d\n", pvread[1].iVal);
+            ok(pvread[0].vt == VT_LPWSTR, "got %d\n", pvread[0].vt);
+            ok(lstrcmpW(pvread[0].pwszVal, iconPath) == 0, "Wrong icon path read: %s\n", wine_dbgstr_w(pvread[0].pwszVal));
+            PropVariantClear(&pvread[0]);
+            PropVariantClear(&pvread[1]);
+
+            IPropertyStorage_Release(pPropStgWrite);
+        }
         urlA->lpVtbl->Release(urlA);
         IPropertySetStorage_Release(pPropSetStg);
     }
@@ -262,12 +292,16 @@ static void test_ReadAndWriteProperties(void)
     {
         ok(hr == S_OK, "Unable to read properties, hr=0x%lx\n", hr);
         ok(pvread[1].vt == VT_I4, "got %d\n", pvread[1].vt);
-        ok(U(pvread[1]).lVal == iconIndex, "Read wrong icon index: %d\n", U(pvread[1]).iVal);
+        ok(pvread[1].lVal == iconIndex, "Read wrong icon index: %d\n", pvread[1].iVal);
         ok(pvread[0].vt == VT_LPWSTR, "got %d\n", pvread[0].vt);
-        ok(lstrcmpW(U(pvread[0]).pwszVal, iconPath) == 0, "Wrong icon path read: %s\n", wine_dbgstr_w(U(pvread[0]).pwszVal));
+        ok(lstrcmpW(pvread[0].pwszVal, iconPath) == 0, "Wrong icon path read: %s\n", wine_dbgstr_w(pvread[0].pwszVal));
     }
         PropVariantClear(&pvread[0]);
         PropVariantClear(&pvread[1]);
+
+        hr = IPropertyStorage_WriteMultiple(pPropStgRead, 2, ps, pv, 0);
+        ok(hr == STG_E_ACCESSDENIED, "setting properties should return STG_E_ACCESSDENIED instead of 0x%lx\n", hr);
+
         IPropertyStorage_Release(pPropStgRead);
         IPropertySetStorage_Release(pPropSetStg);
         urlAFromFile->lpVtbl->Release(urlAFromFile);
@@ -356,14 +390,14 @@ static void test_Load(void)
         ok(hres == S_OK, "Unable to get an IPropertyStorage for reading, hr=0x%lx\n", hres);
 
         ps.ulKind = PRSPEC_PROPID;
-        U(ps).propid = PID_IS_ICONFILE;
+        ps.propid = PID_IS_ICONFILE;
         v.vt = VT_NULL;
         hres = IPropertyStorage_ReadMultiple(propstorage, 1, &ps, &v);
         ok(hres == S_FALSE, "got 0x%08lx\n", hres);
         ok(v.vt == VT_EMPTY, "got %d\n", v.vt);
 
         ps.ulKind = PRSPEC_PROPID;
-        U(ps).propid = PID_IS_ICONINDEX;
+        ps.propid = PID_IS_ICONINDEX;
         v.vt = VT_EMPTY;
         hres = IPropertyStorage_ReadMultiple(propstorage, 1, &ps, &v);
         ok(hres == S_FALSE, "got 0x%08lx\n", hres);

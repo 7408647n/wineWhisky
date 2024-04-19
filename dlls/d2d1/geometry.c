@@ -1535,7 +1535,7 @@ static BOOL d2d_cdt_triangulate(struct d2d_cdt *cdt, size_t start_vertex, size_t
         return TRUE;
     }
 
-    /* More than tree vertices, divide. */
+    /* More than three vertices, divide. */
     cut = vertex_count / 2;
     if (!d2d_cdt_triangulate(cdt, start_vertex, cut, &left_outer, &left_inner))
         return FALSE;
@@ -2285,6 +2285,9 @@ static HRESULT d2d_path_geometry_triangulate(struct d2d_geometry *geometry)
     size_t vertex_count, i, j;
     struct d2d_cdt cdt = {0};
     D2D1_POINT_2F *vertices;
+#ifdef __i386__
+    unsigned int control_word_x87, mask = 0;
+#endif
 
     for (i = 0, vertex_count = 0; i < geometry->u.path.figure_count; ++i)
     {
@@ -2335,10 +2338,20 @@ static HRESULT d2d_path_geometry_triangulate(struct d2d_geometry *geometry)
 
     cdt.free_edge = ~0u;
     cdt.vertices = vertices;
+
+#ifdef __i386__
+    control_word_x87 = _controlfp(0, 0);
+    _controlfp(_PC_24, mask = _MCW_PC);
+#endif
     if (!d2d_cdt_triangulate(&cdt, 0, vertex_count, &left_edge, &right_edge))
         goto fail;
     if (!d2d_cdt_insert_segments(&cdt, geometry))
         goto fail;
+#ifdef __i386__
+    _controlfp(control_word_x87, _MCW_PC);
+    mask = 0;
+#endif
+
     if (!d2d_cdt_generate_faces(&cdt, geometry))
         goto fail;
 
@@ -2350,6 +2363,9 @@ fail:
     geometry->fill.vertex_count = 0;
     free(vertices);
     free(cdt.edges);
+#ifdef __i386__
+    if (mask) _controlfp(control_word_x87, mask);
+#endif
     return E_FAIL;
 }
 
@@ -3231,6 +3247,7 @@ done:
     if (FAILED(hr))
     {
         free(geometry->fill.bezier_vertices);
+        geometry->fill.bezier_vertices = NULL;
         geometry->fill.bezier_vertex_count = 0;
         d2d_path_geometry_free_figures(geometry);
         geometry->u.path.state = D2D_GEOMETRY_STATE_ERROR;

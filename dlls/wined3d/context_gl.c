@@ -25,6 +25,7 @@
  */
 
 #include "wined3d_private.h"
+#include "wined3d_gl.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
@@ -152,7 +153,7 @@ static void wined3d_context_gl_destroy_fbo(struct wined3d_context_gl *context_gl
 }
 
 static void context_attach_depth_stencil_rb(const struct wined3d_gl_info *gl_info,
-        GLenum fbo_target, DWORD flags, GLuint rb)
+        GLenum fbo_target, uint32_t flags, GLuint rb)
 {
     if (flags & WINED3D_FBO_ENTRY_FLAG_DEPTH)
     {
@@ -507,7 +508,7 @@ static inline void wined3d_context_gl_set_fbo_key_for_render_target(const struct
         key->objects[idx].object = render_target->gl_view.name;
         key->objects[idx].target = render_target->gl_view.target;
         key->objects[idx].level = 0;
-        key->objects[idx].layer = WINED3D_ALL_LAYERS;
+        key->objects[idx].layer = (render_target->layer_count == 1 ? 0 : WINED3D_ALL_LAYERS);
         return;
     }
 
@@ -577,7 +578,7 @@ static struct fbo_entry *wined3d_context_gl_create_fbo_entry(const struct wined3
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     struct fbo_entry *entry;
 
-    entry = heap_alloc(sizeof(*entry));
+    entry = malloc(sizeof(*entry));
     wined3d_context_gl_generate_fbo_key(context_gl, &entry->key,
             render_targets, depth_stencil, color_location, ds_location);
     entry->flags = 0;
@@ -628,7 +629,7 @@ static void wined3d_context_gl_destroy_fbo_entry(struct wined3d_context_gl *cont
     }
     --context_gl->fbo_entry_count;
     list_remove(&entry->entry);
-    heap_free(entry);
+    free(entry);
 }
 
 /* Context activation is done by the caller. */
@@ -849,9 +850,9 @@ static void wined3d_context_gl_apply_fbo_state(struct wined3d_context_gl *contex
 }
 
 /* Context activation is done by the caller. */
-void wined3d_context_gl_apply_fbo_state_blit(struct wined3d_context_gl *context_gl, GLenum target,
+void wined3d_context_gl_apply_fbo_state_explicit(struct wined3d_context_gl *context_gl, GLenum target,
         struct wined3d_resource *rt, unsigned int rt_sub_resource_idx,
-        struct wined3d_resource *ds, unsigned int ds_sub_resource_idx, DWORD location)
+        struct wined3d_resource *ds, unsigned int ds_sub_resource_idx, uint32_t location)
 {
     struct wined3d_rendertarget_info ds_info = {{0}};
 
@@ -1210,7 +1211,8 @@ static BOOL wined3d_context_gl_set_pixel_format(struct wined3d_context_gl *conte
         return FALSE;
 
     current = gl_info->gl_ops.wgl.p_wglGetPixelFormat(dc);
-    if (current == format) goto success;
+    if ((current == format) || (!current && context_gl->internal_format_set))
+        goto success;
 
     /* By default WGL doesn't allow pixel format adjustments but we need it
      * here. For this reason there's a Wine specific wglSetPixelFormat()
@@ -1225,6 +1227,7 @@ static BOOL wined3d_context_gl_set_pixel_format(struct wined3d_context_gl *conte
                     format, dc);
             return FALSE;
         }
+        context_gl->internal_format_set = 1;
     }
     else if (current)
     {
@@ -1239,7 +1242,7 @@ static BOOL wined3d_context_gl_set_pixel_format(struct wined3d_context_gl *conte
     else if (!SetPixelFormat(dc, format, NULL))
     {
         /* This may also happen if the dc belongs to a destroyed window. */
-        WARN("Failed to set pixel format %d on device context %p, last error %#x.\n",
+        WARN("Failed to set pixel format %d on device context %p, last error %#lx.\n",
                 format, dc, GetLastError());
         return FALSE;
     }
@@ -1258,8 +1261,10 @@ success:
 
 static BOOL wined3d_context_gl_set_gl_context(struct wined3d_context_gl *context_gl)
 {
-    struct wined3d_swapchain_gl *swapchain_gl = wined3d_swapchain_gl(context_gl->c.swapchain);
+    struct wined3d_device_gl *device_gl = wined3d_device_gl(context_gl->c.device);
     BOOL backup = FALSE;
+
+    TRACE("context_gl %p.\n", context_gl);
 
     if (!wined3d_context_gl_set_pixel_format(context_gl))
     {
@@ -1270,28 +1275,25 @@ static BOOL wined3d_context_gl_set_gl_context(struct wined3d_context_gl *context
 
     if (backup || !wglMakeCurrent(context_gl->dc, context_gl->gl_ctx))
     {
-        WARN("Failed to make GL context %p current on device context %p, last error %#x.\n",
+        WARN("Failed to make GL context %p current on device context %p, last error %#lx.\n",
                 context_gl->gl_ctx, context_gl->dc, GetLastError());
         context_gl->valid = 0;
         WARN("Trying fallback to the backup window.\n");
 
-        /* FIXME: If the context is destroyed it's no longer associated with
-         * a swapchain, so we can't use the swapchain to get a backup dc. To
-         * make this work windowless contexts would need to be handled by the
-         * device. */
-        if (context_gl->c.destroyed || !swapchain_gl)
+        if (context_gl->c.destroyed)
         {
             FIXME("Unable to get backup dc for destroyed context %p.\n", context_gl);
             wined3d_context_gl_set_current(NULL);
             return FALSE;
         }
 
-        if (!(context_gl->dc = wined3d_swapchain_gl_get_backup_dc(swapchain_gl)))
+        if (!(context_gl->dc = wined3d_device_gl_get_backup_dc(device_gl)))
         {
             wined3d_context_gl_set_current(NULL);
             return FALSE;
         }
 
+        TRACE("Using backup DC %p.\n", context_gl->dc);
         context_gl->dc_is_private = TRUE;
         context_gl->dc_has_format = FALSE;
 
@@ -1305,7 +1307,7 @@ static BOOL wined3d_context_gl_set_gl_context(struct wined3d_context_gl *context
 
         if (!wglMakeCurrent(context_gl->dc, context_gl->gl_ctx))
         {
-            ERR("Fallback to backup window (dc %p) failed too, last error %#x.\n",
+            ERR("Fallback to backup window (dc %p) failed too, last error %#lx.\n",
                     context_gl->dc, GetLastError());
             wined3d_context_gl_set_current(NULL);
             return FALSE;
@@ -1322,7 +1324,7 @@ static void context_restore_gl_context(const struct wined3d_gl_info *gl_info, HD
 {
     if (!wglMakeCurrent(dc, gl_ctx))
     {
-        ERR("Failed to restore GL context %p on device context %p, last error %#x.\n",
+        ERR("Failed to restore GL context %p on device context %p, last error %#lx.\n",
                 gl_ctx, dc, GetLastError());
         wined3d_context_gl_set_current(NULL);
     }
@@ -1347,6 +1349,7 @@ static void wined3d_context_gl_update_window(struct wined3d_context_gl *context_
     context_gl->dc_has_format = FALSE;
     context_gl->needs_set = 1;
     context_gl->valid = 1;
+    context_gl->internal_format_set = 0;
 
     if (!(context_gl->dc = GetDCEx(context_gl->window, 0, DCX_USESTYLE | DCX_CACHE)))
     {
@@ -1368,6 +1371,8 @@ static void wined3d_context_gl_cleanup(struct wined3d_context_gl *context_gl)
     HGLRC restore_ctx;
     HDC restore_dc;
     unsigned int i;
+
+    TRACE("context_gl %p.\n", context_gl);
 
     restore_ctx = wglGetCurrentContext();
     restore_dc = wglGetCurrentDC();
@@ -1457,12 +1462,12 @@ static void wined3d_context_gl_cleanup(struct wined3d_context_gl *context_gl)
 
         checkGLcall("context cleanup");
     }
-    heap_free(context_gl->submitted.fences);
-    heap_free(context_gl->free_pipeline_statistics_queries);
-    heap_free(context_gl->free_so_statistics_queries);
-    heap_free(context_gl->free_timestamp_queries);
-    heap_free(context_gl->free_fences);
-    heap_free(context_gl->free_occlusion_queries);
+    free(context_gl->submitted.fences);
+    free(context_gl->free_pipeline_statistics_queries);
+    free(context_gl->free_so_statistics_queries);
+    free(context_gl->free_timestamp_queries);
+    free(context_gl->free_fences);
+    free(context_gl->free_occlusion_queries);
 
     LIST_FOR_EACH_ENTRY(pipeline_statistics_query, &context_gl->pipeline_statistics_queries,
             struct wined3d_pipeline_statistics_query, entry)
@@ -1529,7 +1534,7 @@ static void wined3d_context_gl_cleanup(struct wined3d_context_gl *context_gl)
         wined3d_context_gl_destroy_fbo_entry(context_gl, entry);
     }
 
-    heap_free(context_gl->texture_type);
+    free(context_gl->texture_type);
 
     wined3d_context_gl_restore_pixel_format(context_gl);
     if (restore_ctx)
@@ -1541,7 +1546,7 @@ static void wined3d_context_gl_cleanup(struct wined3d_context_gl *context_gl)
 
     if (!wglDeleteContext(context_gl->gl_ctx))
     {
-        DWORD err = GetLastError();
+        unsigned int err = GetLastError();
         ERR("Failed to delete GL context %p, last error %#x.\n", context_gl->gl_ctx, err);
     }
 
@@ -1579,8 +1584,8 @@ BOOL wined3d_context_gl_set_current(struct wined3d_context_gl *context_gl)
         {
             TRACE("Switching away from destroyed context %p.\n", old);
             wined3d_context_gl_cleanup(old);
-            heap_free((void *)old->gl_info);
-            heap_free(old);
+            free((void *)old->gl_info);
+            free(old);
         }
         else
         {
@@ -1613,7 +1618,7 @@ BOOL wined3d_context_gl_set_current(struct wined3d_context_gl *context_gl)
         TRACE("Clearing current D3D context.\n");
         if (!wglMakeCurrent(NULL, NULL))
         {
-            DWORD err = GetLastError();
+            unsigned int err = GetLastError();
             ERR("Failed to clear current GL context, last error %#x.\n", err);
             TlsSetValue(wined3d_context_tls_idx, NULL);
             return FALSE;
@@ -1672,9 +1677,13 @@ static void wined3d_context_gl_enter(struct wined3d_context_gl *context_gl)
             context_gl->restore_dc = wglGetCurrentDC();
             context_gl->needs_set = 1;
         }
-        else if (!context_gl->needs_set && !(context_gl->dc_is_private && context_gl->dc_has_format)
-                && context_gl->pixel_format != context_gl->gl_info->gl_ops.wgl.p_wglGetPixelFormat(context_gl->dc))
-            context_gl->needs_set = 1;
+        else if (!context_gl->needs_set && !(context_gl->dc_is_private && context_gl->dc_has_format))
+        {
+            int current = context_gl->gl_info->gl_ops.wgl.p_wglGetPixelFormat(context_gl->dc);
+
+            if ((current && current != context_gl->pixel_format) || (!current && !context_gl->internal_format_set))
+                context_gl->needs_set = 1;
+        }
     }
 }
 
@@ -1908,7 +1917,7 @@ HGLRC context_create_wgl_attribs(const struct wined3d_gl_info *gl_info, HDC hdc,
                 ctx_attribs[ctx_attrib_idx] = 0;
             }
             if (!(ctx = gl_info->p_wglCreateContextAttribsARB(hdc, share_ctx, ctx_attribs)))
-                WARN("Failed to create a WGL context with wglCreateContextAttribsARB, last error %#x.\n",
+                WARN("Failed to create a WGL context with wglCreateContextAttribsARB, last error %#lx.\n",
                         GetLastError());
         }
     }
@@ -1932,7 +1941,7 @@ static BOOL wined3d_context_gl_create_wgl_ctx(struct wined3d_context_gl *context
 
     device = context->device;
     adapter = device->adapter;
-    gl_info = &adapter->gl_info;
+    gl_info = &wined3d_adapter_gl(adapter)->gl_info;
 
     target = &context->current_rt.texture->resource;
     target_bind_flags = target->bind_flags;
@@ -2032,7 +2041,7 @@ static BOOL wined3d_context_gl_create_wgl_ctx(struct wined3d_context_gl *context
                 context_gl->pixel_format, context_gl->dc);
 
         wined3d_release_dc(context_gl->window, context_gl->dc);
-        if (!(context_gl->dc = wined3d_swapchain_gl_get_backup_dc(swapchain_gl)))
+        if (!(context_gl->dc = wined3d_device_gl_get_backup_dc(wined3d_device_gl(device))))
         {
             ERR("Failed to retrieve the backup device context.\n");
             return FALSE;
@@ -2063,10 +2072,10 @@ static BOOL wined3d_context_gl_create_wgl_ctx(struct wined3d_context_gl *context
 
         if (share_ctx && !wglShareLists(share_ctx, ctx))
         {
-            ERR("wglShareLists(%p, %p) failed, last error %#x.\n", share_ctx, ctx, GetLastError());
+            ERR("wglShareLists(%p, %p) failed, last error %#lx.\n", share_ctx, ctx, GetLastError());
             context_release(context);
             if (!wglDeleteContext(ctx))
-                ERR("wglDeleteContext(%p) failed, last error %#x.\n", ctx, GetLastError());
+                ERR("wglDeleteContext(%p) failed, last error %#lx.\n", ctx, GetLastError());
             return FALSE;
         }
     }
@@ -2093,7 +2102,7 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
     wined3d_context_init(&context_gl->c, &swapchain_gl->s);
 
     device = context->device;
-    gl_info = &device->adapter->gl_info;
+    gl_info = &wined3d_adapter_gl(device->adapter)->gl_info;
     context_gl->gl_info = gl_info;
     d3d_info = context->d3d_info;
 
@@ -2109,7 +2118,7 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
 
     if (!context_gl->dc)
     {
-        if (!(context_gl->dc = wined3d_swapchain_gl_get_backup_dc(swapchain_gl)))
+        if (!(context_gl->dc = wined3d_device_gl_get_backup_dc(wined3d_device_gl(device))))
         {
             ERR("Failed to retrieve a device context.\n");
             return E_FAIL;
@@ -2160,7 +2169,7 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
         }
     }
 
-    if (!(context_gl->texture_type = heap_calloc(gl_info->limits.combined_samplers,
+    if (!(context_gl->texture_type = calloc(gl_info->limits.combined_samplers,
             sizeof(*context_gl->texture_type))))
         goto fail;
 
@@ -2177,7 +2186,7 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
         ERR("Cannot activate context to set up defaults.\n");
         context_release(context);
         if (!wglDeleteContext(context_gl->gl_ctx))
-            ERR("wglDeleteContext(%p) failed, last error %#x.\n", context_gl->gl_ctx, GetLastError());
+            ERR("wglDeleteContext(%p) failed, last error %#lx.\n", context_gl->gl_ctx, GetLastError());
         goto fail;
     }
 
@@ -2243,7 +2252,7 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
         /* Set up the previous texture input for all shader units. This applies to bump mapping, and in d3d
          * the previous texture where to source the offset from is always unit - 1.
          */
-        for (i = 1; i < gl_info->limits.textures; ++i)
+        for (i = 1; i < gl_info->limits.ffp_textures; ++i)
         {
             wined3d_context_gl_active_texture(context_gl, gl_info, i);
             gl_info->gl_ops.gl.p_glTexEnvi(GL_TEXTURE_SHADER_NV,
@@ -2274,7 +2283,7 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
 
     if (gl_info->supported[ARB_POINT_SPRITE])
     {
-        for (i = 0; i < gl_info->limits.textures; ++i)
+        for (i = 0; i < gl_info->limits.ffp_textures; ++i)
         {
             wined3d_context_gl_active_texture(context_gl, gl_info, i);
             gl_info->gl_ops.gl.p_glTexEnvi(GL_POINT_SPRITE_ARB, GL_COORD_REPLACE_ARB, GL_TRUE);
@@ -2332,7 +2341,7 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
     return WINED3D_OK;
 
 fail:
-    heap_free(context_gl->texture_type);
+    free(context_gl->texture_type);
     wined3d_release_dc(context_gl->window, context_gl->dc);
     return E_FAIL;
 }
@@ -2354,6 +2363,7 @@ void wined3d_context_gl_destroy(struct wined3d_context_gl *context_gl)
         context_gl->c.destroy_delayed = 1;
         /* FIXME: Get rid of a pointer to swapchain from wined3d_context. */
         context_gl->c.swapchain = NULL;
+        context_gl->c.device = NULL;
         return;
     }
 
@@ -2365,7 +2375,7 @@ void wined3d_context_gl_destroy(struct wined3d_context_gl *context_gl)
 
         /* Make a copy of gl_info for wined3d_context_gl_cleanup() use, the
          * one in wined3d_adapter may go away in the meantime. */
-        gl_info = heap_alloc(sizeof(*gl_info));
+        gl_info = malloc(sizeof(*gl_info));
         *gl_info = *context_gl->gl_info;
         context_gl->gl_info = gl_info;
         context_gl->c.destroyed = 1;
@@ -2375,7 +2385,7 @@ void wined3d_context_gl_destroy(struct wined3d_context_gl *context_gl)
 
     wined3d_context_gl_cleanup(context_gl);
     TlsSetValue(context_get_tls_idx(), NULL);
-    heap_free(context_gl);
+    free(context_gl);
 }
 
 const unsigned int *wined3d_context_gl_get_tex_unit_mapping(const struct wined3d_context_gl *context_gl,
@@ -2386,7 +2396,7 @@ const unsigned int *wined3d_context_gl_get_tex_unit_mapping(const struct wined3d
     if (!shader_version)
     {
         *base = 0;
-        *count = WINED3D_MAX_TEXTURES;
+        *count = WINED3D_MAX_FFP_TEXTURES;
         return context_gl->tex_unit_map;
     }
 
@@ -2441,9 +2451,6 @@ void wined3d_context_gl_enable_clip_distances(struct wined3d_context_gl *context
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     unsigned int clip_distance_count, i;
     uint32_t disable_mask, current_mask;
-
-    if (gl_info->quirks & WINED3D_CX_QUIRK_GLSL_CLIP_BROKEN)
-        return;
 
     clip_distance_count = gl_info->limits.user_clip_distances;
     disable_mask = ~enable_mask;
@@ -2609,6 +2616,37 @@ void wined3d_context_gl_bind_texture(struct wined3d_context_gl *context_gl, GLen
     checkGLcall("bind texture");
 }
 
+GLuint64 wined3d_device_gl_get_dummy_bindless_handle(const struct wined3d_device_gl *device_gl,
+        enum wined3d_shader_resource_type type)
+{
+    switch (type)
+    {
+        case WINED3D_SHADER_RESOURCE_BUFFER:
+            return device_gl->dummy_textures.bindless.tex_buffer;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_1D:
+            return device_gl->dummy_textures.bindless.tex_1d;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_2D:
+            return device_gl->dummy_textures.bindless.tex_2d;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_3D:
+            return device_gl->dummy_textures.bindless.tex_3d;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_CUBE:
+            return device_gl->dummy_textures.bindless.tex_cube;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_1DARRAY:
+            return device_gl->dummy_textures.bindless.tex_1d_array;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_2DARRAY:
+            return device_gl->dummy_textures.bindless.tex_2d_array;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_CUBEARRAY:
+            return device_gl->dummy_textures.bindless.tex_cube_array;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_2DMS:
+            return device_gl->dummy_textures.bindless.tex_2d_ms;
+        case WINED3D_SHADER_RESOURCE_TEXTURE_2DMSARRAY:
+            return device_gl->dummy_textures.bindless.tex_2d_array;
+        default:
+            FIXME("Unhandled resource type %#x.\n", type);
+            return 0;
+    }
+}
+
 static void wined3d_context_gl_poll_fences(struct wined3d_context_gl *context_gl)
 {
     struct wined3d_device_gl *device_gl = wined3d_device_gl(context_gl->c.device);
@@ -2666,8 +2704,6 @@ static void wined3d_context_gl_cleanup_resources(struct wined3d_context_gl *cont
         wined3d_device_gl_free_memory(device_gl, r->block);
         if (i != --count)
             *r = blocks[count];
-        else
-            ++i;
     }
     device_gl->retired_block_count = count;
 }
@@ -2709,7 +2745,7 @@ void wined3d_context_gl_submit_command_fence(struct wined3d_context_gl *context_
     f = &context_gl->submitted.fences[context_gl->submitted.fence_count++];
     f->id = device_gl->current_fence_id;
     if (FAILED(hr = wined3d_fence_create(&device_gl->d, &f->fence)))
-        ERR("Failed to create fence, hr %#x.\n", hr);
+        ERR("Failed to create fence, hr %#lx.\n", hr);
     wined3d_fence_issue(f->fence, &device_gl->d);
 
     /* We don't expect this to ever happen, but handle it anyway. */
@@ -2729,7 +2765,7 @@ static void wined3d_context_gl_destroy_allocator_block(struct wined3d_context_gl
     struct wined3d_device_gl *device_gl = wined3d_device_gl(context_gl->c.device);
     struct wined3d_retired_block_gl *r;
 
-    if (device_gl->completed_fence_id > fence_id)
+    if (device_gl->completed_fence_id >= fence_id)
     {
         wined3d_device_gl_free_memory(device_gl, block);
         TRACE("Freed block %p.\n", block);
@@ -2855,15 +2891,13 @@ static void *wined3d_bo_gl_map(struct wined3d_bo_gl *bo, struct wined3d_context_
         if (wined3d_device_gl_create_bo(device_gl, context_gl, bo->size,
                 bo->binding, bo->usage, bo->b.coherent, bo->flags, &tmp))
         {
-            list_move_head(&tmp.b.users, &bo->b.users);
+            LIST_FOR_EACH_ENTRY(bo_user, &bo->b.users, struct wined3d_bo_user, entry)
+                bo_user->valid = false;
+            list_init(&bo->b.users);
+
             wined3d_context_gl_destroy_bo(context_gl, bo);
             *bo = tmp;
             list_init(&bo->b.users);
-            list_move_head(&bo->b.users, &tmp.b.users);
-            LIST_FOR_EACH_ENTRY(bo_user, &bo->b.users, struct wined3d_bo_user, entry)
-            {
-                bo_user->valid = false;
-            }
 
             goto map;
         }
@@ -3063,7 +3097,7 @@ void wined3d_context_gl_flush_bo_address(struct wined3d_context_gl *context_gl,
 
 void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
         const struct wined3d_bo_address *dst, const struct wined3d_bo_address *src,
-        unsigned int range_count, const struct wined3d_range *ranges)
+        unsigned int range_count, const struct wined3d_range *ranges, uint32_t map_flags)
 {
     const struct wined3d_gl_info *gl_info;
     struct wined3d_bo_gl *src_bo, *dst_bo;
@@ -3095,7 +3129,7 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
             src_ptr = wined3d_context_gl_map_bo_address(context_gl, src,
                     src_bo->size - (uintptr_t)src->addr, WINED3D_MAP_READ);
             dst_ptr = wined3d_context_gl_map_bo_address(context_gl, dst,
-                    dst_bo->size - (uintptr_t)dst->addr, WINED3D_MAP_WRITE);
+                    dst_bo->size - (uintptr_t)dst->addr, map_flags);
 
             for (i = 0; i < range_count; ++i)
                 memcpy(dst_ptr + ranges[i].offset, src_ptr + ranges[i].offset, ranges[i].size);
@@ -3117,14 +3151,23 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
     }
     else if (dst_bo && !src_bo)
     {
-        wined3d_context_gl_bind_bo(context_gl, dst_bo->binding, dst_bo->id);
-        for (i = 0; i < range_count; ++i)
-            GL_EXTCALL(glBufferSubData(dst_bo->binding,
-                    dst_bo->b.buffer_offset + (GLintptr)dst->addr + ranges[i].offset,
-                    ranges[i].size, src->addr + ranges[i].offset));
-        checkGLcall("buffer upload");
+        if ((map_flags & WINED3D_MAP_DISCARD) && (dst_bo->flags & GL_MAP_WRITE_BIT))
+        {
+            dst_ptr = wined3d_context_gl_map_bo_address(context_gl, dst, dst_bo->size, map_flags);
+            memcpy(dst_ptr, src->addr, dst_bo->size);
+            wined3d_context_gl_unmap_bo_address(context_gl, dst, range_count, ranges);
+        }
+        else
+        {
+            wined3d_context_gl_bind_bo(context_gl, dst_bo->binding, dst_bo->id);
+            for (i = 0; i < range_count; ++i)
+                GL_EXTCALL(glBufferSubData(dst_bo->binding,
+                        dst_bo->b.buffer_offset + (GLintptr)dst->addr + ranges[i].offset,
+                        ranges[i].size, src->addr + ranges[i].offset));
+            checkGLcall("buffer upload");
 
-        wined3d_context_gl_reference_bo(context_gl, dst_bo);
+            wined3d_context_gl_reference_bo(context_gl, dst_bo);
+        }
     }
     else
     {
@@ -3139,6 +3182,8 @@ void wined3d_context_gl_destroy_bo(struct wined3d_context_gl *context_gl, struct
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
 
     TRACE("context_gl %p, bo %p.\n", context_gl, bo);
+
+    assert(list_empty(&bo->b.users));
 
     if (bo->memory)
     {
@@ -3224,52 +3269,12 @@ void wined3d_context_gl_apply_blit_state(struct wined3d_context_gl *context_gl, 
 {
     struct wined3d_context *context = &context_gl->c;
     const struct wined3d_gl_info *gl_info;
-    uint32_t rt_mask, *cur_mask;
-    struct wined3d_texture *rt;
     unsigned int sampler;
     SIZE rt_size;
 
     TRACE("Setting up context %p for blitting.\n", context);
 
     gl_info = context_gl->gl_info;
-    rt = context->current_rt.texture;
-
-    if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
-    {
-        if (context->render_offscreen)
-        {
-            wined3d_texture_load(rt, context, FALSE);
-
-            wined3d_context_gl_apply_fbo_state_blit(context_gl, GL_FRAMEBUFFER, &rt->resource,
-                    context->current_rt.sub_resource_idx, NULL, 0, rt->resource.draw_binding);
-            if (rt->resource.format->id != WINED3DFMT_NULL)
-                rt_mask = 1;
-            else
-                rt_mask = 0;
-        }
-        else
-        {
-            context_gl->current_fbo = NULL;
-            wined3d_context_gl_bind_fbo(context_gl, GL_FRAMEBUFFER, 0);
-            rt_mask = context_generate_rt_mask_from_resource(&rt->resource);
-        }
-    }
-    else
-    {
-        rt_mask = wined3d_context_gl_generate_rt_mask_no_fbo(context_gl, &rt->resource);
-    }
-
-    cur_mask = context_gl->current_fbo ? &context_gl->current_fbo->rt_mask : &context_gl->draw_buffers_mask;
-
-    if (rt_mask != *cur_mask)
-    {
-        wined3d_context_gl_apply_draw_buffers(context_gl, rt_mask);
-        *cur_mask = rt_mask;
-    }
-
-    if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
-        wined3d_context_gl_check_fbo_status(context_gl, GL_FRAMEBUFFER);
-    context_invalidate_state(context, STATE_FRAMEBUFFER);
 
     wined3d_context_gl_get_rt_size(context_gl, &rt_size);
 
@@ -3297,7 +3302,7 @@ void wined3d_context_gl_apply_blit_state(struct wined3d_context_gl *context_gl, 
     sampler = context_gl->rev_tex_unit_map[0];
     if (sampler != WINED3D_UNMAPPED_STAGE)
     {
-        if (sampler < WINED3D_MAX_TEXTURES)
+        if (sampler < WINED3D_MAX_FFP_TEXTURES)
         {
             context_invalidate_state(context, STATE_TRANSFORM(WINED3D_TS_TEXTURE0 + sampler));
             context_invalidate_state(context, STATE_TEXTURESTAGE(sampler, WINED3D_TSS_COLOR_OP));
@@ -3399,7 +3404,7 @@ void wined3d_context_gl_apply_ffp_blit_state(struct wined3d_context_gl *context_
 
     /* Disable all textures. The caller can then bind a texture it wants to blit
      * from. */
-    for (i = gl_info->limits.textures - 1; i > 0 ; --i)
+    for (i = gl_info->limits.ffp_textures - 1; i > 0 ; --i)
     {
         wined3d_context_gl_active_texture(context_gl, gl_info, i);
 
@@ -3415,7 +3420,7 @@ void wined3d_context_gl_apply_ffp_blit_state(struct wined3d_context_gl *context_
         sampler = context_gl->rev_tex_unit_map[i];
         if (sampler != WINED3D_UNMAPPED_STAGE)
         {
-            if (sampler < WINED3D_MAX_TEXTURES)
+            if (sampler < WINED3D_MAX_FFP_TEXTURES)
                 context_invalidate_state(context, STATE_TEXTURESTAGE(sampler, WINED3D_TSS_COLOR_OP));
             context_invalidate_state(context, STATE_SAMPLER(sampler));
         }
@@ -3628,38 +3633,52 @@ void context_gl_apply_texture_draw_state(struct wined3d_context_gl *context_gl,
         struct wined3d_texture *texture, unsigned int sub_resource_idx, unsigned int location)
 {
     const struct wined3d_format *format = texture->resource.format;
-    GLenum buffer;
+    struct wined3d_context *context = &context_gl->c;
+    uint32_t rt_mask, *cur_mask;
 
-    if (wined3d_settings.offscreen_rendering_mode != ORM_FBO)
-        return;
+    TRACE("context_gl %p, texture %p, sub_resource_idx %u, location %s.\n",
+            context_gl, texture, sub_resource_idx, wined3d_debug_location(location));
 
-    if (format->depth_size || format->stencil_size)
+    if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
     {
-        wined3d_context_gl_apply_fbo_state_blit(context_gl, GL_DRAW_FRAMEBUFFER,
-                NULL, 0, &texture->resource, sub_resource_idx, location);
-
-        buffer = GL_NONE;
+        if (format->depth_size || format->stencil_size)
+            wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_DRAW_FRAMEBUFFER, NULL,
+                    0, &texture->resource, sub_resource_idx, location);
+        else
+            wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_DRAW_FRAMEBUFFER, &texture->resource,
+                    sub_resource_idx, NULL, 0, location);
     }
-    else
-    {
-        wined3d_context_gl_apply_fbo_state_blit(context_gl, GL_DRAW_FRAMEBUFFER,
-                &texture->resource, sub_resource_idx, NULL, 0, location);
 
-        if (location == WINED3D_LOCATION_DRAWABLE)
+    if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
+    {
+        if (location != WINED3D_LOCATION_DRAWABLE)
         {
-            TRACE("Texture %p is onscreen.\n", texture);
-            buffer = wined3d_texture_get_gl_buffer(texture);
+            if (texture->resource.format->id == WINED3DFMT_NULL || format->depth_size || format->stencil_size)
+                rt_mask = 0;
+            else
+                rt_mask = 1;
         }
         else
         {
-            TRACE("Texture %p is offscreen.\n", texture);
-            buffer = GL_COLOR_ATTACHMENT0;
+            rt_mask = context_generate_rt_mask_from_resource(&texture->resource);
         }
     }
+    else
+    {
+        rt_mask = wined3d_context_gl_generate_rt_mask_no_fbo(context_gl, &texture->resource);
+    }
 
-    wined3d_context_gl_set_draw_buffer(context_gl, buffer);
-    wined3d_context_gl_check_fbo_status(context_gl, GL_DRAW_FRAMEBUFFER);
-    context_invalidate_state(&context_gl->c, STATE_FRAMEBUFFER);
+    cur_mask = context_gl->current_fbo ? &context_gl->current_fbo->rt_mask : &context_gl->draw_buffers_mask;
+    if (rt_mask != *cur_mask)
+    {
+        wined3d_context_gl_apply_draw_buffers(context_gl, rt_mask);
+        *cur_mask = rt_mask;
+    }
+
+    if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
+        wined3d_context_gl_check_fbo_status(context_gl, GL_DRAW_FRAMEBUFFER);
+
+    context_invalidate_state(context, STATE_FRAMEBUFFER);
 }
 
 /* Context activation is done by the caller. */
@@ -3669,7 +3688,7 @@ void context_state_fb(struct wined3d_context *context, const struct wined3d_stat
     uint32_t rt_mask = find_draw_buffers_mask(context_gl, state);
     const struct wined3d_fb_state *fb = &state->fb;
     DWORD color_location = 0;
-    DWORD *cur_mask;
+    uint32_t *cur_mask;
 
     if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
     {
@@ -3747,40 +3766,55 @@ static void context_invalidate_texture_stage(struct wined3d_context *context, DW
         context_invalidate_state(context, STATE_TEXTURESTAGE(stage, i));
 }
 
+static bool use_ffp_ps(const struct wined3d_state *state)
+{
+    struct wined3d_shader *vs = state->shader[WINED3D_SHADER_TYPE_VERTEX];
+
+    if (!use_vs(state))
+        return true;
+    if (vs && vs->reg_maps.shader_version.major >= 4)
+        return false;
+    return true;
+}
+
 static void context_update_fixed_function_usage_map(struct wined3d_context *context,
         const struct wined3d_state *state)
 {
-    UINT i, start, end;
+    UINT i = 0, start, end;
 
     context->fixed_function_usage_map = 0;
-    for (i = 0; i < WINED3D_MAX_TEXTURES; ++i)
+
+    if (use_ffp_ps(state))
     {
-        enum wined3d_texture_op color_op = state->texture_states[i][WINED3D_TSS_COLOR_OP];
-        enum wined3d_texture_op alpha_op = state->texture_states[i][WINED3D_TSS_ALPHA_OP];
-        DWORD color_arg1 = state->texture_states[i][WINED3D_TSS_COLOR_ARG1] & WINED3DTA_SELECTMASK;
-        DWORD color_arg2 = state->texture_states[i][WINED3D_TSS_COLOR_ARG2] & WINED3DTA_SELECTMASK;
-        DWORD color_arg3 = state->texture_states[i][WINED3D_TSS_COLOR_ARG0] & WINED3DTA_SELECTMASK;
-        DWORD alpha_arg1 = state->texture_states[i][WINED3D_TSS_ALPHA_ARG1] & WINED3DTA_SELECTMASK;
-        DWORD alpha_arg2 = state->texture_states[i][WINED3D_TSS_ALPHA_ARG2] & WINED3DTA_SELECTMASK;
-        DWORD alpha_arg3 = state->texture_states[i][WINED3D_TSS_ALPHA_ARG0] & WINED3DTA_SELECTMASK;
+        for (i = 0; i < WINED3D_MAX_FFP_TEXTURES; ++i)
+        {
+            enum wined3d_texture_op color_op = state->texture_states[i][WINED3D_TSS_COLOR_OP];
+            enum wined3d_texture_op alpha_op = state->texture_states[i][WINED3D_TSS_ALPHA_OP];
+            DWORD color_arg1 = state->texture_states[i][WINED3D_TSS_COLOR_ARG1] & WINED3DTA_SELECTMASK;
+            DWORD color_arg2 = state->texture_states[i][WINED3D_TSS_COLOR_ARG2] & WINED3DTA_SELECTMASK;
+            DWORD color_arg3 = state->texture_states[i][WINED3D_TSS_COLOR_ARG0] & WINED3DTA_SELECTMASK;
+            DWORD alpha_arg1 = state->texture_states[i][WINED3D_TSS_ALPHA_ARG1] & WINED3DTA_SELECTMASK;
+            DWORD alpha_arg2 = state->texture_states[i][WINED3D_TSS_ALPHA_ARG2] & WINED3DTA_SELECTMASK;
+            DWORD alpha_arg3 = state->texture_states[i][WINED3D_TSS_ALPHA_ARG0] & WINED3DTA_SELECTMASK;
 
-        /* Not used, and disable higher stages. */
-        if (color_op == WINED3D_TOP_DISABLE)
-            break;
+            /* Not used, and disable higher stages. */
+            if (color_op == WINED3D_TOP_DISABLE)
+                break;
 
-        if (((color_arg1 == WINED3DTA_TEXTURE) && color_op != WINED3D_TOP_SELECT_ARG2)
-                || ((color_arg2 == WINED3DTA_TEXTURE) && color_op != WINED3D_TOP_SELECT_ARG1)
-                || ((color_arg3 == WINED3DTA_TEXTURE)
-                    && (color_op == WINED3D_TOP_MULTIPLY_ADD || color_op == WINED3D_TOP_LERP))
-                || ((alpha_arg1 == WINED3DTA_TEXTURE) && alpha_op != WINED3D_TOP_SELECT_ARG2)
-                || ((alpha_arg2 == WINED3DTA_TEXTURE) && alpha_op != WINED3D_TOP_SELECT_ARG1)
-                || ((alpha_arg3 == WINED3DTA_TEXTURE)
-                    && (alpha_op == WINED3D_TOP_MULTIPLY_ADD || alpha_op == WINED3D_TOP_LERP)))
-            context->fixed_function_usage_map |= (1u << i);
+            if (((color_arg1 == WINED3DTA_TEXTURE) && color_op != WINED3D_TOP_SELECT_ARG2)
+                    || ((color_arg2 == WINED3DTA_TEXTURE) && color_op != WINED3D_TOP_SELECT_ARG1)
+                    || ((color_arg3 == WINED3DTA_TEXTURE)
+                        && (color_op == WINED3D_TOP_MULTIPLY_ADD || color_op == WINED3D_TOP_LERP))
+                    || ((alpha_arg1 == WINED3DTA_TEXTURE) && alpha_op != WINED3D_TOP_SELECT_ARG2)
+                    || ((alpha_arg2 == WINED3DTA_TEXTURE) && alpha_op != WINED3D_TOP_SELECT_ARG1)
+                    || ((alpha_arg3 == WINED3DTA_TEXTURE)
+                        && (alpha_op == WINED3D_TOP_MULTIPLY_ADD || alpha_op == WINED3D_TOP_LERP)))
+                context->fixed_function_usage_map |= (1u << i);
 
-        if ((color_op == WINED3D_TOP_BUMPENVMAP || color_op == WINED3D_TOP_BUMPENVMAP_LUMINANCE)
-                && i < WINED3D_MAX_TEXTURES - 1)
-            context->fixed_function_usage_map |= (1u << (i + 1));
+            if ((color_op == WINED3D_TOP_BUMPENVMAP || color_op == WINED3D_TOP_BUMPENVMAP_LUMINANCE)
+                    && i < WINED3D_MAX_FFP_TEXTURES - 1)
+                context->fixed_function_usage_map |= (1u << (i + 1));
+        }
     }
 
     if (i < context->lowest_disabled_stage)
@@ -3810,8 +3844,8 @@ static void wined3d_context_gl_map_fixed_function_samplers(struct wined3d_contex
 
     ffu_map = context_gl->c.fixed_function_usage_map;
 
-    if (d3d_info->limits.ffp_textures == d3d_info->limits.ffp_blend_stages
-            || context_gl->c.lowest_disabled_stage <= d3d_info->limits.ffp_textures)
+    if (d3d_info->ffp_fragment_caps.max_textures == d3d_info->ffp_fragment_caps.max_blend_stages
+            || context_gl->c.lowest_disabled_stage <= d3d_info->ffp_fragment_caps.max_textures)
     {
         while (ffu_map)
         {
@@ -3820,6 +3854,7 @@ static void wined3d_context_gl_map_fixed_function_samplers(struct wined3d_contex
             {
                 wined3d_context_gl_map_stage(context_gl, i, i);
                 context_invalidate_state(&context_gl->c, STATE_SAMPLER(i));
+                context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
                 context_invalidate_texture_stage(&context_gl->c, i);
             }
         }
@@ -3835,6 +3870,7 @@ static void wined3d_context_gl_map_fixed_function_samplers(struct wined3d_contex
         {
             wined3d_context_gl_map_stage(context_gl, i, tex);
             context_invalidate_state(&context_gl->c, STATE_SAMPLER(i));
+            context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
             context_invalidate_texture_stage(&context_gl->c, i);
         }
 
@@ -3855,7 +3891,8 @@ static void wined3d_context_gl_map_psamplers(struct wined3d_context_gl *context_
         {
             wined3d_context_gl_map_stage(context_gl, i, i);
             context_invalidate_state(&context_gl->c, STATE_SAMPLER(i));
-            if (i < d3d_info->limits.ffp_blend_stages)
+            context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
+            if (i < d3d_info->ffp_fragment_caps.max_blend_stages)
                 context_invalidate_texture_stage(&context_gl->c, i);
         }
     }
@@ -3877,7 +3914,7 @@ static BOOL wined3d_context_gl_unit_free_for_vs(const struct wined3d_context_gl 
         if (!ps_resource_info)
         {
             /* No pixel shader, check fixed function */
-            return current_mapping >= WINED3D_MAX_TEXTURES
+            return current_mapping >= WINED3D_MAX_FFP_TEXTURES
                     || !(context_gl->c.fixed_function_usage_map & (1u << current_mapping));
         }
 
@@ -3917,6 +3954,7 @@ static void wined3d_context_gl_map_vsamplers(struct wined3d_context_gl *context_
                     {
                         wined3d_context_gl_map_stage(context_gl, vsampler_idx, start);
                         context_invalidate_state(&context_gl->c, STATE_SAMPLER(vsampler_idx));
+                        context_invalidate_state(&context_gl->c, STATE_GRAPHICS_SHADER_RESOURCE_BINDING);
                     }
 
                     --start;
@@ -3978,6 +4016,7 @@ void context_state_drawbuf(struct wined3d_context *context, const struct wined3d
 static void wined3d_context_gl_bind_shader_resources(struct wined3d_context_gl *context_gl,
         const struct wined3d_state *state, enum wined3d_shader_type shader_type)
 {
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     unsigned int bind_idx, shader_sampler_count, base, count, i;
     const struct wined3d_device *device = context_gl->c.device;
     struct wined3d_shader_sampler_map_entry *entry;
@@ -3987,6 +4026,39 @@ static void wined3d_context_gl_bind_shader_resources(struct wined3d_context_gl *
     struct wined3d_sampler *sampler;
 
     if (!(shader = state->shader[shader_type]))
+    {
+        if (shader_type == WINED3D_SHADER_TYPE_PIXEL)
+        {
+            uint32_t ffu_map = context_gl->c.fixed_function_usage_map;
+
+            while (ffu_map)
+            {
+                i = wined3d_bit_scan(&ffu_map);
+                bind_idx = context_gl->tex_unit_map[i];
+
+                view = state->shader_resource_view[WINED3D_SHADER_TYPE_PIXEL][i];
+                sampler = state->sampler[WINED3D_SHADER_TYPE_PIXEL][i];
+
+                if (view)
+                {
+                    wined3d_shader_resource_view_gl_bind(wined3d_shader_resource_view_gl(view),
+                            bind_idx, wined3d_sampler_gl(sampler), context_gl);
+                }
+                else
+                {
+                    WARN("No resource view bound at index %u.\n", i);
+                    wined3d_context_gl_active_texture(context_gl, gl_info, bind_idx);
+                    wined3d_context_gl_bind_texture(context_gl, GL_NONE, 0);
+                    if (gl_info->supported[ARB_SAMPLER_OBJECTS])
+                        GL_EXTCALL(glBindSampler(bind_idx, 0));
+                }
+            }
+        }
+
+        return;
+    }
+
+    if (gl_info->supported[ARB_BINDLESS_TEXTURE])
         return;
 
     tex_unit_map = wined3d_context_gl_get_tex_unit_mapping(context_gl,
@@ -4005,18 +4077,23 @@ static void wined3d_context_gl_bind_shader_resources(struct wined3d_context_gl *
         if (tex_unit_map)
             bind_idx = tex_unit_map[bind_idx];
 
-        if (!(view = state->shader_resource_view[shader_type][entry->resource_idx]))
+        if ((view = state->shader_resource_view[shader_type][entry->resource_idx]))
+        {
+            if (entry->sampler_idx == WINED3D_SAMPLER_DEFAULT)
+                sampler = device->default_sampler;
+            else if (!(sampler = state->sampler[shader_type][entry->sampler_idx]))
+                sampler = device->null_sampler;
+            wined3d_shader_resource_view_gl_bind(wined3d_shader_resource_view_gl(view),
+                    bind_idx, wined3d_sampler_gl(sampler), context_gl);
+        }
+        else
         {
             WARN("No resource view bound at index %u, %u.\n", shader_type, entry->resource_idx);
-            continue;
+            wined3d_context_gl_active_texture(context_gl, gl_info, bind_idx);
+            wined3d_context_gl_bind_texture(context_gl, GL_NONE, 0);
+            if (gl_info->supported[ARB_SAMPLER_OBJECTS])
+                GL_EXTCALL(glBindSampler(bind_idx, 0));
         }
-
-        if (entry->sampler_idx == WINED3D_SAMPLER_DEFAULT)
-            sampler = device->default_sampler;
-        else if (!(sampler = state->sampler[shader_type][entry->sampler_idx]))
-            sampler = device->null_sampler;
-        wined3d_shader_resource_view_gl_bind(wined3d_shader_resource_view_gl(view),
-                bind_idx, wined3d_sampler_gl(sampler), context_gl);
     }
 }
 
@@ -4073,12 +4150,32 @@ static void wined3d_context_gl_bind_unordered_access_views(struct wined3d_contex
     checkGLcall("Bind unordered access views");
 }
 
+static bool is_resource_rtv_bound(const struct wined3d_state *state, const struct wined3d_resource *resource)
+{
+    unsigned int i;
+
+    if (state->fb.depth_stencil && state->fb.depth_stencil->resource == resource)
+        return true;
+
+    if (!resource->rtv_bind_count_device)
+        return false;
+
+    for (i = 0; i < ARRAY_SIZE(state->fb.render_targets); ++i)
+    {
+        if (state->fb.render_targets[i] && state->fb.render_targets[i]->resource == resource)
+            return true;
+    }
+
+    return false;
+}
+
 static void context_gl_load_shader_resources(struct wined3d_context_gl *context_gl,
         const struct wined3d_state *state, unsigned int shader_mask)
 {
     struct wined3d_shader_sampler_map_entry *entry;
     struct wined3d_shader_resource_view_gl *srv_gl;
     struct wined3d_shader_resource_view *view;
+    struct wined3d_sampler *sampler;
     struct wined3d_shader *shader;
     struct wined3d_buffer *buffer;
     unsigned int i, j;
@@ -4089,7 +4186,26 @@ static void context_gl_load_shader_resources(struct wined3d_context_gl *context_
             continue;
 
         if (!(shader = state->shader[i]))
+        {
+            if (i == WINED3D_SHADER_TYPE_PIXEL)
+            {
+                uint32_t ffu_map = context_gl->c.fixed_function_usage_map;
+
+                while (ffu_map)
+                {
+                    i = wined3d_bit_scan(&ffu_map);
+
+                    view = state->shader_resource_view[WINED3D_SHADER_TYPE_PIXEL][i];
+                    sampler = state->sampler[WINED3D_SHADER_TYPE_PIXEL][i];
+
+                    if (view)
+                        wined3d_texture_load(texture_from_resource(view->resource),
+                                &context_gl->c, sampler->desc.srgb_decode);
+                }
+            }
+
             continue;
+        }
 
         for (j = 0; j < WINED3D_MAX_CBS; ++j)
         {
@@ -4110,6 +4226,9 @@ static void context_gl_load_shader_resources(struct wined3d_context_gl *context_
             if (!(view = state->shader_resource_view[i][entry->resource_idx]))
                 continue;
 
+            if (is_resource_rtv_bound(state, view->resource))
+                context_gl->c.uses_fbo_attached_resources = 1;
+
             if (view->resource->type == WINED3D_RTYPE_BUFFER)
             {
                 buffer = buffer_from_resource(view->resource);
@@ -4122,7 +4241,13 @@ static void context_gl_load_shader_resources(struct wined3d_context_gl *context_
             }
             else
             {
-                wined3d_texture_load(texture_from_resource(view->resource), &context_gl->c, FALSE);
+                BOOL srgb = TRUE;
+
+                if (entry->sampler_idx != WINED3D_SAMPLER_DEFAULT
+                        && (sampler = state->sampler[i][entry->sampler_idx]))
+                    srgb = sampler->desc.srgb_decode;
+
+                wined3d_texture_load(texture_from_resource(view->resource), &context_gl->c, srgb);
             }
         }
     }
@@ -4150,6 +4275,7 @@ static void context_gl_load_unordered_access_resources(struct wined3d_context_gl
         if (view->resource->type == WINED3D_RTYPE_BUFFER)
         {
             buffer = buffer_from_resource(view->resource);
+            wined3d_buffer_acquire_bo_for_write(buffer, &context_gl->c);
             wined3d_buffer_load_location(buffer, &context_gl->c, WINED3D_LOCATION_BUFFER);
             wined3d_unordered_access_view_invalidate_location(view, ~WINED3D_LOCATION_BUFFER);
             wined3d_context_gl_reference_buffer(context_gl, buffer);
@@ -4179,6 +4305,8 @@ static void context_gl_load_stream_output_buffers(struct wined3d_context_gl *con
     {
         if (!(buffer = state->stream_output[i].buffer))
             continue;
+
+        wined3d_buffer_acquire_bo_for_write(buffer, &context_gl->c);
 
         wined3d_buffer_load(buffer, &context_gl->c, state);
         wined3d_buffer_invalidate_location(buffer, ~WINED3D_LOCATION_BUFFER);
@@ -4216,7 +4344,6 @@ static BOOL context_apply_draw_state(struct wined3d_context *context,
      * result in changes to the current FBO, due to using e.g. FBO blits for
      * updating a resource location. */
     wined3d_context_gl_update_tex_unit_map(context_gl, state);
-    context_preload_textures(context, state);
     context_gl_load_shader_resources(context_gl, state, ~(1u << WINED3D_SHADER_TYPE_COMPUTE));
     context_gl_load_unordered_access_resources(context_gl, state->shader[WINED3D_SHADER_TYPE_PIXEL],
             state->unordered_access_view[WINED3D_PIPELINE_GRAPHICS]);
@@ -4293,23 +4420,10 @@ static BOOL context_apply_draw_state(struct wined3d_context *context,
 
     memset(context->dirty_graphics_states, 0, sizeof(context->dirty_graphics_states));
 
-    if (context->shader_update_mask & ~(1u << WINED3D_SHADER_TYPE_COMPUTE))
-    {
-        device->shader_backend->shader_select(device->shader_priv, context, state);
-        context->shader_update_mask &= 1u << WINED3D_SHADER_TYPE_COMPUTE;
-    }
-
-    if (context->constant_update_mask)
-    {
-        device->shader_backend->shader_load_constants(device->shader_priv, context, state);
-        context->constant_update_mask = 0;
-    }
-
     if (context->update_shader_resource_bindings)
     {
         for (i = 0; i < WINED3D_SHADER_TYPE_GRAPHICS_COUNT; ++i)
             wined3d_context_gl_bind_shader_resources(context_gl, state, i);
-        context->update_shader_resource_bindings = 0;
         if (gl_info->limits.combined_samplers == gl_info->limits.graphics_samplers)
             context->update_compute_shader_resource_bindings = 1;
     }
@@ -4325,6 +4439,13 @@ static BOOL context_apply_draw_state(struct wined3d_context *context,
 
     if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
         wined3d_context_gl_check_fbo_status(context_gl, GL_FRAMEBUFFER);
+
+    /* WINED3D_SHADER_CONST_PS_NP2_FIXUP may be set when binding shader
+     * resources, so constant loading needs to be done after that. */
+    device->shader_backend->shader_apply_draw_state(device->shader_priv, context, state);
+    context->shader_update_mask &= 1u << WINED3D_SHADER_TYPE_COMPUTE;
+    context->constant_update_mask = 0;
+    context->update_shader_resource_bindings = 0;
 
     context->last_was_blit = FALSE;
     context->last_was_ffp_blit = FALSE;
@@ -4356,16 +4477,11 @@ static void wined3d_context_gl_apply_compute_state(struct wined3d_context_gl *co
     }
     memset(context_gl->c.dirty_compute_states, 0, sizeof(*context_gl->c.dirty_compute_states));
 
-    if (context_gl->c.shader_update_mask & (1u << WINED3D_SHADER_TYPE_COMPUTE))
-    {
-        device->shader_backend->shader_select_compute(device->shader_priv, &context_gl->c, state);
-        context_gl->c.shader_update_mask &= ~(1u << WINED3D_SHADER_TYPE_COMPUTE);
-    }
+    device->shader_backend->shader_apply_compute_state(device->shader_priv, &context_gl->c, state);
 
     if (context_gl->c.update_compute_shader_resource_bindings)
     {
         wined3d_context_gl_bind_shader_resources(context_gl, state, WINED3D_SHADER_TYPE_COMPUTE);
-        context_gl->c.update_compute_shader_resource_bindings = 0;
         if (gl_info->limits.combined_samplers == gl_info->limits.graphics_samplers)
             context_gl->c.update_shader_resource_bindings = 1;
     }
@@ -4391,6 +4507,8 @@ static void wined3d_context_gl_apply_compute_state(struct wined3d_context_gl *co
 
     context_gl->c.last_was_blit = FALSE;
     context_gl->c.last_was_ffp_blit = FALSE;
+    context_gl->c.shader_update_mask &= ~(1u << WINED3D_SHADER_TYPE_COMPUTE);
+    context_gl->c.update_compute_shader_resource_bindings = 0;
 }
 
 void wined3d_context_gl_end_transform_feedback(struct wined3d_context_gl *context_gl)
@@ -4453,7 +4571,7 @@ static void wined3d_context_gl_setup_target(struct wined3d_context_gl *context_g
         {
             /* Disable blending when the alpha mask has changed and when a format doesn't support blending. */
             if ((old->alpha_size && !new->alpha_size) || (!old->alpha_size && new->alpha_size)
-                    || !(texture->resource.format_flags & WINED3DFMT_FLAG_POSTPIXELSHADER_BLENDING))
+                    || !(texture->resource.format_caps & WINED3D_FORMAT_CAP_POSTPIXELSHADER_BLENDING))
                 context_invalidate_state(&context_gl->c, STATE_BLEND);
         }
 
@@ -4488,6 +4606,12 @@ static void wined3d_context_gl_activate(struct wined3d_context_gl *context_gl,
         struct wined3d_texture *texture, unsigned int sub_resource_idx)
 {
     wined3d_context_gl_enter(context_gl);
+    if (texture && texture->swapchain && texture->swapchain != context_gl->c.swapchain)
+    {
+        TRACE("Switching context_gl %p from swapchain %p to swapchain %p.\n",
+                context_gl, context_gl->c.swapchain, texture->swapchain);
+        context_gl->c.swapchain = texture->swapchain;
+    }
     wined3d_context_gl_update_window(context_gl);
     wined3d_context_gl_setup_target(context_gl, texture, sub_resource_idx);
     if (!context_gl->valid)
@@ -4643,15 +4767,17 @@ static void wined3d_context_gl_draw_primitive_arrays(struct wined3d_context_gl *
         const struct wined3d_state *state, const void *idx_data, unsigned int idx_size, int base_vertex_idx,
         unsigned int start_idx, unsigned int count, unsigned int start_instance, unsigned int instance_count)
 {
-    const struct wined3d_ffp_attrib_ops *ops = &context_gl->c.d3d_info->ffp_attrib_ops;
     GLenum idx_type = idx_size == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
     const struct wined3d_stream_info *si = &context_gl->c.stream_info;
     GLenum mode = gl_primitive_type_from_d3d(state->primitive_type);
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     unsigned int instanced_elements[ARRAY_SIZE(si->elements)];
+    const struct wined3d_ffp_attrib_ops *ops;
     unsigned int instanced_element_count = 0;
     const void *indices;
     unsigned int i, j;
+
+    ops = &gl_info->ffp_attrib_ops;
 
     indices = (const char *)idx_data + idx_size * start_idx;
 
@@ -4815,9 +4941,9 @@ static void draw_primitive_immediate_mode(struct wined3d_context_gl *context_gl,
     /* Immediate mode drawing can't make use of indices in a VBO - get the
      * data from the index buffer. */
     if (idx_size)
-        idx_data = wined3d_buffer_load_sysmem(state->index_buffer, &context_gl->c) + state->index_offset;
+        idx_data = (uint8_t *)wined3d_buffer_load_sysmem(state->index_buffer, &context_gl->c) + state->index_offset;
 
-    ops = &d3d_info->ffp_attrib_ops;
+    ops = &gl_info->ffp_attrib_ops;
 
     gl_info->gl_ops.gl.p_glBegin(gl_primitive_type_from_d3d(state->primitive_type));
 
@@ -4898,7 +5024,7 @@ static void draw_primitive_immediate_mode(struct wined3d_context_gl *context_gl,
         GL_EXTCALL(glSecondaryColor3fEXT)(0.0f, 0.0f, 0.0f);
     }
 
-    texture_stages = d3d_info->limits.ffp_blend_stages;
+    texture_stages = d3d_info->ffp_fragment_caps.max_blend_stages;
     for (texture_idx = 0; texture_idx < texture_stages; ++texture_idx)
     {
         if (!gl_info->supported[ARB_MULTITEXTURE] && texture_idx > 0)
@@ -4907,7 +5033,7 @@ static void draw_primitive_immediate_mode(struct wined3d_context_gl *context_gl,
             continue;
         }
 
-        if (!ps && !state->textures[texture_idx])
+        if (!ps && !wined3d_state_get_ffp_texture(state, texture_idx))
             continue;
 
         texture_unit = context_gl->tex_unit_map[texture_idx];
@@ -5305,8 +5431,6 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
     else
     {
         unsigned int instance_count = parameters->u.direct.instance_count;
-        if (context->instance_count)
-            instance_count = context->instance_count;
 
         if (context->use_immediate_mode_draw || emulation)
             draw_primitive_immediate_mode(wined3d_context_gl(context), state, stream_info, idx_data,
@@ -5366,7 +5490,7 @@ void wined3d_context_gl_load_tex_coords(const struct wined3d_context_gl *context
     unsigned int texture_idx;
     GLuint bo;
 
-    for (texture_idx = 0; texture_idx < context_gl->c.d3d_info->limits.ffp_blend_stages; ++texture_idx)
+    for (texture_idx = 0; texture_idx < context_gl->c.d3d_info->ffp_fragment_caps.max_blend_stages; ++texture_idx)
     {
         unsigned int coord_idx = state->texture_states[texture_idx][WINED3D_TSS_TEXCOORD_INDEX];
 
@@ -5379,7 +5503,7 @@ void wined3d_context_gl_load_tex_coords(const struct wined3d_context_gl *context
             continue;
         }
 
-        if (coord_idx < WINED3D_MAX_TEXTURES && (si->use_map & (1u << (WINED3D_FFP_TEXCOORD0 + coord_idx))))
+        if (coord_idx < WINED3D_MAX_FFP_TEXTURES && (si->use_map & (1u << (WINED3D_FFP_TEXCOORD0 + coord_idx))))
         {
             const struct wined3d_stream_info_element *e = &si->elements[WINED3D_FFP_TEXCOORD0 + coord_idx];
 
@@ -5402,7 +5526,8 @@ void wined3d_context_gl_load_tex_coords(const struct wined3d_context_gl *context
             gl_info->gl_ops.gl.p_glTexCoordPointer(format_gl->vtx_format, format_gl->vtx_type, e->stride,
                     get_vertex_attrib_pointer(e, state));
             gl_info->gl_ops.gl.p_glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-            state->streams[e->stream_idx].buffer->bo_user.valid = true;
+            if (bo)
+                wined3d_buffer_validate_user(state->streams[e->stream_idx].buffer);
         }
         else
         {
@@ -5412,7 +5537,7 @@ void wined3d_context_gl_load_tex_coords(const struct wined3d_context_gl *context
     if (gl_info->supported[NV_REGISTER_COMBINERS])
     {
         /* The number of the mapped stages increases monotonically, so it's fine to use the last used one. */
-        for (texture_idx = mapped_stage + 1; texture_idx < gl_info->limits.textures; ++texture_idx)
+        for (texture_idx = mapped_stage + 1; texture_idx < gl_info->limits.ffp_textures; ++texture_idx)
         {
             GL_EXTCALL(glMultiTexCoord4fARB(GL_TEXTURE0_ARB + texture_idx, 0, 0, 0, 1));
         }
@@ -5450,7 +5575,6 @@ static void wined3d_context_gl_load_vertex_data(struct wined3d_context_gl *conte
 
     /* This is used for the fixed-function pipeline only, and the
      * fixed-function pipeline doesn't do instancing. */
-    context_gl->c.instance_count = 0;
     current_bo = gl_info->supported[ARB_VERTEX_BUFFER_OBJECT] ? ~0u : 0;
 
     /* Blend data */
@@ -5490,7 +5614,8 @@ static void wined3d_context_gl_load_vertex_data(struct wined3d_context_gl *conte
         checkGLcall("glVertexPointer(...)");
         gl_info->gl_ops.gl.p_glEnableClientState(GL_VERTEX_ARRAY);
         checkGLcall("glEnableClientState(GL_VERTEX_ARRAY)");
-        state->streams[e->stream_idx].buffer->bo_user.valid = true;
+        if (bo)
+            wined3d_buffer_validate_user(state->streams[e->stream_idx].buffer);
     }
 
     /* Normals */
@@ -5513,7 +5638,8 @@ static void wined3d_context_gl_load_vertex_data(struct wined3d_context_gl *conte
         checkGLcall("glNormalPointer(...)");
         gl_info->gl_ops.gl.p_glEnableClientState(GL_NORMAL_ARRAY);
         checkGLcall("glEnableClientState(GL_NORMAL_ARRAY)");
-        state->streams[e->stream_idx].buffer->bo_user.valid = true;
+        if (bo)
+            wined3d_buffer_validate_user(state->streams[e->stream_idx].buffer);
     }
     else
     {
@@ -5542,7 +5668,8 @@ static void wined3d_context_gl_load_vertex_data(struct wined3d_context_gl *conte
         checkGLcall("glColorPointer(4, GL_UNSIGNED_BYTE, ...)");
         gl_info->gl_ops.gl.p_glEnableClientState(GL_COLOR_ARRAY);
         checkGLcall("glEnableClientState(GL_COLOR_ARRAY)");
-        state->streams[e->stream_idx].buffer->bo_user.valid = true;
+        if (bo)
+            wined3d_buffer_validate_user(state->streams[e->stream_idx].buffer);
     }
     else
     {
@@ -5606,7 +5733,8 @@ static void wined3d_context_gl_load_vertex_data(struct wined3d_context_gl *conte
             }
             gl_info->gl_ops.gl.p_glEnableClientState(GL_SECONDARY_COLOR_ARRAY_EXT);
             checkGLcall("glEnableClientState(GL_SECONDARY_COLOR_ARRAY_EXT)");
-            state->streams[e->stream_idx].buffer->bo_user.valid = true;
+            if (bo)
+                wined3d_buffer_validate_user(state->streams[e->stream_idx].buffer);
         }
         else
         {
@@ -5664,7 +5792,6 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
     unsigned int i;
 
     /* Default to no instancing. */
-    context->instance_count = 0;
     current_bo = gl_info->supported[ARB_VERTEX_BUFFER_OBJECT] ? ~0u : 0;
 
     if (stream_info->use_map & ~wined3d_mask_from_size(gl_info->limits.vertex_attribs))
@@ -5678,7 +5805,6 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
     for (i = 0; i < gl_info->limits.vertex_attribs; ++i)
     {
         const struct wined3d_stream_info_element *element = &stream_info->elements[i];
-        const void *offset = get_vertex_attrib_pointer(element, state);
         const struct wined3d_stream_state *stream;
         const struct wined3d_format_gl *format_gl;
 
@@ -5709,10 +5835,6 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
 
         format_gl = wined3d_format_gl(element->format);
         stream = &state->streams[element->stream_idx];
-        stream->buffer->bo_user.valid = true;
-
-        if ((stream->flags & WINED3DSTREAMSOURCE_INSTANCEDATA) && !context->instance_count)
-            context->instance_count = state->streams[0].frequency;
 
         if (gl_info->supported[ARB_INSTANCED_ARRAYS])
         {
@@ -5736,6 +5858,7 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
 
         if (element->stride)
         {
+            const void *offset = get_vertex_attrib_pointer(element, state);
             unsigned int format_attrs = format_gl->f.attrs;
 
             bo = wined3d_bo_gl_id(element->data.buffer_object);
@@ -5745,6 +5868,9 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
                 checkGLcall("glBindBuffer");
                 current_bo = bo;
             }
+            if (bo)
+                wined3d_buffer_validate_user(stream->buffer);
+
             /* Use the VBO to find out if a vertex buffer exists, not the vb
              * pointer. vb can point to a user pointer data blob. In that case
              * current_bo will be 0. If there is a vertex buffer but no vbo we
@@ -5921,7 +6047,7 @@ static void apply_texture_blit_state(const struct wined3d_gl_info *gl_info, stru
     texture->sampler_desc.address_u = WINED3D_TADDRESS_CLAMP;
     texture->sampler_desc.address_v = WINED3D_TADDRESS_CLAMP;
     texture->sampler_desc.srgb_decode = FALSE;
-    texture->base_level = level;
+    texture->sampler_desc.mip_base_level = level;
 }
 
 /* Context activation is done by the caller. */

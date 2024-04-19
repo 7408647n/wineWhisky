@@ -256,7 +256,8 @@ HDESK WINAPI CreateDesktopW( LPCWSTR name, LPCWSTR device, LPDEVMODEW devmode,
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING str;
 
-    if (device || devmode)
+    if (device || (devmode && !(flags & DF_WINE_VIRTUAL_DESKTOP))
+        || (flags & DF_WINE_ROOT_DESKTOP && flags & DF_WINE_VIRTUAL_DESKTOP))
     {
         SetLastError( ERROR_INVALID_PARAMETER );
         return 0;
@@ -404,7 +405,7 @@ BOOL WINAPI SetUserObjectInformationA( HANDLE handle, INT index, LPVOID info, DW
 BOOL WINAPI GetUserObjectSecurity( HANDLE handle, PSECURITY_INFORMATION info,
                                    PSECURITY_DESCRIPTOR sid, DWORD len, LPDWORD needed )
 {
-    FIXME( "(%p %p %p len=%d %p),stub!\n", handle, info, sid, len, needed );
+    FIXME( "(%p %p %p len=%ld %p),stub!\n", handle, info, sid, len, needed );
     if (needed)
         *needed = sizeof(SECURITY_DESCRIPTOR);
     if (len < sizeof(SECURITY_DESCRIPTOR))

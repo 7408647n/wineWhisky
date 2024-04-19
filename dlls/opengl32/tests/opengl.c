@@ -53,7 +53,28 @@ static void (WINAPI *pglDebugMessageCallbackARB)(void *, void *);
 static void (WINAPI *pglDebugMessageControlARB)(GLenum, GLenum, GLenum, GLsizei, const GLuint *, GLboolean);
 static void (WINAPI *pglDebugMessageInsertARB)(GLenum, GLenum, GLuint, GLenum, GLsizei, const char *);
 
+/* GL_ARB_framebuffer_object */
+static void (WINAPI *pglBindFramebuffer)(GLenum target, GLuint framebuffer);
+static GLenum (WINAPI *pglCheckFramebufferStatus)(GLenum target);
+
 static const char* wgl_extensions = NULL;
+
+static void flush_events(void)
+{
+    MSG msg;
+    int diff = 200;
+    int min_timeout = 100;
+    DWORD time = GetTickCount() + diff;
+
+    while (diff > 0)
+    {
+        if (MsgWaitForMultipleObjects(0, NULL, FALSE, min_timeout, QS_ALLINPUT) == WAIT_TIMEOUT)
+            break;
+        while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
+            DispatchMessageA(&msg);
+        diff = time - GetTickCount();
+    }
+}
 
 static void init_functions(void)
 {
@@ -89,6 +110,10 @@ static void init_functions(void)
     GET_PROC(glDebugMessageCallbackARB)
     GET_PROC(glDebugMessageControlARB)
     GET_PROC(glDebugMessageInsertARB)
+
+    /* GL_ARB_framebuffer_object */
+    GET_PROC(glBindFramebuffer)
+    GET_PROC(glCheckFramebufferStatus)
 
 #undef GET_PROC
 }
@@ -288,7 +313,20 @@ static void test_choosepixelformat(void)
     pfd.iPixelType = PFD_TYPE_RGBA;
 
     pfd.cColorBits = 32;
-    ok( test_pfd(&pfd, NULL), "Simple pfd failed\n" );
+    ok( test_pfd(&pfd, &ret_fmt), "Simple pfd failed\n" );
+    ok( ret_fmt.cColorBits == 32, "Got %u.\n", ret_fmt.cColorBits );
+    ok( !ret_fmt.cBlueShift, "Got %u.\n", ret_fmt.cBlueShift );
+    ok( ret_fmt.cBlueBits == 8, "Got %u.\n", ret_fmt.cBlueBits );
+    ok( ret_fmt.cRedBits == 8, "Got %u.\n", ret_fmt.cRedBits );
+    ok( ret_fmt.cGreenBits == 8, "Got %u.\n", ret_fmt.cGreenBits );
+    ok( ret_fmt.cGreenShift == 8, "Got %u.\n", ret_fmt.cGreenShift );
+    ok( ret_fmt.cRedShift == 16, "Got %u.\n", ret_fmt.cRedShift );
+    ok( !ret_fmt.cAlphaBits || ret_fmt.cAlphaBits == 8, "Got %u.\n", ret_fmt.cAlphaBits );
+    if (ret_fmt.cAlphaBits)
+        ok( ret_fmt.cAlphaShift == 24, "Got %u.\n", ret_fmt.cAlphaShift );
+    else
+        ok( !ret_fmt.cAlphaShift, "Got %u.\n", ret_fmt.cAlphaShift );
+
     pfd.dwFlags |= PFD_DOUBLEBUFFER_DONTCARE;
     ok( test_pfd(&pfd, NULL), "PFD_DOUBLEBUFFER_DONTCARE failed\n" );
     pfd.dwFlags |= PFD_STEREO_DONTCARE;
@@ -342,6 +380,92 @@ static void test_choosepixelformat(void)
     pfd.cDepthBits = 0;
     pfd.cStencilBits = 0;
     pfd.dwFlags &= ~PFD_DEPTH_DONTCARE;
+
+    pfd.cDepthBits = 16;
+    ok( test_pfd(&pfd, &ret_fmt), "depth 16 failed.\n" );
+    ok( ret_fmt.cDepthBits >= 16, "Got unexpected cDepthBits %u.\n", ret_fmt.cDepthBits );
+    pfd.cDepthBits = 0;
+
+    pfd.cDepthBits = 16;
+    pfd.cStencilBits = 8;
+    ok( test_pfd(&pfd, &ret_fmt), "depth 16, stencil 8 failed.\n" );
+    ok( ret_fmt.cDepthBits >= 16, "Got unexpected cDepthBits %u.\n", ret_fmt.cDepthBits );
+    ok( ret_fmt.cStencilBits == 8, "Got unexpected cStencilBits %u.\n", ret_fmt.cStencilBits );
+    pfd.cDepthBits = 0;
+    pfd.cStencilBits = 0;
+
+    pfd.cDepthBits = 8;
+    pfd.cStencilBits = 8;
+    ok( test_pfd(&pfd, &ret_fmt), "depth 8, stencil 8 failed.\n" );
+    ok( ret_fmt.cDepthBits >= 8, "Got unexpected cDepthBits %u.\n", ret_fmt.cDepthBits );
+    ok( ret_fmt.cStencilBits == 8, "Got unexpected cStencilBits %u.\n", ret_fmt.cStencilBits );
+    pfd.cDepthBits = 0;
+    pfd.cStencilBits = 0;
+
+    pfd.cDepthBits = 24;
+    pfd.cStencilBits = 8;
+    ok( test_pfd(&pfd, &ret_fmt), "depth 24, stencil 8 failed.\n" );
+    ok( ret_fmt.cDepthBits >= 24, "Got unexpected cDepthBits %u.\n", ret_fmt.cDepthBits );
+    ok( ret_fmt.cStencilBits == 8, "Got unexpected cStencilBits %u.\n", ret_fmt.cStencilBits );
+    pfd.cDepthBits = 0;
+    pfd.cStencilBits = 0;
+
+    pfd.cDepthBits = 32;
+    pfd.cStencilBits = 8;
+    ok( test_pfd(&pfd, &ret_fmt), "depth 32, stencil 8 failed.\n" );
+    ok( ret_fmt.cDepthBits >= 24, "Got unexpected cDepthBits %u.\n", ret_fmt.cDepthBits );
+    ok( ret_fmt.cStencilBits == 8, "Got unexpected cStencilBits %u.\n", ret_fmt.cStencilBits );
+    pfd.cDepthBits = 0;
+    pfd.cStencilBits = 0;
+
+    pfd.cStencilBits = 8;
+    ok( test_pfd(&pfd, &ret_fmt), "depth 32, stencil 8 failed.\n" );
+    ok( ret_fmt.cStencilBits == 8, "Got unexpected cStencilBits %u.\n", ret_fmt.cStencilBits );
+    pfd.cStencilBits = 0;
+
+    pfd.cDepthBits = 1;
+    pfd.cStencilBits = 8;
+    ok( test_pfd(&pfd, &ret_fmt), "depth 32, stencil 8 failed.\n" );
+    ok( ret_fmt.cStencilBits == 8, "Got unexpected cStencilBits %u.\n", ret_fmt.cStencilBits );
+    pfd.cStencilBits = 0;
+    pfd.cDepthBits = 0;
+}
+
+static void test_choosepixelformat_flag_is_ignored_when_unset(DWORD flag)
+{
+    PIXELFORMATDESCRIPTOR pfd = {
+        sizeof(PIXELFORMATDESCRIPTOR),
+        1,                     /* version */
+        flag,
+        PFD_TYPE_RGBA,
+        0,                     /* color depth */
+        0, 0, 0, 0, 0, 0,      /* color bits */
+        0,                     /* alpha buffer */
+        0,                     /* shift bit */
+        0,                     /* accumulation buffer */
+        0, 0, 0, 0,            /* accum bits */
+        0,                     /* z-buffer */
+        0,                     /* stencil buffer */
+        0,                     /* auxiliary buffer */
+        PFD_MAIN_PLANE,        /* main layer */
+        0,                     /* reserved */
+        0, 0, 0                /* layer masks */
+    };
+    PIXELFORMATDESCRIPTOR ret_fmt;
+    int set_idx;
+    int clear_idx;
+
+    set_idx = test_pfd(&pfd, &ret_fmt);
+    if (set_idx > 0)
+    {
+        ok( ret_fmt.dwFlags & flag, "flag 0x%08lu not set\n", flag );
+        /* now search for that pixel format with the flag cleared: */
+        pfd = ret_fmt;
+        pfd.dwFlags &= ~flag;
+        clear_idx = test_pfd(&pfd, &ret_fmt);
+        ok( set_idx == clear_idx, "flag 0x%08lu matched different pixel formats when set vs cleared\n", flag );
+        ok( ret_fmt.dwFlags & flag, "flag 0x%08lu not still set\n", flag );
+    } else skip( "couldn't find a pixel format with flag 0x%08lu\n", flag );
 }
 
 static void WINAPI gl_debug_message_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
@@ -492,54 +616,83 @@ static void test_setpixelformat(HDC winhdc)
 
 static void test_sharelists(HDC winhdc)
 {
-    HGLRC hglrc1, hglrc2, hglrc3;
-    BOOL res;
+    BOOL res, nvidia, amd, source_current, source_sharing, dest_current, dest_sharing;
+    HGLRC source, dest, other;
 
-    hglrc1 = wglCreateContext(winhdc);
-    res = wglShareLists(0, 0);
-    ok(res == FALSE, "Sharing display lists for no contexts passed!\n");
+    res = wglShareLists(NULL, NULL);
+    ok(!res, "Sharing display lists for no contexts passed!\n");
 
-    /* Test 1: Create a context and just share lists without doing anything special */
-    hglrc2 = wglCreateContext(winhdc);
-    if(hglrc2)
+    nvidia = !!strstr((const char*)glGetString(GL_VENDOR), "NVIDIA");
+    amd = strstr((const char*)glGetString(GL_VENDOR), "AMD") ||
+          strstr((const char*)glGetString(GL_VENDOR), "ATI");
+
+    for (source_current = FALSE; source_current <= TRUE; source_current++)
     {
-        res = wglShareLists(hglrc1, hglrc2);
-        ok(res, "Sharing of display lists failed\n");
-        wglDeleteContext(hglrc2);
-    }
+        for (source_sharing = FALSE; source_sharing <= TRUE; source_sharing++)
+        {
+            for (dest_current = FALSE; dest_current <= TRUE; dest_current++)
+            {
+                for (dest_sharing = FALSE; dest_sharing <= TRUE; dest_sharing++)
+                {
+                    winetest_push_context("source_current=%d source_sharing=%d dest_current=%d dest_sharing=%d",
+                                          source_current, source_sharing, dest_current, dest_sharing);
 
-    /* Test 2: Share display lists with a 'destination' context which has been made current */
-    hglrc2 = wglCreateContext(winhdc);
-    if(hglrc2)
-    {
-        res = wglMakeCurrent(winhdc, hglrc2);
-        ok(res, "Make current failed\n");
-        res = wglShareLists(hglrc1, hglrc2);
-        todo_wine ok(res, "Sharing display lists with a destination context which has been made current failed\n");
-        wglMakeCurrent(0, 0);
-        wglDeleteContext(hglrc2);
-    }
+                    source = wglCreateContext(winhdc);
+                    ok(!!source, "Create source context failed\n");
+                    dest = wglCreateContext(winhdc);
+                    ok(!!dest, "Create dest context failed\n");
+                    other = wglCreateContext(winhdc);
+                    ok(!!other, "Create other context failed\n");
 
-    /* Test 3: Share display lists with a context which already shares display lists with another context.
-     * According to MSDN the second parameter cannot share any display lists but some buggy drivers might allow it */
-    hglrc3 = wglCreateContext(winhdc);
-    if(hglrc3)
-    {
-        res = wglShareLists(hglrc3, hglrc1);
-        ok(res == FALSE, "Sharing of display lists passed for a context which already shared lists before\n");
-        wglDeleteContext(hglrc3);
-    }
+                    if (source_current)
+                    {
+                        res = wglMakeCurrent(winhdc, source);
+                        ok(res, "Make source current failed\n");
+                    }
+                    if (source_sharing)
+                    {
+                        res = wglShareLists(other, source);
+                        ok(res, "Sharing of display lists from other to source failed\n");
+                    }
+                    if (dest_current)
+                    {
+                        res = wglMakeCurrent(winhdc, dest);
+                        ok(res, "Make dest current failed\n");
+                    }
+                    if (dest_sharing)
+                    {
+                        res = wglShareLists(other, dest);
+                        todo_wine_if(source_sharing && dest_current)
+                        ok(res, "Sharing of display lists from other to dest failed\n");
+                    }
 
-    /* Test 4: Share display lists with a 'source' context which has been made current */
-    hglrc2 = wglCreateContext(winhdc);
-    if(hglrc2)
-    {
-        res = wglMakeCurrent(winhdc, hglrc1);
-        ok(res, "Make current failed\n");
-        res = wglShareLists(hglrc1, hglrc2);
-        ok(res, "Sharing display lists with a source context which has been made current failed\n");
-        wglMakeCurrent(0, 0);
-        wglDeleteContext(hglrc2);
+                    res = wglShareLists(source, dest);
+                    todo_wine_if((source_current || source_sharing) && (dest_current || dest_sharing))
+                    ok(res || broken(nvidia && !source_sharing && dest_sharing),
+                       "Sharing of display lists from source to dest failed\n");
+
+                    if (source_current || dest_current)
+                    {
+                        res = wglMakeCurrent(NULL, NULL);
+                        ok(res, "Make none current failed\n");
+                    }
+                    res = wglDeleteContext(source);
+                    ok(res, "Delete source context failed\n");
+                    res = wglDeleteContext(dest);
+                    ok(res, "Delete dest context failed\n");
+                    if (!strcmp(winetest_platform, "wine") || !amd || source_sharing || !dest_sharing)
+                    {
+                        /* If source_sharing=FALSE and dest_sharing=TRUE, wglShareLists succeeds on AMD, but
+                         * sometimes wglDeleteContext crashes afterwards. On Wine, both functions should always
+                         * succeed in this case. */
+                        res = wglDeleteContext(other);
+                        ok(res, "Delete other context failed\n");
+                    }
+
+                    winetest_pop_context();
+                }
+            }
+        }
     }
 }
 
@@ -1207,6 +1360,71 @@ static void test_minimized(void)
     DestroyWindow(window);
 }
 
+static void test_framebuffer(void)
+{
+    static const PIXELFORMATDESCRIPTOR pf_desc =
+    {
+        sizeof(PIXELFORMATDESCRIPTOR),
+        1,                     /* version */
+        PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+        PFD_TYPE_RGBA,
+        24,                    /* 24-bit color depth */
+        0, 0, 0, 0, 0, 0,      /* color bits */
+        0,                     /* alpha buffer */
+        0,                     /* shift bit */
+        0,                     /* accumulation buffer */
+        0, 0, 0, 0,            /* accum bits */
+        32,                    /* z-buffer */
+        0,                     /* stencil buffer */
+        0,                     /* auxiliary buffer */
+        PFD_MAIN_PLANE,        /* main layer */
+        0,                     /* reserved */
+        0, 0, 0                /* layer masks */
+    };
+    int pixel_format;
+    GLenum status;
+    HWND window;
+    HGLRC ctx;
+    BOOL ret;
+    HDC dc;
+
+    /* Test the default framebuffer status for a window that becomes visible after wglMakeCurrent() */
+    window = CreateWindowA("static", "opengl32_test", WS_POPUP, 0, 0, 640, 480, 0, 0, 0, 0);
+    ok(!!window, "Failed to create window, last error %#lx.\n", GetLastError());
+    dc = GetDC(window);
+    ok(!!dc, "Failed to get DC.\n");
+    pixel_format = ChoosePixelFormat(dc, &pf_desc);
+    if (!pixel_format)
+    {
+        win_skip("Failed to find pixel format.\n");
+        ReleaseDC(window, dc);
+        DestroyWindow(window);
+        return;
+    }
+
+    ret = SetPixelFormat(dc, pixel_format, &pf_desc);
+    ok(ret, "Failed to set pixel format, last error %#lx.\n", GetLastError());
+    ctx = wglCreateContext(dc);
+    ok(!!ctx, "Failed to create GL context, last error %#lx.\n", GetLastError());
+    ret = wglMakeCurrent(dc, ctx);
+    ok(ret, "Failed to make context current, last error %#lx.\n", GetLastError());
+
+    ShowWindow(window, SW_SHOW);
+    flush_events();
+
+    pglBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    status = pglCheckFramebufferStatus(GL_FRAMEBUFFER);
+    ok(status == GL_FRAMEBUFFER_COMPLETE, "Expected %#x, got %#x.\n", GL_FRAMEBUFFER_COMPLETE, status);
+
+    ret = wglMakeCurrent(NULL, NULL);
+    ok(ret, "Failed to clear current context, last error %#lx.\n", GetLastError());
+    ret = wglDeleteContext(ctx);
+    ok(ret, "Failed to delete GL context, last error %#lx.\n", GetLastError());
+    ReleaseDC(window, dc);
+    DestroyWindow(window);
+}
+
 static void test_window_dc(void)
 {
     PIXELFORMATDESCRIPTOR pf_desc =
@@ -1772,6 +1990,13 @@ static void test_wglChoosePixelFormatARB(HDC hdc)
         WGL_SUPPORT_OPENGL_ARB, 1,
         0
     };
+    static int attrib_list_flags[] =
+    {
+        WGL_DRAW_TO_WINDOW_ARB, 1,
+        WGL_SUPPORT_OPENGL_ARB, 1,
+        WGL_SUPPORT_GDI_ARB, 1,
+        0
+    };
 
     PIXELFORMATDESCRIPTOR fmt, last_fmt;
     BYTE depth, last_depth;
@@ -1818,6 +2043,106 @@ static void test_wglChoosePixelFormatARB(HDC hdc)
                     depth, last_depth, i, formats[i]);
         }
     }
+
+    format_count = 0;
+    res = pwglChoosePixelFormatARB(hdc, attrib_list_flags, NULL, ARRAY_SIZE(formats), formats, &format_count);
+    ok(res, "Got unexpected result %d.\n", res);
+
+    for (i = 0; i < format_count; ++i)
+    {
+        PIXELFORMATDESCRIPTOR format = {0};
+        BOOL ret;
+
+        winetest_push_context("%u", i);
+
+        ret = DescribePixelFormat(hdc, formats[i], sizeof(format), &format);
+        ok(ret, "DescribePixelFormat failed, error %lu\n", GetLastError());
+
+        ok(format.dwFlags & PFD_DRAW_TO_WINDOW, "got dwFlags %#lx\n", format.dwFlags);
+        ok(format.dwFlags & PFD_SUPPORT_OPENGL, "got dwFlags %#lx\n", format.dwFlags);
+        ok(format.dwFlags & PFD_SUPPORT_GDI, "got dwFlags %#lx\n", format.dwFlags);
+
+        winetest_pop_context();
+    }
+}
+
+static void test_copy_context(HDC hdc)
+{
+    HGLRC ctx, ctx2, old_ctx;
+    BOOL ret;
+
+    old_ctx = wglGetCurrentContext();
+    ok(!!old_ctx, "wglGetCurrentContext failed, last error %#lx.\n", GetLastError());
+
+    ctx = wglCreateContext(hdc);
+    ok(!!ctx, "Failed to create GL context, last error %#lx.\n", GetLastError());
+    ret = wglMakeCurrent(hdc, ctx);
+    ok(ret, "wglMakeCurrent failed, last error %#lx.\n", GetLastError());
+    ctx2 = wglCreateContext(hdc);
+    ok(!!ctx2, "Failed to create GL context, last error %#lx.\n", GetLastError());
+
+    ret = wglCopyContext(ctx, ctx2, GL_ALL_ATTRIB_BITS);
+    todo_wine
+    ok(ret, "Failed to copy GL context, last error %#lx.\n", GetLastError());
+
+    ret = wglMakeCurrent(NULL, NULL);
+    ok(ret, "wglMakeCurrent failed, last error %#lx.\n", GetLastError());
+    ret = wglDeleteContext(ctx2);
+    ok(ret, "Failed to delete GL context, last error %#lx.\n", GetLastError());
+    ret = wglDeleteContext(ctx);
+    ok(ret, "Failed to delete GL context, last error %#lx.\n", GetLastError());
+
+    ret = wglMakeCurrent(hdc, old_ctx);
+    ok(ret, "wglMakeCurrent failed, last error %#lx.\n", GetLastError());
+}
+
+static void test_child_window(HWND hwnd, PIXELFORMATDESCRIPTOR *pfd)
+{
+    int pixel_format;
+    DWORD t1, t;
+    HGLRC hglrc;
+    HWND child;
+    HDC hdc;
+    int res;
+
+    child = CreateWindowA("static", "Title", WS_CHILDWINDOW | WS_VISIBLE, 50, 50, 100, 100, hwnd, NULL, NULL, NULL);
+    ok(!!child, "got error %lu.\n", GetLastError());
+
+    hdc = GetDC(child);
+    pixel_format = ChoosePixelFormat(hdc, pfd);
+    res = SetPixelFormat(hdc, pixel_format, pfd);
+    ok(res, "got error %lu.\n", GetLastError());
+
+    hglrc = wglCreateContext(hdc);
+    ok(!!hglrc, "got error %lu.\n", GetLastError());
+
+    /* Test SwapBuffers with NULL context. */
+
+    glDrawBuffer(GL_BACK);
+
+    /* Currently blit happening for child window in winex11 may not be updated with the latest GL frame
+     * even on glXWaitForSbcOML() path. So simulate continuous present for the test purpose. */
+    trace("Child window rectangle should turn from red to green now.\n");
+    t1 = GetTickCount();
+    while ((t = GetTickCount()) - t1 < 3000)
+    {
+        res = wglMakeCurrent(hdc, hglrc);
+        ok(res, "got error %lu.\n", GetLastError());
+        if (t - t1 > 1500)
+            glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+        else
+            glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        res = wglMakeCurrent(NULL, NULL);
+        ok(res, "got error %lu.\n", GetLastError());
+        SwapBuffers(hdc);
+    }
+
+    res = wglDeleteContext(hglrc);
+    ok(res, "got error %lu.\n", GetLastError());
+
+    ReleaseDC(child, hdc);
+    DestroyWindow(child);
 }
 
 START_TEST(opengl)
@@ -1905,6 +2230,7 @@ START_TEST(opengl)
         test_getprocaddress(hdc);
         test_deletecontext(hwnd, hdc);
         test_makecurrent(hdc);
+        test_copy_context(hdc);
 
         /* The lack of wglGetExtensionsStringARB in general means broken software rendering or the lack of decent OpenGL support, skip tests in such cases */
         if (!pwglGetExtensionsStringARB)
@@ -1914,6 +2240,10 @@ START_TEST(opengl)
         }
 
         test_choosepixelformat();
+        test_choosepixelformat_flag_is_ignored_when_unset(PFD_DRAW_TO_WINDOW);
+        test_choosepixelformat_flag_is_ignored_when_unset(PFD_DRAW_TO_BITMAP);
+        test_choosepixelformat_flag_is_ignored_when_unset(PFD_SUPPORT_GDI);
+        test_choosepixelformat_flag_is_ignored_when_unset(PFD_SUPPORT_OPENGL);
         test_wglChoosePixelFormatARB(hdc);
         test_debug_message_callback();
         test_setpixelformat(hdc);
@@ -1922,6 +2252,7 @@ START_TEST(opengl)
         test_colorbits(hdc);
         test_gdi_dbuf(hdc);
         test_acceleration(hdc);
+        test_framebuffer();
 
         wgl_extensions = pwglGetExtensionsStringARB(hdc);
         if(wgl_extensions == NULL) skip("Skipping opengl32 tests because this OpenGL implementation doesn't support WGL extensions!\n");
@@ -1946,6 +2277,9 @@ START_TEST(opengl)
             test_swap_control(hdc);
         else
             skip("WGL_EXT_swap_control not supported, skipping test\n");
+
+        if (winetest_interactive)
+            test_child_window(hwnd, &pfd);
 
 cleanup:
         ReleaseDC(hwnd, hdc);

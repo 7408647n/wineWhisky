@@ -30,15 +30,14 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(ddraw);
 
-/* hack for WA/WWP/Diablo */
-int use_desktop_hack = 0;
-
 static struct list global_ddraw_list = LIST_INIT(global_ddraw_list);
 
 static HINSTANCE instance;
 
 /* value of ForceRefreshRate */
 DWORD force_refresh_rate = 0;
+
+static struct ddraw_handle_table global_handle_table;
 
 /* Structure for converting DirectDrawEnumerateA to DirectDrawEnumerateExA */
 struct callback_info
@@ -118,7 +117,7 @@ static void ddraw_enumerate_secondary_devices(struct wined3d *wined3d, LPDDENUMC
 /* Handle table functions */
 BOOL ddraw_handle_table_init(struct ddraw_handle_table *t, UINT initial_size)
 {
-    if (!(t->entries = heap_alloc_zero(initial_size * sizeof(*t->entries))))
+    if (!(t->entries = calloc(initial_size, sizeof(*t->entries))))
     {
         ERR("Failed to allocate handle table memory.\n");
         return FALSE;
@@ -132,13 +131,16 @@ BOOL ddraw_handle_table_init(struct ddraw_handle_table *t, UINT initial_size)
 
 void ddraw_handle_table_destroy(struct ddraw_handle_table *t)
 {
-    heap_free(t->entries);
+    free(t->entries);
     memset(t, 0, sizeof(*t));
 }
 
 DWORD ddraw_allocate_handle(struct ddraw_handle_table *t, void *object, enum ddraw_handle_type type)
 {
     struct ddraw_handle_entry *entry;
+
+    if (!t)
+        t = &global_handle_table;
 
     if (t->free_entries)
     {
@@ -163,7 +165,7 @@ DWORD ddraw_allocate_handle(struct ddraw_handle_table *t, void *object, enum ddr
         UINT new_size = t->table_size + (t->table_size >> 1);
         struct ddraw_handle_entry *new_entries;
 
-        if (!(new_entries = heap_realloc(t->entries, new_size * sizeof(*t->entries))))
+        if (!(new_entries = realloc(t->entries, new_size * sizeof(*t->entries))))
         {
             ERR("Failed to grow the handle table.\n");
             return DDRAW_INVALID_HANDLE;
@@ -183,6 +185,9 @@ void *ddraw_free_handle(struct ddraw_handle_table *t, DWORD handle, enum ddraw_h
 {
     struct ddraw_handle_entry *entry;
     void *object;
+
+    if (!t)
+        t = &global_handle_table;
 
     if (handle == DDRAW_INVALID_HANDLE || handle >= t->entry_count)
     {
@@ -208,6 +213,9 @@ void *ddraw_free_handle(struct ddraw_handle_table *t, DWORD handle, enum ddraw_h
 void *ddraw_get_object(struct ddraw_handle_table *t, DWORD handle, enum ddraw_handle_type type)
 {
     struct ddraw_handle_entry *entry;
+
+    if (!t)
+        t = &global_handle_table;
 
     if (handle == DDRAW_INVALID_HANDLE || handle >= t->entry_count)
     {
@@ -314,7 +322,7 @@ static HRESULT DDRAW_Create(const GUID *guid, void **out, IUnknown *outer_unknow
     if (!IsEqualGUID(iid, &IID_IDirectDraw7))
         flags = WINED3D_LEGACY_FFP_LIGHTING;
 
-    if (!(ddraw = heap_alloc_zero(sizeof(*ddraw))))
+    if (!(ddraw = calloc(1, sizeof(*ddraw))))
     {
         ERR("Out of memory when creating DirectDraw.\n");
         return E_OUTOFMEMORY;
@@ -323,7 +331,7 @@ static HRESULT DDRAW_Create(const GUID *guid, void **out, IUnknown *outer_unknow
     if (FAILED(hr = ddraw_init(ddraw, flags, device_type)))
     {
         WARN("Failed to initialize ddraw object, hr %#lx.\n", hr);
-        heap_free(ddraw);
+        free(ddraw);
         return hr;
     }
 
@@ -684,7 +692,7 @@ static ULONG WINAPI ddraw_class_factory_Release(IClassFactory *iface)
     TRACE("%p decreasing refcount to %lu.\n", factory, ref);
 
     if (!ref)
-        heap_free(factory);
+        free(factory);
 
     return ref;
 }
@@ -768,7 +776,7 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **out)
         return CLASS_E_CLASSNOTAVAILABLE;
     }
 
-    if (!(factory = heap_alloc_zero(sizeof(*factory))))
+    if (!(factory = calloc(1, sizeof(*factory))))
         return E_OUTOFMEMORY;
 
     factory->IClassFactory_iface.lpVtbl = &IClassFactory_Vtbl;
@@ -780,22 +788,6 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **out)
     return S_OK;
 }
 
-
-/***********************************************************************
- * get_config_key
- *
- * Reads a config key from the registry. Taken from WineD3D
- *
- ***********************************************************************/
-static inline DWORD get_config_key(HKEY defkey, HKEY appkey, const char* name, char* buffer, DWORD size)
-{
-    if (0 != appkey && !RegQueryValueExA( appkey, name, 0, NULL, (LPBYTE) buffer, &size )) return 0;
-    if (0 != defkey && !RegQueryValueExA( defkey, name, 0, NULL, (LPBYTE) buffer, &size )) return 0;
-    return ERROR_FILE_NOT_FOUND;
-}
-
-#define IS_OPTION_TRUE(ch) \
-    ((ch) == 'y' || (ch) == 'Y' || (ch) == 't' || (ch) == 'T' || (ch) == '1')
 
 /***********************************************************************
  * DllMain (DDRAW.0)
@@ -812,12 +804,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
     case DLL_PROCESS_ATTACH:
     {
         static HMODULE ddraw_self;
-        char buffer[MAX_PATH+10];
-        DWORD size = sizeof(buffer);
         HKEY hkey = 0;
-        HKEY appkey = 0;
         WNDCLASSA wc;
-        DWORD len;
 
         /* Register the window class. This is used to create a hidden window
          * for D3D rendering, if the application didn't pass one. It can also
@@ -838,31 +826,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
             return FALSE;
         }
 
-       /* @@ Wine registry key: HKCU\Software\Wine\Direct3D */
-       if ( RegOpenKeyA( HKEY_CURRENT_USER, "Software\\Wine\\Direct3D", &hkey ) ) hkey = 0;
-
-       len = GetModuleFileNameA( 0, buffer, MAX_PATH );
-       if (len && len < MAX_PATH)
-       {
-            HKEY tmpkey;
-            /* @@ Wine registry key: HKCU\Software\Wine\AppDefaults\app.exe\Direct3D */
-            if (!RegOpenKeyA( HKEY_CURRENT_USER, "Software\\Wine\\AppDefaults", &tmpkey ))
-            {
-                char *p, *appname = buffer;
-                if ((p = strrchr( appname, '/' ))) appname = p + 1;
-                if ((p = strrchr( appname, '\\' ))) appname = p + 1;
-                strcat( appname, "\\Direct3D" );
-                TRACE("appname = [%s]\n", appname);
-                if (RegOpenKeyA( tmpkey, appname, &appkey )) appkey = 0;
-                RegCloseKey( tmpkey );
-            }
-       }
-
-       if ( 0 != hkey || 0 != appkey )
-       {
-            /* hack for WA/WWP/Diablo */
-            if ( !get_config_key( hkey, appkey, "DDrawDesktopHack", buffer, size) )
-                use_desktop_hack = IS_OPTION_TRUE( buffer[0] );
+        if (!ddraw_handle_table_init(&global_handle_table, 64))
+        {
+            UnregisterClassA(DDRAW_WINDOW_CLASS_NAME, inst);
+            return FALSE;
         }
 
         /* On Windows one can force the refresh rate that DirectDraw uses by
@@ -916,6 +883,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
         if (WARN_ON(ddraw))
         {
             struct ddraw *ddraw;
+            unsigned int i;
 
             LIST_FOR_EACH_ENTRY(ddraw, &global_ddraw_list, struct ddraw, ddraw_list_entry)
             {
@@ -924,8 +892,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
                 WARN("DirectDraw object %p has reference counts {%lu, %lu, %lu, %lu, %lu}.\n",
                         ddraw, ddraw->ref7, ddraw->ref4, ddraw->ref3, ddraw->ref2, ddraw->ref1);
 
-                if (ddraw->d3ddevice)
-                    WARN("DirectDraw object %p has Direct3D device %p attached.\n", ddraw, ddraw->d3ddevice);
+                if (!list_empty(&ddraw->d3ddevice_list))
+                    WARN("DirectDraw object %p has Direct3D device(s) attached.\n", ddraw);
 
                 LIST_FOR_EACH_ENTRY(surface, &ddraw->surface_list, struct ddraw_surface, surface_list_entry)
                 {
@@ -934,6 +902,34 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
                             surface->ref2, surface->ref1, surface->gamma_count);
                 }
             }
+
+            for (i = 0; i < global_handle_table.entry_count; ++i)
+            {
+                struct ddraw_handle_entry *entry = &global_handle_table.entries[i];
+
+                switch (entry->type)
+                {
+                    case DDRAW_HANDLE_FREE:
+                        break;
+
+                    case DDRAW_HANDLE_MATERIAL:
+                        WARN("Material handle %#x (%p) not unset properly.\n", i + 1, entry->object);
+                        break;
+
+                    case DDRAW_HANDLE_SURFACE:
+                        WARN("Texture handle %#x (%p) not unset properly.\n", i + 1, entry->object);
+                        break;
+
+                    case DDRAW_HANDLE_MATRIX:
+                        WARN("Leftover matrix handle %#x (%p), deleting.\n", i + 1, entry->object);
+                        break;
+
+                    default:
+                        WARN("Handle %#x (%p) has unknown type %#x.\n", i + 1, entry->object, entry->type);
+                        break;
+                }
+            }
+            ddraw_handle_table_destroy(&global_handle_table);
         }
 
         if (reserved) break;

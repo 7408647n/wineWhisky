@@ -30,6 +30,7 @@
 #include "ntsecpkg.h"
 #include "rpc.h"
 #include "wincred.h"
+#include "wincrypt.h"
 #include "lmwksta.h"
 #include "lmapibuf.h"
 #include "lmerr.h"
@@ -41,34 +42,29 @@ WINE_DEFAULT_DEBUG_CHANNEL(ntlm);
 
 static ULONG ntlm_package_id;
 static LSA_DISPATCH_TABLE lsa_dispatch;
-static char *wine_data_dir;
 
-static unixlib_handle_t ntlm_handle;
-
-static NTSTATUS ntlm_check_version( const char *datadir )
+static NTSTATUS ntlm_check_version(void)
 {
-    struct check_version_params params = { datadir };
-
-    return __wine_unix_call( ntlm_handle, unix_check_version, &params );
+    return WINE_UNIX_CALL( unix_check_version, NULL );
 }
 
 static void ntlm_cleanup( struct ntlm_ctx *ctx )
 {
-    __wine_unix_call( ntlm_handle, unix_cleanup, ctx );
+    WINE_UNIX_CALL( unix_cleanup, ctx );
 }
 
 static NTSTATUS ntlm_chat( struct ntlm_ctx *ctx, char *buf, unsigned int buflen, unsigned int *retlen )
 {
     struct chat_params params = { ctx, buf, buflen, retlen };
 
-    return __wine_unix_call( ntlm_handle, unix_chat, &params );
+    return WINE_UNIX_CALL( unix_chat, &params );
 }
 
 static NTSTATUS ntlm_fork( struct ntlm_ctx *ctx, char **argv )
 {
     struct fork_params params = { ctx, argv };
 
-    return __wine_unix_call( ntlm_handle, unix_fork, &params );
+    return WINE_UNIX_CALL( unix_fork, &params );
 }
 
 #define NTLM_CAPS \
@@ -117,7 +113,7 @@ static NTSTATUS NTAPI ntlm_LsaApInitializePackage( ULONG package_id, LSA_DISPATC
     TRACE( "%#lx, %p, %s, %s, %p\n", package_id, dispatch, debugstr_as(database), debugstr_as(confidentiality),
            package_name );
 
-    if (ntlm_check_version( wine_data_dir ))
+    if (ntlm_check_version())
     {
         ERR( "no NTLM support, expect problems\n" );
         return STATUS_UNSUCCESSFUL;
@@ -140,7 +136,7 @@ static NTSTATUS NTAPI ntlm_SpInitialize( ULONG_PTR package_id, SECPKG_PARAMETERS
 {
     TRACE( "%#Ix, %p, %p\n", package_id, params, lsa_function_table );
 
-    if (ntlm_check_version( wine_data_dir ))
+    if (ntlm_check_version())
     {
         ERR( "no NTLM support, expect problems\n" );
         return STATUS_UNSUCCESSFUL;
@@ -866,7 +862,7 @@ static NTSTATUS NTAPI ntlm_SpInitLsaModeContext( LSA_SEC_HANDLE cred_handle, LSA
     }
 
 done:
-    if (status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED)
+    if (status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED && !ctx_handle && !input)
     {
         ntlm_cleanup( ctx );
         free( ctx );
@@ -1082,7 +1078,7 @@ static NTSTATUS NTAPI ntlm_SpAcceptLsaModeContext( LSA_SEC_HANDLE cred_handle, L
     }
 
 done:
-    if (status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED)
+    if (status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED && !ctx_handle)
     {
         ntlm_cleanup( ctx );
         free( ctx );
@@ -1137,13 +1133,11 @@ static NTSTATUS NTAPI ntlm_SpQueryContextAttributes( LSA_SEC_HANDLE handle, ULON
     X(SECPKG_ATTR_ACCESS_TOKEN);
     X(SECPKG_ATTR_AUTHORITY);
     X(SECPKG_ATTR_DCE_INFO);
-    X(SECPKG_ATTR_KEY_INFO);
     X(SECPKG_ATTR_LIFESPAN);
     X(SECPKG_ATTR_NAMES);
     X(SECPKG_ATTR_NATIVE_NAMES);
     X(SECPKG_ATTR_PACKAGE_INFO);
     X(SECPKG_ATTR_PASSWORD_EXPIRY);
-    X(SECPKG_ATTR_SESSION_KEY);
     X(SECPKG_ATTR_STREAM_SIZES);
     X(SECPKG_ATTR_TARGET_INFORMATION);
     case SECPKG_ATTR_FLAGS:
@@ -1170,6 +1164,55 @@ static NTSTATUS NTAPI ntlm_SpQueryContextAttributes( LSA_SEC_HANDLE handle, ULON
         SecPkgContext_NegotiationInfoW *info = (SecPkgContext_NegotiationInfoW *)buf;
         if (!(info->PackageInfo = build_package_info( &ntlm_package_info ))) return SEC_E_INSUFFICIENT_MEMORY;
         info->NegotiationState = SECPKG_NEGOTIATION_COMPLETE;
+        return SEC_E_OK;
+    }
+    case SECPKG_ATTR_SESSION_KEY:
+    {
+        struct ntlm_ctx *ctx = (struct ntlm_ctx *)handle;
+        SecPkgContext_SessionKey *key = (SecPkgContext_SessionKey *)buf;
+        unsigned char *session_key;
+
+        if (!(session_key = RtlAllocateHeap( GetProcessHeap(), 0, sizeof(ctx->session_key) )))
+            return SEC_E_INSUFFICIENT_MEMORY;
+        memcpy( session_key, ctx->session_key, sizeof(ctx->session_key) );
+        key->SessionKey = session_key;
+        key->SessionKeyLength = sizeof(ctx->session_key);
+        return SEC_E_OK;
+    }
+    case SECPKG_ATTR_KEY_INFO:
+    {
+        struct ntlm_ctx *ctx = (struct ntlm_ctx *)handle;
+        SecPkgContext_KeyInfoW *info = (SecPkgContext_KeyInfoW *)buf;
+        SEC_WCHAR *signature_alg;
+        ULONG signature_size, signature_algid;
+
+        if (ctx->flags & FLAG_NEGOTIATE_KEY_EXCHANGE)
+        {
+            signature_alg = (SEC_WCHAR *)L"HMAC-MD5";
+            signature_size = sizeof(L"HMAC-MD5");
+            signature_algid = 0xffffff76;
+        }
+        else
+        {
+            signature_alg = (SEC_WCHAR *)L"RSADSI RC4-CRC32";
+            signature_size = sizeof(L"RSADSI RC4-CRC32");
+            signature_algid = 0xffffff7c;
+        }
+
+        if (!(info->sSignatureAlgorithmName = RtlAllocateHeap( GetProcessHeap(), 0, signature_size )))
+            return SEC_E_INSUFFICIENT_MEMORY;
+        wcscpy( info->sSignatureAlgorithmName, signature_alg );
+
+        if (!(info->sEncryptAlgorithmName = RtlAllocateHeap( GetProcessHeap(), 0, sizeof(L"RSADSI RC4") )))
+        {
+            RtlFreeHeap( GetProcessHeap(), 0, info->sSignatureAlgorithmName );
+            return SEC_E_INSUFFICIENT_MEMORY;
+        }
+        wcscpy( info->sEncryptAlgorithmName, L"RSADSI RC4" );
+
+        info->KeySize = sizeof(ctx->session_key) * 8;
+        info->SignatureAlgorithm = signature_algid;
+        info->EncryptAlgorithm = CALG_RC4;
         return SEC_E_OK;
     }
 #undef X
@@ -1570,31 +1613,12 @@ NTSTATUS NTAPI SpUserModeInitialize( ULONG lsa_version, ULONG *package_version, 
     return STATUS_SUCCESS;
 }
 
-static char *get_data_dir(void)
-{
-    const WCHAR *dir = _wgetenv( L"WINEDATADIR" );
-    OBJECT_ATTRIBUTES attr;
-    UNICODE_STRING nt_name;
-    ULONG size = 1024;
-    char *ret;
-
-    if (!dir) return NULL;
-    RtlInitUnicodeString( &nt_name, dir );
-    InitializeObjectAttributes( &attr, &nt_name, 0, 0, NULL );
-    if (!(ret = RtlAllocateHeap( GetProcessHeap(), 0, size ))) return NULL;
-    if (!wine_nt_to_unix_file_name( &attr, ret, &size, 0 )) return ret;
-    RtlFreeHeap( GetProcessHeap(), 0, ret );
-    return NULL;
-}
-
 BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, void *reserved )
 {
     switch (reason)
     {
     case DLL_PROCESS_ATTACH:
-        wine_data_dir = get_data_dir();
-        if (NtQueryVirtualMemory( GetCurrentProcess(), hinst, MemoryWineUnixFuncs,
-                                  &ntlm_handle, sizeof(ntlm_handle), NULL ))
+        if (__wine_init_unix_call())
             return FALSE;
         DisableThreadLibraryCalls( hinst );
         break;

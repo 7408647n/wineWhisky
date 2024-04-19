@@ -58,7 +58,7 @@ void d3drm_device_destroy(struct d3drm_device *device)
         IDirectDraw_Release(device->ddraw);
         IDirect3DRM_Release(device->d3drm);
     }
-    heap_free(device);
+    free(device);
 }
 
 static inline struct d3drm_device *impl_from_IDirect3DRMWinDevice(IDirect3DRMWinDevice *iface)
@@ -158,7 +158,7 @@ HRESULT d3drm_device_init(struct d3drm_device *device, UINT version, IDirectDraw
         surface_desc.dwSize = sizeof(surface_desc);
         surface_desc.dwFlags = DDSD_CAPS | DDSD_ZBUFFERBITDEPTH | DDSD_WIDTH | DDSD_HEIGHT;
         surface_desc.ddsCaps.dwCaps = DDSCAPS_ZBUFFER;
-        surface_desc.u2.dwZBufferBitDepth = 16;
+        surface_desc.dwZBufferBitDepth = 16;
         surface_desc.dwWidth = desc.dwWidth;
         surface_desc.dwHeight = desc.dwHeight;
         hr = IDirectDraw_CreateSurface(ddraw, &surface_desc, &ds, NULL);
@@ -1660,7 +1660,7 @@ HRESULT d3drm_device_create(struct d3drm_device **device, IDirect3DRM *d3drm)
 
     TRACE("device %p, d3drm %p.\n", device, d3drm);
 
-    if (!(object = heap_alloc_zero(sizeof(*object))))
+    if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
     object->IDirect3DRMDevice_iface.lpVtbl = &d3drm_device1_vtbl;

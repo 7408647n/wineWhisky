@@ -20,8 +20,6 @@
  */
 
 #define COBJMACROS
-#define NONAMELESSUNION
-
 #include "ole2.h"
 
 #include "wine/debug.h"
@@ -494,7 +492,7 @@ unsigned char * __RPC_USER HBITMAP_UserUnmarshal(ULONG *flags, unsigned char *bu
 
             bitmap_size = *(ULONG *)buffer;
             buffer += sizeof(ULONG);
-            bits = HeapAlloc(GetProcessHeap(), 0, bitmap_size);
+            bits = malloc(bitmap_size);
 
             memcpy(&bitmap, buffer, header_size);
             buffer += header_size;
@@ -505,7 +503,7 @@ unsigned char * __RPC_USER HBITMAP_UserUnmarshal(ULONG *flags, unsigned char *bu
             bitmap.bmBits = bits;
             *bmp = CreateBitmapIndirect(&bitmap);
 
-            HeapFree(GetProcessHeap(), 0, bits);
+            free(bits);
         }
         else
             *bmp = NULL;

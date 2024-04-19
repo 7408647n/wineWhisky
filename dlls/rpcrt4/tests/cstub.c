@@ -34,7 +34,6 @@
 #include "rpcdce.h"
 #include "rpcproxy.h"
 
-#include "wine/heap.h"
 #include "wine/test.h"
 
 #include "cstub.h"
@@ -63,13 +62,13 @@ static int my_free_called;
 static void * CALLBACK my_alloc(SIZE_T size)
 {
     my_alloc_called++;
-    return NdrOleAllocate(size);
+    return malloc(size);
 }
 
 static void CALLBACK my_free(void *ptr)
 {
     my_free_called++;
-    NdrOleFree(ptr);
+    free(ptr);
 }
 
 typedef struct _MIDL_PROC_FORMAT_STRING
@@ -1082,7 +1081,7 @@ static HRESULT WINAPI delegating_invoke_chan_get_buffer(IRpcChannelBuffer *pchan
                                                         RPCOLEMESSAGE *msg,
                                                         REFIID iid)
 {
-    msg->Buffer = HeapAlloc(GetProcessHeap(), 0, msg->cbBuffer);
+    msg->Buffer = malloc(msg->cbBuffer);
     return S_OK;
 }
 
@@ -1149,7 +1148,7 @@ static void test_delegating_Invoke(IPSFactoryBuffer *ppsf)
         ok(*((DWORD*)msg.Buffer + 1) == S_OK, "buf[1] %08lx\n", *((DWORD*)msg.Buffer + 1));
     }
     /* free the buffer allocated by delegating_invoke_chan_get_buffer */
-    HeapFree(GetProcessHeap(), 0, msg.Buffer);
+    free(msg.Buffer);
     IRpcStubBuffer_Release(pstub);
 }
 static const CInterfaceProxyVtbl *cstub_ProxyVtblList2[] =
@@ -1300,7 +1299,7 @@ static ULONG WINAPI test_cf_Release(IClassFactory *iface)
 
 static HRESULT WINAPI test_cf_CreateInstance(IClassFactory *iface, IUnknown *outer, REFIID iid, void **out)
 {
-    ITest1 *obj = heap_alloc(sizeof(*obj));
+    ITest1 *obj = malloc(sizeof(*obj));
 
     obj->lpVtbl = &test1_vtbl;
 
@@ -1415,6 +1414,140 @@ static void test_delegated_methods(void)
     ok(hr == S_OK, "got %#lx\n", hr);
 }
 
+typedef struct tagChannelBufferRefCount
+{
+    IRpcChannelBuffer IRpcChannelBuffer_iface;
+    LONG                                RefCount;
+} CChannelBufferRefCount;
+
+static CChannelBufferRefCount* impl_from_IRpcChannelBuffer(IRpcChannelBuffer* iface)
+{
+    return CONTAINING_RECORD(iface, CChannelBufferRefCount, IRpcChannelBuffer_iface);
+}
+
+static HRESULT WINAPI test_chanbuf_refcount_chan_query_interface(IRpcChannelBuffer* pchan,
+    REFIID iid,
+    void** ppv)
+{
+    if (IsEqualGUID(&IID_IRpcChannelBuffer, iid))
+    {
+        *ppv = pchan;
+        IRpcChannelBuffer_AddRef(pchan);
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI test_chanbuf_refcount_chan_add_ref(IRpcChannelBuffer* pchan)
+{
+    CChannelBufferRefCount* This = impl_from_IRpcChannelBuffer(pchan);
+    return InterlockedIncrement(&This->RefCount);
+}
+
+static ULONG WINAPI test_chanbuf_refcount_chan_release(IRpcChannelBuffer* pchan)
+{
+    CChannelBufferRefCount* This = impl_from_IRpcChannelBuffer(pchan);
+    return InterlockedDecrement(&This->RefCount);
+}
+
+static HRESULT WINAPI test_chanbuf_refcount_chan_get_buffer(IRpcChannelBuffer* pchan,
+    RPCOLEMESSAGE* msg,
+    REFIID iid)
+{
+    ok(0, "call to GetBuffer not expected\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI test_chanbuf_refcount_chan_send_receive(IRpcChannelBuffer* pchan,
+    RPCOLEMESSAGE* pMessage,
+    ULONG* pStatus)
+{
+    ok(0, "call to SendReceive not expected\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI test_chanbuf_refcount_chan_free_buffer(IRpcChannelBuffer* pchan,
+    RPCOLEMESSAGE* pMessage)
+{
+    ok(0, "call to FreeBuffer not expected\n");
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI test_chanbuf_refcount_chan_get_dest_ctx(IRpcChannelBuffer* pchan,
+    DWORD* pdwDestContext,
+    void** ppvDestContext)
+{
+    *pdwDestContext = MSHCTX_LOCAL;
+    *ppvDestContext = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI test_chanbuf_refcount_chan_is_connected(IRpcChannelBuffer* pchan)
+{
+    ok(0, "call to IsConnected not expected\n");
+    return E_NOTIMPL;
+}
+
+static IRpcChannelBufferVtbl test_chanbuf_refcount_test_rpc_chan_vtbl =
+{
+    test_chanbuf_refcount_chan_query_interface,
+    test_chanbuf_refcount_chan_add_ref,
+    test_chanbuf_refcount_chan_release,
+    test_chanbuf_refcount_chan_get_buffer,
+    test_chanbuf_refcount_chan_send_receive,
+    test_chanbuf_refcount_chan_free_buffer,
+    test_chanbuf_refcount_chan_get_dest_ctx,
+    test_chanbuf_refcount_chan_is_connected
+};
+
+static void test_ChannelBufferRefCount(IPSFactoryBuffer *ppsf)
+{
+    IRpcProxyBuffer* proxy_buffer = NULL;
+    IUnknown* proxy_if1 = NULL;
+    CChannelBufferRefCount test_chanbuf = {{&test_chanbuf_refcount_test_rpc_chan_vtbl}, 1};
+
+    RPC_MESSAGE rpcMessage = {0};
+    MIDL_STUB_MESSAGE stubMessage = {0};
+    MIDL_STUB_DESC stubDesc = {0};
+    ULONG refs;
+
+    HRESULT hr = IPSFactoryBuffer_CreateProxy(ppsf, NULL, &IID_if1, &proxy_buffer, (void**)&proxy_if1);
+    ok(hr == S_OK, "got %#lx\n", hr);
+
+    ok(test_chanbuf.RefCount == 1, "got %ld\n", test_chanbuf.RefCount);
+    hr = IRpcProxyBuffer_Connect(proxy_buffer, &test_chanbuf.IRpcChannelBuffer_iface);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    /* proxy_buffer should have acquired its own refcount on test_chanbuf */
+    ok(test_chanbuf.RefCount == 2, "got %ld\n", test_chanbuf.RefCount);
+
+    /* which therefore survives releasing the initial one */
+    refs = IRpcChannelBuffer_Release(&test_chanbuf.IRpcChannelBuffer_iface);
+    ok(refs == 1, "got %ld\n", refs);
+
+    NdrProxyInitialize(proxy_if1, &rpcMessage, &stubMessage, &stubDesc, 0);
+    /* stubMessage should add its own refcount on test_chanbuf */
+    ok(test_chanbuf.RefCount == 2, "got %ld\n", test_chanbuf.RefCount);
+    ok(stubMessage.pRpcChannelBuffer != NULL, "NULL pRocChannelBuffer\n");
+
+    /* stubMessage doesn't add its own refcounts on proxy_if1 or proxy_buffer,
+     * so it's possible these are freed out from under it.
+     * E.g. an event sink might unadvise upon receiving the event it was waiting for;
+     * this unadvise could be reentrant to Invoke because SendReceive pumps STA messages.
+     * The source would then erase that connection point entry and Release the proxy. */
+    IRpcProxyBuffer_Disconnect(proxy_buffer);
+    ok(test_chanbuf.RefCount == 1, "got %ld\n", test_chanbuf.RefCount);
+    IRpcProxyBuffer_Release(proxy_buffer);
+    refs = IUnknown_Release(proxy_if1);
+    ok(refs == 0, "got %ld\n", refs);
+    ok(test_chanbuf.RefCount == 1, "got %ld\n", test_chanbuf.RefCount);
+
+    /* NdrProxyFreeBuffer must not dereference the now-freed proxy_if1,
+     * yet should still free the remaining reference on test_chanbuf */
+    NdrProxyFreeBuffer(proxy_if1, &stubMessage);
+    ok(test_chanbuf.RefCount == 0, "got %ld\n", test_chanbuf.RefCount);
+    ok(!stubMessage.pRpcChannelBuffer, "dangling pRpcChannelBuffer = %p\n", stubMessage.pRpcChannelBuffer);
+}
+
 START_TEST( cstub )
 {
     IPSFactoryBuffer *ppsf;
@@ -1440,6 +1573,7 @@ START_TEST( cstub )
     test_delegating_Invoke(ppsf);
     test_NdrDllRegisterProxy();
     test_delegated_methods();
+    test_ChannelBufferRefCount(ppsf);
 
     OleUninitialize();
 }

@@ -38,6 +38,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(mci);
 
 extern HMODULE MSVFW32_hModule;
 static const WCHAR mciWndClassW[] = {'M','C','I','W','n','d','C','l','a','s','s',0};
+static const WCHAR mciWndNameW[] = {'M','C','I','W','n','d','C','r','e','a','t','e',
+                                    'W','i','n','e','I','n','t','e','r','n','a','l', 0};
 
 typedef struct
 {
@@ -113,7 +115,7 @@ HWND VFWAPIV MCIWndCreateW(HWND hwndParent, HINSTANCE hInstance,
     else
         dwStyle |= WS_VISIBLE | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 
-    return CreateWindowExW(0, mciWndClassW, NULL,
+    return CreateWindowExW(0, mciWndClassW, mciWndNameW,
                            dwStyle | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
                            0, 0, 300, 0,
                            hwndParent, 0, hInstance, (LPVOID)szFile);
@@ -252,10 +254,10 @@ static LRESULT MCIWND_Create(HWND hWnd, LPCREATESTRUCTW cs)
     MCIWndInfo *mwi;
     static const WCHAR buttonW[] = {'b','u','t','t','o','n',0};
 
-    mwi = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*mwi));
+    mwi = calloc(1, sizeof(*mwi));
     if (!mwi) return -1;
 
-    SetWindowLongW(hWnd, 0, (LPARAM)mwi);
+    SetWindowLongPtrW(hWnd, 0, (LPARAM)mwi);
 
     mwi->dwStyle = cs->style;
     /* There is no need to show stats if there is no caption */
@@ -314,8 +316,9 @@ static LRESULT MCIWND_Create(HWND hWnd, LPCREATESTRUCTW cs)
         else
             lParam = (LPARAM)cs->lpCreateParams;
 
-        /* If it's our internal class pointer, file name is a unicode string */
-        if (cs->lpszClass == mciWndClassW)
+        /* If it's our internal window name, we are being called from MCIWndCreateA/W,
+         * so file name is a unicode string */
+        if (!lstrcmpW(cs->lpszName, mciWndNameW))
             SendMessageW(hWnd, MCIWNDM_OPENW, 0, lParam);
         else
         {
@@ -385,12 +388,12 @@ static void MCIWND_notify_media(MCIWndInfo *mwi)
                 int len;
 
                 len = WideCharToMultiByte(CP_ACP, 0, mwi->lpName, -1, NULL, 0, NULL, NULL);
-                ansi_name = HeapAlloc(GetProcessHeap(), 0, len);
+                ansi_name = malloc(len);
                 WideCharToMultiByte(CP_ACP, 0, mwi->lpName, -1, ansi_name, len, NULL, NULL);
 
                 SendMessageW(mwi->hwndOwner, MCIWNDM_NOTIFYMEDIA, (WPARAM)mwi->hWnd, (LPARAM)ansi_name);
 
-                HeapFree(GetProcessHeap(), 0, ansi_name);
+                free(ansi_name);
             }
             else
                 SendMessageW(mwi->hwndOwner, MCIWNDM_NOTIFYMEDIA, (WPARAM)mwi->hWnd, (LPARAM)mwi->lpName);
@@ -465,7 +468,7 @@ static LRESULT WINAPI MCIWndProc(HWND hWnd, UINT wMsg, WPARAM wParam, LPARAM lPa
         if (mwi->mci)
             SendMessageW(hWnd, MCI_CLOSE, 0, 0);
 
-        HeapFree(GetProcessHeap(), 0, mwi);
+        free(mwi);
 
         DestroyWindow(GetDlgItem(hWnd, CTL_MENU));
         DestroyWindow(GetDlgItem(hWnd, CTL_PLAYSTOP));
@@ -588,9 +591,7 @@ static LRESULT WINAPI MCIWndProc(HWND hWnd, UINT wMsg, WPARAM wParam, LPARAM lPa
 
             mwi->mci = mci_open.wDeviceID;
             mwi->alias = HandleToLong(hWnd) + 1;
-
-            mwi->lpName = HeapAlloc(GetProcessHeap(), 0, (lstrlenW((LPWSTR)lParam) + 1) * sizeof(WCHAR));
-            lstrcpyW(mwi->lpName, (LPWSTR)lParam);
+            mwi->lpName = wcsdup((WCHAR *)lParam);
 
             MCIWND_UpdateState(mwi);
 
@@ -657,7 +658,7 @@ static LRESULT WINAPI MCIWndProc(HWND hWnd, UINT wMsg, WPARAM wParam, LPARAM lPa
 
 end_of_mci_open:
             if (wMsg == MCIWNDM_OPENA)
-                HeapFree(GetProcessHeap(), 0, (void *)lParam);
+                free((void *)lParam);
             return mwi->lasterror;
         }
 
@@ -995,7 +996,7 @@ end_of_mci_open:
                 pos = p - (WCHAR *)lParam + 1;
                 len = lstrlenW((LPCWSTR)lParam) + 64;
 
-                cmdW = HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
+                cmdW = malloc(len * sizeof(WCHAR));
 
                 memcpy(cmdW, (void *)lParam, pos * sizeof(WCHAR));
                 wsprintfW(cmdW + pos, formatW, mwi->alias);
@@ -1010,10 +1011,10 @@ end_of_mci_open:
                 MCIWND_notify_error(mwi);
 
             if (cmdW != (LPWSTR)lParam)
-                HeapFree(GetProcessHeap(), 0, cmdW);
+                free(cmdW);
 
             if (wMsg == MCIWNDM_SENDSTRINGA)
-                HeapFree(GetProcessHeap(), 0, (void *)lParam);
+                free((void *)lParam);
 
             MCIWND_UpdateState(mwi);
             return mwi->lasterror;
@@ -1179,7 +1180,7 @@ end_of_mci_open:
 
             if (mwi->mci)
             {
-                cmdW = HeapAlloc(GetProcessHeap(), 0, (lstrlenW((LPCWSTR)lParam) + 64) * sizeof(WCHAR));
+                cmdW = malloc((wcslen((WCHAR *)lParam) + 64) * sizeof(WCHAR));
                 wsprintfW(cmdW, formatW, mwi->alias);
                 lstrcatW(cmdW, (WCHAR *)lParam);
 
@@ -1190,11 +1191,11 @@ end_of_mci_open:
                     SendDlgItemMessageW(hWnd, CTL_TRACKBAR, TBM_SETRANGEMAX, 1,
                                         SendMessageW(hWnd, MCIWNDM_GETLENGTH, 0, 0));
 
-                HeapFree(GetProcessHeap(), 0, cmdW);
+                free(cmdW);
             }
 
             if (wMsg == MCIWNDM_SETTIMEFORMATA)
-                HeapFree(GetProcessHeap(), 0, (void *)lParam);
+                free((void *)lParam);
 
             return 0;
         }
@@ -1344,7 +1345,7 @@ end_of_mci_open:
             mwi->mode = MCI_MODE_NOT_READY;
             mwi->position = -1;
 
-            HeapFree(GetProcessHeap(), 0, mwi->lpName);
+            free(mwi->lpName);
             mwi->lpName = NULL;
             MCIWND_UpdateState(mwi);
 

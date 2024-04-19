@@ -16,10 +16,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#ifndef __WINE_WINSTRING_H
-#define __WINE_WINSTRING_H
-
-#include "wine/winheader_enter.h"
+#ifndef __WINSTRING_H_
+#define __WINSTRING_H_
 
 #include <hstring.h>
 
@@ -53,6 +51,4 @@ HRESULT WINAPI WindowsTrimStringStart(HSTRING str, HSTRING charstr, HSTRING *out
 }
 #endif
 
-#include "wine/winheader_exit.h"
-
-#endif  /* __WINE_WINSTRING_H */
+#endif  /* __WINSTRING_H_ */

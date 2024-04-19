@@ -47,6 +47,7 @@ static CHAR CURR_DIR[MAX_PATH];
  *  - copy styles
  */
 
+static void (WINAPI *pMyFree)(void*);
 static BOOL (WINAPI *pSetupGetFileCompressionInfoExA)(PCSTR, PSTR, DWORD, PDWORD, PDWORD, PDWORD, PUINT);
 static BOOL (WINAPI *pSetupQueryInfOriginalFileInformationA)(PSP_INF_INFORMATION, UINT, PSP_ALTPLATFORM_INFO, PSP_ORIGINAL_FILE_INFO_A);
 
@@ -108,7 +109,7 @@ static void test_original_file_name(LPCSTR original, LPCSTR dest)
     res = SetupGetInfInformationA(hinf, INFINFO_INF_SPEC_IS_HINF, NULL, 0, &size);
     ok(res, "SetupGetInfInformation failed with error %ld\n", GetLastError());
 
-    pspii = HeapAlloc(GetProcessHeap(), 0, size);
+    pspii = malloc(size);
 
     res = SetupGetInfInformationA(hinf, INFINFO_INF_SPEC_IS_HINF, pspii, size, NULL);
     ok(res, "SetupGetInfInformation failed with error %ld\n", GetLastError());
@@ -124,7 +125,7 @@ static void test_original_file_name(LPCSTR original, LPCSTR dest)
     ok(!spofi.OriginalCatalogName[0], "spofi.OriginalCatalogName should have been \"\" instead of \"%s\"\n", spofi.OriginalCatalogName);
     ok(!strcmp(original, spofi.OriginalInfName), "spofi.OriginalInfName of %s didn't match real original name %s\n", spofi.OriginalInfName, original);
 
-    HeapFree(GetProcessHeap(), 0, pspii);
+    free(pspii);
 
     SetupCloseInfFile(hinf);
 }
@@ -370,12 +371,12 @@ static BOOL compare_file_data(LPSTR file, const BYTE *data, DWORD size)
     LPBYTE buffer;
 
     handle = CreateFileA(file, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    buffer = HeapAlloc(GetProcessHeap(), 0, size);
+    buffer = malloc(size);
     if (buffer)
     {
         ReadFile(handle, buffer, size, &read, NULL);
         if (read == size && !memcmp(data, buffer, size)) ret = TRUE;
-        HeapFree(GetProcessHeap(), 0, buffer);
+        free(buffer);
     }
     CloseHandle(handle);
     return ret;
@@ -470,7 +471,7 @@ static void test_SetupGetFileCompressionInfo(void)
     ok(target_size == sizeof(uncompressed), "got %ld\n", target_size);
     ok(type == FILE_COMPRESSION_NONE, "got %d, expected FILE_COMPRESSION_NONE\n", type);
 
-    MyFree(name);
+    pMyFree(name);
     DeleteFileA(source);
 }
 
@@ -907,6 +908,7 @@ START_TEST(misc)
 {
     HMODULE hsetupapi = GetModuleHandleA("setupapi.dll");
 
+    pMyFree = (void*)GetProcAddress(hsetupapi, "MyFree");
     pSetupGetFileCompressionInfoExA = (void*)GetProcAddress(hsetupapi, "SetupGetFileCompressionInfoExA");
     pSetupQueryInfOriginalFileInformationA = (void*)GetProcAddress(hsetupapi, "SetupQueryInfOriginalFileInformationA");
 

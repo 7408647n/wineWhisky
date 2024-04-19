@@ -65,6 +65,25 @@ static void test_streamonhglobal(void)
     hr = IStream_Write(pStream, data, sizeof(data), NULL);
     ok_ole_success(hr, "IStream_Write");
 
+    /* Seek beyond the end of the stream and read from it */
+    ll.QuadPart = sizeof(data) + 16;
+    hr = IStream_Seek(pStream, ll, STREAM_SEEK_SET, NULL);
+    ok_ole_success(hr, "IStream_Seek");
+
+    hr = IStream_Read(pStream, buffer, sizeof(buffer), &read);
+    ok_ole_success(hr, "IStream_Read");
+    ok(read == 0, "IStream_Read returned read %ld\n", read);
+
+    ull.u.HighPart = 0xCAFECAFE;
+    ull.u.LowPart = 0xCAFECAFE;
+    ll.u.HighPart = 0;
+    ll.u.LowPart = 0;
+    hr = IStream_Seek(pStream, ll, STREAM_SEEK_CUR, &ull);
+    ok_ole_success(hr, "IStream_Seek");
+    ok(ull.u.LowPart == sizeof(data) + 16, "LowPart set to %ld\n", ull.u.LowPart);
+    ok(ull.u.HighPart == 0, "should have set HighPart to 0 instead of %ld\n", ull.u.HighPart);
+
+    /* Seek to the start of the stream and read from it */
     ll.QuadPart = 0;
     hr = IStream_Seek(pStream, ll, STREAM_SEEK_SET, NULL);
     ok_ole_success(hr, "IStream_Seek");
@@ -294,10 +313,9 @@ static void test_streamonhglobal(void)
 
     /* test OOM condition */
     ull.u.HighPart = -1;
-    ull.u.LowPart = -1;
+    ull.u.LowPart = 0;
     hr = IStream_SetSize(pStream, ull);
-    ok(hr == E_OUTOFMEMORY || broken(hr == S_OK), /* win9x */
-       "IStream_SetSize with large size should have returned E_OUTOFMEMORY instead of 0x%08lx\n", hr);
+    ok(hr == S_OK, "IStream_SetSize with large size should have returned S_OK instead of 0x%08lx\n", hr);
 
     IStream_Release(pStream);
 }

@@ -30,7 +30,9 @@
 #include "winuser.h"
 #include "winerror.h"
 #include "winreg.h"
+#include "winioctl.h"
 
+#include "ddk/hidclass.h"
 #include "ddk/hidsdi.h"
 #include "setupapi.h"
 #include "devguid.h"
@@ -41,7 +43,6 @@
 #include "device_private.h"
 
 #include "initguid.h"
-#include "devpkey.h"
 
 #include "wine/debug.h"
 #include "wine/hid.h"
@@ -51,7 +52,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(dinput);
 DEFINE_GUID( GUID_DEVINTERFACE_WINEXINPUT,0x6c53d5fd,0x6480,0x440f,0xb6,0x18,0x47,0x67,0x50,0xc5,0xe1,0xa6 );
 DEFINE_GUID( hid_joystick_guid, 0x9e573edb, 0x7734, 0x11d2, 0x8d, 0x4a, 0x23, 0x90, 0x3f, 0xb6, 0xbd, 0xf7 );
 DEFINE_GUID( device_path_guid, 0x00000000, 0x0000, 0x0000, 0x8d, 0x4a, 0x23, 0x90, 0x3f, 0xb6, 0xbd, 0xf8 );
-DEFINE_DEVPROPKEY( DEVPROPKEY_HID_HANDLE, 0xbc62e415, 0xf4fe, 0x405c, 0x8e, 0xda, 0x63, 0x6f, 0xb5, 0x9f, 0x08, 0x98, 2 );
 
 struct pid_control_report
 {
@@ -172,7 +172,6 @@ struct pid_effect_state
 struct hid_joystick
 {
     struct dinput_device base;
-    LONG internal_ref;
 
     HANDLE device;
     OVERLAPPED read_ovl;
@@ -276,6 +275,7 @@ static const GUID *object_usage_to_guid( USAGE usage_page, USAGE usage )
         case HID_USAGE_GENERIC_RY: return &GUID_RyAxis;
         case HID_USAGE_GENERIC_RZ: return &GUID_RzAxis;
         case HID_USAGE_GENERIC_SLIDER: return &GUID_Slider;
+        case HID_USAGE_GENERIC_DIAL: return &GUID_Slider;
         case HID_USAGE_GENERIC_HATSWITCH: return &GUID_POV;
         }
         break;
@@ -354,6 +354,8 @@ static const WCHAR *object_usage_to_string( DIDEVICEOBJECTINSTANCEW *instance )
     case MAKELONG(HID_USAGE_GENERIC_X, HID_USAGE_PAGE_GENERIC): return L"X Axis";
     case MAKELONG(HID_USAGE_GENERIC_Y, HID_USAGE_PAGE_GENERIC): return L"Y Axis";
     case MAKELONG(HID_USAGE_GENERIC_Z, HID_USAGE_PAGE_GENERIC): return L"Z Axis";
+    case MAKELONG(HID_USAGE_GENERIC_SLIDER, HID_USAGE_PAGE_GENERIC): return L"Slider";
+    case MAKELONG(HID_USAGE_GENERIC_DIAL, HID_USAGE_PAGE_GENERIC): return L"Dial";
 
     case MAKELONG(PID_USAGE_ATTACK_LEVEL, HID_USAGE_PAGE_PID): return L"Attack Level";
     case MAKELONG(PID_USAGE_ATTACK_TIME, HID_USAGE_PAGE_PID): return L"Attack Time";
@@ -476,11 +478,8 @@ static HRESULT find_next_effect_id( struct hid_joystick *impl, ULONG *index, USA
     return DI_OK;
 }
 
-typedef BOOL (*enum_object_callback)( struct hid_joystick *impl, struct hid_value_caps *caps,
-                                      DIDEVICEOBJECTINSTANCEW *instance, void *data );
-
 static BOOL enum_object( struct hid_joystick *impl, const DIPROPHEADER *filter, DWORD flags,
-                         enum_object_callback callback, struct hid_value_caps *caps,
+                         enum_object_callback callback, UINT index, struct hid_value_caps *caps,
                          DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
     if (flags != DIDFT_ALL && !(flags & DIDFT_GETTYPE( instance->dwType ))) return DIENUM_CONTINUE;
@@ -488,17 +487,17 @@ static BOOL enum_object( struct hid_joystick *impl, const DIPROPHEADER *filter, 
     switch (filter->dwHow)
     {
     case DIPH_DEVICE:
-        return callback( impl, caps, instance, data );
+        return callback( &impl->base, index, caps, instance, data );
     case DIPH_BYOFFSET:
         if (filter->dwObj != instance->dwOfs) return DIENUM_CONTINUE;
-        return callback( impl, caps, instance, data );
+        return callback( &impl->base, index, caps, instance, data );
     case DIPH_BYID:
         if ((filter->dwObj & 0x00ffffff) != (instance->dwType & 0x00ffffff)) return DIENUM_CONTINUE;
-        return callback( impl, caps, instance, data );
+        return callback( &impl->base, index, caps, instance, data );
     case DIPH_BYUSAGE:
         if (HIWORD( filter->dwObj ) != instance->wUsagePage) return DIENUM_CONTINUE;
         if (LOWORD( filter->dwObj ) != instance->wUsage) return DIENUM_CONTINUE;
-        return callback( impl, caps, instance, data );
+        return callback( &impl->base, index, caps, instance, data );
     default:
         FIXME( "unimplemented filter dwHow %#lx dwObj %#lx\n", filter->dwHow, filter->dwObj );
         break;
@@ -614,7 +613,7 @@ static BOOL enum_objects( struct hid_joystick *impl, const DIPROPHEADER *filter,
             if ((tmp = object_usage_to_string( &instance ))) lstrcpynW( instance.tszName, tmp, MAX_PATH );
             else swprintf( instance.tszName, MAX_PATH, L"Unknown %u", DIDFT_GETINSTANCE( instance.dwType ) );
             check_pid_effect_axis_caps( impl, &instance );
-            ret = enum_object( impl, filter, flags, callback, caps, &instance, data );
+            ret = enum_object( impl, filter, flags, callback, object, caps, &instance, data );
             if (ret != DIENUM_CONTINUE) return ret;
             value_ofs += sizeof(LONG);
             object++;
@@ -649,7 +648,7 @@ static BOOL enum_objects( struct hid_joystick *impl, const DIPROPHEADER *filter,
             instance.dwDimension = caps->units;
             instance.wExponent = caps->units_exp;
             swprintf( instance.tszName, MAX_PATH, L"Button %u", DIDFT_GETINSTANCE( instance.dwType ) );
-            ret = enum_object( impl, filter, flags, callback, caps, &instance, data );
+            ret = enum_object( impl, filter, flags, callback, object, caps, &instance, data );
             if (ret != DIENUM_CONTINUE) return ret;
             button_ofs++;
             object++;
@@ -688,7 +687,7 @@ static BOOL enum_objects( struct hid_joystick *impl, const DIPROPHEADER *filter,
                 instance.wExponent = caps->units_exp;
                 if ((tmp = object_usage_to_string( &instance ))) lstrcpynW( instance.tszName, tmp, MAX_PATH );
                 else swprintf( instance.tszName, MAX_PATH, L"Unknown %u", DIDFT_GETINSTANCE( instance.dwType ) );
-                ret = enum_object( impl, filter, flags, callback, nary, &instance, data );
+                ret = enum_object( impl, filter, flags, callback, -1, nary, &instance, data );
                 if (ret != DIENUM_CONTINUE) return ret;
                 button_ofs++;
             }
@@ -710,7 +709,7 @@ static BOOL enum_objects( struct hid_joystick *impl, const DIPROPHEADER *filter,
             instance.wExponent = caps->units_exp;
             if ((tmp = object_usage_to_string( &instance ))) lstrcpynW( instance.tszName, tmp, MAX_PATH );
             else swprintf( instance.tszName, MAX_PATH, L"Unknown %u", DIDFT_GETINSTANCE( instance.dwType ) );
-            ret = enum_object( impl, filter, flags, callback, caps, &instance, data );
+            ret = enum_object( impl, filter, flags, callback, -1, caps, &instance, data );
             if (ret != DIENUM_CONTINUE) return ret;
 
             if (caps->flags & HID_VALUE_CAPS_IS_BUTTON) button_ofs++;
@@ -729,7 +728,7 @@ static BOOL enum_objects( struct hid_joystick *impl, const DIPROPHEADER *filter,
             instance.dwFlags = 0;
             instance.wUsagePage = node->usage_page;
             instance.wUsage = node->usage;
-            instance.guidType = *object_usage_to_guid( instance.wUsagePage, instance.wUsage );
+            instance.guidType = GUID_Unknown;
             instance.wReportId = 0;
             instance.wCollectionNumber = node->parent;
             instance.dwDimension = 0;
@@ -737,7 +736,7 @@ static BOOL enum_objects( struct hid_joystick *impl, const DIPROPHEADER *filter,
             len = swprintf( instance.tszName, MAX_PATH, L"Collection %u - ", DIDFT_GETINSTANCE( instance.dwType ) );
             if ((tmp = object_usage_to_string( &instance ))) lstrcpynW( instance.tszName + len, tmp, MAX_PATH - len );
             else swprintf( instance.tszName + len, MAX_PATH - len, L"Unknown %u", DIDFT_GETINSTANCE( instance.dwType ) );
-            ret = enum_object( impl, filter, flags, callback, NULL, &instance, data );
+            ret = enum_object( impl, filter, flags, callback, -1, NULL, &instance, data );
             if (ret != DIENUM_CONTINUE) return ret;
         }
     }
@@ -772,30 +771,18 @@ static void set_report_value( struct hid_joystick *impl, char *report_buf,
                                              caps->usage_page, caps->usage_min, status );
 }
 
-static void hid_joystick_addref( IDirectInputDevice8W *iface )
+static void hid_joystick_destroy( IDirectInputDevice8W *iface )
 {
     struct hid_joystick *impl = impl_from_IDirectInputDevice8W( iface );
-    ULONG ref = InterlockedIncrement( &impl->internal_ref );
-    TRACE( "iface %p, internal ref %lu.\n", iface, ref );
-}
+    TRACE( "iface %p.\n", iface );
 
-static void hid_joystick_release( IDirectInputDevice8W *iface )
-{
-    struct hid_joystick *impl = impl_from_IDirectInputDevice8W( iface );
-    ULONG ref = InterlockedDecrement( &impl->internal_ref );
-    TRACE( "iface %p, internal ref %lu.\n", iface, ref );
-
-    if (!ref)
-    {
-        free( impl->usages_buf );
-        free( impl->feature_report_buf );
-        free( impl->output_report_buf );
-        free( impl->input_report_buf );
-        HidD_FreePreparsedData( impl->preparsed );
-        CloseHandle( impl->base.read_event );
-        CloseHandle( impl->device );
-        dinput_device_destroy( iface );
-    }
+    free( impl->usages_buf );
+    free( impl->feature_report_buf );
+    free( impl->output_report_buf );
+    free( impl->input_report_buf );
+    HidD_FreePreparsedData( impl->preparsed );
+    CloseHandle( impl->base.read_event );
+    CloseHandle( impl->device );
 }
 
 static HRESULT hid_joystick_get_property( IDirectInputDevice8W *iface, DWORD property,
@@ -1085,7 +1072,12 @@ static HRESULT hid_joystick_send_force_feedback_command( IDirectInputDevice8W *i
     if (status != HIDP_STATUS_SUCCESS) return status;
 
     if (!WriteFile( impl->device, report_buf, report_len, NULL, NULL )) return DIERR_INPUTLOST;
-    if (!unacquire && command == DISFFC_RESET) hid_joystick_send_device_gain( iface, impl->base.device_gain );
+    if (!unacquire && command == DISFFC_RESET)
+    {
+        if (impl->base.autocenter == DIPROPAUTOCENTER_OFF)
+            hid_joystick_send_force_feedback_command( iface, DISFFC_STOPALL, FALSE );
+        hid_joystick_send_device_gain( iface, impl->base.device_gain );
+    }
 
     return DI_OK;
 }
@@ -1113,20 +1105,19 @@ struct parse_device_state_params
     DWORD seq;
 };
 
-static BOOL check_device_state_button( struct hid_joystick *impl, struct hid_value_caps *caps,
-                                       DIDEVICEOBJECTINSTANCEW *instance, void *data )
+static BOOL check_device_state_button( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+                                       const DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
-    IDirectInputDevice8W *iface = &impl->base.IDirectInputDevice8W_iface;
+    IDirectInputDevice8W *iface = &device->IDirectInputDevice8W_iface;
     struct parse_device_state_params *params = data;
     BYTE old_value, value;
 
-    if (instance->wReportId != impl->base.device_state_report_id) return DIENUM_CONTINUE;
+    if (instance->wReportId != device->device_state_report_id) return DIENUM_CONTINUE;
 
     value = params->buttons[instance->wUsage - 1];
     old_value = params->old_state[instance->dwOfs];
-    impl->base.device_state[instance->dwOfs] = value;
-    if (old_value != value)
-        queue_event( iface, instance->dwType, value, params->time, params->seq );
+    device->device_state[instance->dwOfs] = value;
+    if (old_value != value) queue_event( iface, index, value, params->time, params->seq );
 
     return DIENUM_CONTINUE;
 }
@@ -1186,16 +1177,20 @@ static LONG scale_axis_value( ULONG value, struct object_properties *properties 
     return phy_min + MulDiv( tmp - log_min, phy_max - phy_min, log_max - log_min );
 }
 
-static BOOL read_device_state_value( struct hid_joystick *impl, struct hid_value_caps *caps,
-                                     DIDEVICEOBJECTINSTANCEW *instance, void *data )
+static BOOL read_device_state_value( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+                                     const DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
-    struct object_properties *properties = impl->base.object_properties + instance->dwOfs / sizeof(LONG);
+    struct hid_joystick *impl = CONTAINING_RECORD( device, struct hid_joystick, base );
     IDirectInputDevice8W *iface = &impl->base.IDirectInputDevice8W_iface;
     ULONG logical_value, report_len = impl->caps.InputReportByteLength;
     struct parse_device_state_params *params = data;
     char *report_buf = impl->input_report_buf;
+    struct object_properties *properties;
     LONG old_value, value;
     NTSTATUS status;
+
+    if (index == -1) return DIENUM_STOP;
+    properties = device->object_properties + index;
 
     if (instance->wReportId != impl->base.device_state_report_id) return DIENUM_CONTINUE;
 
@@ -1208,8 +1203,7 @@ static BOOL read_device_state_value( struct hid_joystick *impl, struct hid_value
 
     old_value = *(LONG *)(params->old_state + instance->dwOfs);
     *(LONG *)(impl->base.device_state + instance->dwOfs) = value;
-    if (old_value != value)
-        queue_event( iface, instance->dwType, value, params->time, params->seq );
+    if (old_value != value) queue_event( iface, index, value, params->time, params->seq );
 
     return DIENUM_CONTINUE;
 }
@@ -1224,7 +1218,7 @@ static HRESULT hid_joystick_read( IDirectInputDevice8W *iface )
     };
     struct hid_joystick *impl = impl_from_IDirectInputDevice8W( iface );
     ULONG i, index, count, report_len = impl->caps.InputReportByteLength;
-    DIDATAFORMAT *format = impl->base.device_format;
+    DIDATAFORMAT *format = &impl->base.device_format;
     char *report_buf = impl->input_report_buf;
     struct parse_device_state_params params;
     struct hid_joystick_effect *effect;
@@ -1339,32 +1333,16 @@ static HRESULT hid_joystick_read( IDirectInputDevice8W *iface )
     return hr;
 }
 
-struct enum_objects_params
-{
-    LPDIENUMDEVICEOBJECTSCALLBACKW callback;
-    void *context;
-};
-
-static BOOL enum_objects_callback( struct hid_joystick *impl, struct hid_value_caps *caps,
-                                   DIDEVICEOBJECTINSTANCEW *instance, void *data )
-{
-    struct enum_objects_params *params = data;
-    if (instance->wUsagePage == HID_USAGE_PAGE_PID && !(instance->dwType & DIDFT_NODATA))
-        return DIENUM_CONTINUE;
-    return params->callback( instance, params->context );
-}
-
 static HRESULT hid_joystick_enum_objects( IDirectInputDevice8W *iface, const DIPROPHEADER *filter,
-                                          DWORD flags, LPDIENUMDEVICEOBJECTSCALLBACKW callback, void *context )
+                                          DWORD flags, enum_object_callback callback, void *context )
 {
-    struct enum_objects_params params = {.callback = callback, .context = context};
     struct hid_joystick *impl = impl_from_IDirectInputDevice8W( iface );
-    return enum_objects( impl, filter, flags, enum_objects_callback, &params );
+    return enum_objects( impl, filter, flags, callback, context );
 }
 
 static const struct dinput_device_vtbl hid_joystick_vtbl =
 {
-    hid_joystick_release,
+    hid_joystick_destroy,
     NULL,
     hid_joystick_read,
     hid_joystick_acquire,
@@ -1413,24 +1391,25 @@ static DWORD device_type_for_version( DWORD type, DWORD version )
     }
 }
 
-static BOOL hid_joystick_device_try_open( UINT32 handle, const WCHAR *path, HANDLE *device,
-                                          PHIDP_PREPARSED_DATA *preparsed, HIDD_ATTRIBUTES *attrs,
-                                          HIDP_CAPS *caps, DIDEVICEINSTANCEW *instance, DWORD version )
+static HRESULT hid_joystick_device_try_open( const WCHAR *path, HANDLE *device, PHIDP_PREPARSED_DATA *preparsed,
+                                             HIDD_ATTRIBUTES *attrs, HIDP_CAPS *caps, DIDEVICEINSTANCEW *instance,
+                                             DWORD version )
 {
     BOOL has_accelerator, has_brake, has_clutch, has_z, has_pov;
     PHIDP_PREPARSED_DATA preparsed_data = NULL;
     HIDP_LINK_COLLECTION_NODE nodes[256];
-    DWORD type, button_count = 0;
+    DWORD type, size, button_count = 0;
     HIDP_BUTTON_CAPS buttons[10];
     HIDP_VALUE_CAPS value;
     HANDLE device_file;
     ULONG node_count;
     NTSTATUS status;
+    UINT32 handle;
     USHORT count;
 
     device_file = CreateFileW( path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING, 0 );
-    if (device_file == INVALID_HANDLE_VALUE) return FALSE;
+    if (device_file == INVALID_HANDLE_VALUE) return DIERR_DEVICENOTREG;
 
     if (!HidD_GetPreparsedData( device_file, &preparsed_data )) goto failed;
     if (!HidD_GetAttributes( device_file, attrs )) goto failed;
@@ -1447,6 +1426,12 @@ static BOOL hid_joystick_device_try_open( UINT32 handle, const WCHAR *path, HAND
 
     if (!HidD_GetProductString( device_file, instance->tszInstanceName, MAX_PATH * sizeof(WCHAR) )) goto failed;
     if (!HidD_GetProductString( device_file, instance->tszProductName, MAX_PATH * sizeof(WCHAR) )) goto failed;
+
+    if (!DeviceIoControl( device_file, IOCTL_HID_GET_WINE_RAWINPUT_HANDLE, NULL, 0, &handle, sizeof(handle), &size, NULL ))
+    {
+        ERR( "failed to get raw input handle, error %lu\n", GetLastError() );
+        goto failed;
+    }
 
     instance->guidInstance = hid_joystick_guid;
     instance->guidInstance.Data1 ^= handle;
@@ -1556,32 +1541,29 @@ static BOOL hid_joystick_device_try_open( UINT32 handle, const WCHAR *path, HAND
 
     *device = device_file;
     *preparsed = preparsed_data;
-    return TRUE;
+    return DI_OK;
 
 failed:
     CloseHandle( device_file );
     HidD_FreePreparsedData( preparsed_data );
-    return FALSE;
+    return DIERR_DEVICENOTREG;
 }
 
-static HRESULT hid_joystick_device_open( int index, DIDEVICEINSTANCEW *filter, WCHAR *device_path,
-                                         HANDLE *device, PHIDP_PREPARSED_DATA *preparsed,
+static HRESULT hid_joystick_device_open( int index, const GUID *guid, DIDEVICEINSTANCEW *instance,
+                                         WCHAR *device_path, HANDLE *device, PHIDP_PREPARSED_DATA *preparsed,
                                          HIDD_ATTRIBUTES *attrs, HIDP_CAPS *caps, DWORD version )
 {
     char buffer[sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + MAX_PATH * sizeof(WCHAR)];
     SP_DEVICE_INTERFACE_DETAIL_DATA_W *detail = (void *)buffer;
     SP_DEVICE_INTERFACE_DATA iface = {.cbSize = sizeof(iface)};
     SP_DEVINFO_DATA devinfo = {.cbSize = sizeof(devinfo)};
-    DIDEVICEINSTANCEW instance = *filter;
     WCHAR device_id[MAX_PATH], *tmp;
     HDEVINFO set, xi_set;
-    UINT32 i = 0, handle;
     BOOL override;
-    DWORD type;
+    UINT32 i = 0;
     GUID hid;
 
-    TRACE( "index %d, product %s, instance %s\n", index, debugstr_guid( &filter->guidProduct ),
-           debugstr_guid( &filter->guidInstance ) );
+    TRACE( "index %d, guid %s\n", index, debugstr_guid( guid ) );
 
     HidD_GetHidGuid( &hid );
 
@@ -1596,15 +1578,11 @@ static HRESULT hid_joystick_device_open( int index, DIDEVICEINSTANCEW *filter, W
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
         if (!SetupDiGetDeviceInterfaceDetailW( set, &iface, detail, sizeof(buffer), NULL, &devinfo ))
             continue;
-        if (!SetupDiGetDevicePropertyW( set, &devinfo, &DEVPROPKEY_HID_HANDLE, &type,
-                                        (BYTE *)&handle, sizeof(handle), NULL, 0 ) ||
-            type != DEVPROP_TYPE_UINT32)
-            continue;
-        if (!hid_joystick_device_try_open( handle, detail->DevicePath, device, preparsed,
-                                           attrs, caps, &instance, version ))
+        if (FAILED(hid_joystick_device_try_open( detail->DevicePath, device, preparsed,
+                                                 attrs, caps, instance, version )))
             continue;
 
-        if (device_instance_is_disabled( &instance, &override ))
+        if (device_instance_is_disabled( instance, &override ))
             goto next;
 
         if (override && SetupDiGetDeviceInstanceIdW( set, &devinfo, device_id, MAX_PATH, NULL ) &&
@@ -1620,14 +1598,13 @@ static HRESULT hid_joystick_device_open( int index, DIDEVICEINSTANCEW *filter, W
 
             CloseHandle( *device );
             HidD_FreePreparsedData( *preparsed );
-            if (!hid_joystick_device_try_open( handle, detail->DevicePath, device, preparsed,
-                                               attrs, caps, &instance, version ))
+            if (FAILED(hid_joystick_device_try_open( detail->DevicePath, device, preparsed,
+                                                     attrs, caps, instance, version )))
                 continue;
         }
 
         /* enumerate device by GUID */
-        if (index < 0 && IsEqualGUID( &filter->guidProduct, &instance.guidProduct )) break;
-        if (index < 0 && IsEqualGUID( &filter->guidInstance, &instance.guidInstance )) break;
+        if (IsEqualGUID( guid, &instance->guidProduct ) || IsEqualGUID( guid, &instance->guidInstance )) break;
 
         /* enumerate all devices */
         if (index >= 0 && !index--) break;
@@ -1644,7 +1621,6 @@ static HRESULT hid_joystick_device_open( int index, DIDEVICEINSTANCEW *filter, W
     if (!*device || !*preparsed) return DIERR_DEVICENOTREG;
 
     lstrcpynW( device_path, detail->DevicePath, MAX_PATH );
-    *filter = instance;
     return DI_OK;
 }
 
@@ -1653,13 +1629,14 @@ HRESULT hid_joystick_enum_device( DWORD type, DWORD flags, DIDEVICEINSTANCEW *in
     HIDD_ATTRIBUTES attrs = {.Size = sizeof(attrs)};
     PHIDP_PREPARSED_DATA preparsed;
     WCHAR device_path[MAX_PATH];
+    GUID guid = GUID_NULL;
     HIDP_CAPS caps;
     HANDLE device;
     HRESULT hr;
 
     TRACE( "type %#lx, flags %#lx, instance %p, version %#lx, index %d\n", type, flags, instance, version, index );
 
-    hr = hid_joystick_device_open( index, instance, device_path, &device, &preparsed,
+    hr = hid_joystick_device_open( index, &guid, instance, device_path, &device, &preparsed,
                                    &attrs, &caps, version );
     if (hr != DI_OK) return hr;
 
@@ -1673,17 +1650,22 @@ HRESULT hid_joystick_enum_device( DWORD type, DWORD flags, DIDEVICEINSTANCEW *in
     return DI_OK;
 }
 
-static BOOL init_object_properties( struct hid_joystick *impl, struct hid_value_caps *caps,
-                                    DIDEVICEOBJECTINSTANCEW *instance, void *data )
+static BOOL init_object_properties( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+                                    const DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
-    struct object_properties *properties = impl->base.object_properties + instance->dwOfs / sizeof(LONG);
+    struct object_properties *properties;
     LONG tmp;
+
+    if (index == -1) return DIENUM_STOP;
+    properties = device->object_properties + index;
 
     properties->bit_size = caps->bit_size;
     properties->physical_min = caps->physical_min;
     properties->physical_max = caps->physical_max;
     properties->logical_min = caps->logical_min;
     properties->logical_max = caps->logical_max;
+    properties->range_min = 0;
+    properties->range_max = 0;
 
     if (instance->dwType & DIDFT_AXIS) properties->range_max = 65535;
     else
@@ -1694,12 +1676,14 @@ static BOOL init_object_properties( struct hid_joystick *impl, struct hid_value_
     }
 
     properties->saturation = 10000;
+    properties->granularity = 1;
     return DIENUM_CONTINUE;
 }
 
-static BOOL init_pid_reports( struct hid_joystick *impl, struct hid_value_caps *caps,
-                              DIDEVICEOBJECTINSTANCEW *instance, void *data )
+static BOOL init_pid_reports( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+                              const DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
+    struct hid_joystick *impl = CONTAINING_RECORD( device, struct hid_joystick, base );
     struct pid_set_constant_force *set_constant_force = &impl->pid_set_constant_force;
     struct pid_set_ramp_force *set_ramp_force = &impl->pid_set_ramp_force;
     struct pid_control_report *device_control = &impl->pid_device_control;
@@ -1771,9 +1755,10 @@ static BOOL init_pid_reports( struct hid_joystick *impl, struct hid_value_caps *
     return DIENUM_CONTINUE;
 }
 
-static BOOL init_pid_caps( struct hid_joystick *impl, struct hid_value_caps *caps,
-                           DIDEVICEOBJECTINSTANCEW *instance, void *data )
+static BOOL init_pid_caps( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+                           const DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
+    struct hid_joystick *impl = CONTAINING_RECORD( device, struct hid_joystick, base );
     struct pid_set_constant_force *set_constant_force = &impl->pid_set_constant_force;
     struct pid_set_ramp_force *set_ramp_force = &impl->pid_set_ramp_force;
     struct pid_control_report *device_control = &impl->pid_device_control;
@@ -1843,8 +1828,6 @@ static BOOL init_pid_caps( struct hid_joystick *impl, struct hid_value_caps *cap
     if (instance->wCollectionNumber == effect_update->axes_coll)
     {
         SET_REPORT_ID( effect_update );
-        caps->physical_min = 0;
-        caps->physical_max = 36000;
         if (effect_update->axis_count >= 6) FIXME( "more than 6 PID axes detected\n" );
         else effect_update->axis_caps[effect_update->axis_count] = caps;
         effect_update->axis_count++;
@@ -2008,12 +1991,6 @@ HRESULT hid_joystick_create_device( struct dinput *dinput, const GUID *guid, IDi
         .dwHeaderSize = sizeof(filter),
         .dwHow = DIPH_DEVICE,
     };
-    DIDEVICEINSTANCEW instance =
-    {
-        .dwSize = sizeof(instance),
-        .guidProduct = *guid,
-        .guidInstance = *guid
-    };
     DIPROPRANGE range =
     {
         .diph =
@@ -2024,8 +2001,6 @@ HRESULT hid_joystick_create_device( struct dinput *dinput, const GUID *guid, IDi
         },
     };
     HIDD_ATTRIBUTES attrs = {.Size = sizeof(attrs)};
-    struct object_properties *object_properties;
-    struct hid_preparsed_data *preparsed;
     struct hid_joystick *impl = NULL;
     USAGE_AND_PAGE *usages;
     char *buffer;
@@ -2035,50 +2010,29 @@ HRESULT hid_joystick_create_device( struct dinput *dinput, const GUID *guid, IDi
     TRACE( "dinput %p, guid %s, out %p\n", dinput, debugstr_guid( guid ), out );
 
     *out = NULL;
-    instance.guidProduct.Data1 = dinput_pidvid_guid.Data1;
-    instance.guidInstance.Data1 = hid_joystick_guid.Data1;
-    if (IsEqualGUID( &dinput_pidvid_guid, &instance.guidProduct ))
-        instance.guidProduct = *guid;
-    else if (IsEqualGUID( &hid_joystick_guid, &instance.guidInstance ))
-        instance.guidInstance = *guid;
-    else
-    {
-        instance.guidInstance.Data1 = device_path_guid.Data1;
-        instance.guidInstance.Data2 = device_path_guid.Data2;
-        instance.guidInstance.Data3 = device_path_guid.Data3;
-        if (!IsEqualGUID( &device_path_guid, &instance.guidInstance )) return DIERR_DEVICENOTREG;
-    }
 
-    hr = dinput_device_alloc( sizeof(struct hid_joystick), &hid_joystick_vtbl, guid, dinput, (void **)&impl );
-    if (FAILED(hr)) return hr;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    dinput_device_init( &impl->base, &hid_joystick_vtbl, guid, dinput );
     impl->base.crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": hid_joystick.base.crit");
     impl->base.dwCoopLevel = DISCL_NONEXCLUSIVE | DISCL_BACKGROUND;
     impl->base.read_event = CreateEventW( NULL, TRUE, FALSE, NULL );
-    impl->internal_ref = 1;
 
-    if (!IsEqualGUID( &device_path_guid, &instance.guidInstance ))
-        hr = hid_joystick_device_open( -1, &instance, impl->device_path, &impl->device, &impl->preparsed,
+    if (memcmp( device_path_guid.Data4, guid->Data4, sizeof(device_path_guid.Data4) ))
+        hr = hid_joystick_device_open( -1, guid, &impl->base.instance, impl->device_path, &impl->device, &impl->preparsed,
                                        &attrs, &impl->caps, dinput->dwVersion );
     else
     {
         wcscpy( impl->device_path, *(const WCHAR **)guid );
-        if (!hid_joystick_device_try_open( 0, impl->device_path, &impl->device, &impl->preparsed, &attrs,
-                                           &impl->caps, &instance, dinput->dwVersion ))
-            hr = DIERR_DEVICENOTREG;
+        hr = hid_joystick_device_try_open( impl->device_path, &impl->device, &impl->preparsed, &attrs,
+                                           &impl->caps, &impl->base.instance, dinput->dwVersion );
     }
     if (hr != DI_OK) goto failed;
 
-    impl->base.instance = instance;
-    impl->base.caps.dwDevType = instance.dwDevType;
+    impl->base.caps.dwDevType = impl->base.instance.dwDevType;
     impl->attrs = attrs;
     list_init( &impl->effect_list );
 
-    preparsed = (struct hid_preparsed_data *)impl->preparsed;
-    size = preparsed->input_caps_count * sizeof(struct object_properties);
-    if (!(object_properties = calloc( 1, size ))) goto failed;
-    impl->base.object_properties = object_properties;
-    enum_objects( impl, &filter, DIDFT_AXIS | DIDFT_POV, init_object_properties, NULL );
-
+    hr = E_OUTOFMEMORY;
     size = impl->caps.InputReportByteLength;
     if (!(buffer = malloc( size ))) goto failed;
     impl->input_report_buf = buffer;
@@ -2138,7 +2092,8 @@ HRESULT hid_joystick_create_device( struct dinput *dinput, const GUID *guid, IDi
         impl->base.caps.dwFFDriverVersion = 1;
     }
 
-    if (FAILED(hr = dinput_device_init( &impl->base.IDirectInputDevice8W_iface ))) goto failed;
+    if (FAILED(hr = dinput_device_init_device_format( &impl->base.IDirectInputDevice8W_iface ))) goto failed;
+    enum_objects( impl, &filter, DIDFT_AXIS | DIDFT_POV, init_object_properties, NULL );
 
     *out = &impl->base.IDirectInputDevice8W_iface;
     return DI_OK;
@@ -2184,7 +2139,7 @@ static ULONG WINAPI hid_joystick_effect_Release( IDirectInputEffect *iface )
         EnterCriticalSection( &impl->joystick->base.crit );
         list_remove( &impl->entry );
         LeaveCriticalSection( &impl->joystick->base.crit );
-        hid_joystick_release( &impl->joystick->base.IDirectInputDevice8W_iface );
+        dinput_device_internal_release( &impl->joystick->base );
         free( impl->set_envelope_buf );
         free( impl->type_specific_buf );
         free( impl->effect_update_buf );
@@ -2290,20 +2245,20 @@ static HRESULT WINAPI hid_joystick_effect_GetEffectGuid( IDirectInputEffect *ifa
     return DI_OK;
 }
 
-static BOOL get_parameters_object_id( struct hid_joystick *impl, struct hid_value_caps *caps,
-                                      DIDEVICEOBJECTINSTANCEW *instance, void *data )
+static BOOL get_parameters_object_id( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+                                      const DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
     *(DWORD *)data = instance->dwType;
     return DIENUM_STOP;
 }
 
-static BOOL get_parameters_object_ofs( struct hid_joystick *impl, struct hid_value_caps *caps,
-                                       DIDEVICEOBJECTINSTANCEW *instance, void *data )
+static BOOL get_parameters_object_ofs( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+                                       const DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
-    DIDATAFORMAT *device_format = impl->base.device_format, *user_format = impl->base.user_format;
+    DIDATAFORMAT *device_format = &device->device_format, *user_format = &device->user_format;
     DIOBJECTDATAFORMAT *device_obj, *user_obj;
 
-    if (!user_format) return DIENUM_CONTINUE;
+    if (!user_format->rgodf) return DIENUM_CONTINUE;
 
     user_obj = user_format->rgodf + device_format->dwNumObjs;
     device_obj = device_format->rgodf + device_format->dwNumObjs;
@@ -2332,6 +2287,7 @@ static void convert_directions_to_spherical( const DIEFFECT *in, DIEFFECT *out )
             for (j = 1; j < i; ++j) tmp = sqrt( tmp * tmp + in->rglDirection[j] * in->rglDirection[j] );
             tmp = atan2( in->rglDirection[i], tmp );
             out->rglDirection[i - 1] = tmp * 18000 / M_PI;
+            if (out->rglDirection[i - 1] < 0) out->rglDirection[i - 1] += 36000;
         }
         if (in->cAxes) out->rglDirection[in->cAxes - 1] = 0;
         out->cAxes = in->cAxes;
@@ -2369,7 +2325,8 @@ static void convert_directions_from_spherical( const DIEFFECT *in, DIEFFECT *out
             tmp = cos( in->rglDirection[i - 1] * M_PI / 18000 ) * 10000;
             for (j = 0; j < i; ++j)
                 out->rglDirection[j] = round( out->rglDirection[j] * tmp / 10000.0 );
-            out->rglDirection[i] = sin( in->rglDirection[i - 1] * M_PI / 18000 ) * 10000;
+            if (i < in->cAxes)
+                out->rglDirection[i] = sin( in->rglDirection[i - 1] * M_PI / 18000 ) * 10000;
         }
         out->cAxes = in->cAxes;
         break;
@@ -2549,8 +2506,8 @@ static HRESULT WINAPI hid_joystick_effect_GetParameters( IDirectInputEffect *ifa
     return DI_OK;
 }
 
-static BOOL set_parameters_object( struct hid_joystick *impl, struct hid_value_caps *caps,
-                                   DIDEVICEOBJECTINSTANCEW *instance, void *data )
+static BOOL set_parameters_object( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+                                   const DIDEVICEOBJECTINSTANCEW *instance, void *data )
 {
     DWORD usages = MAKELONG( instance->wUsage, instance->wUsagePage );
     *(DWORD *)data = usages;
@@ -2660,13 +2617,22 @@ static HRESULT WINAPI hid_joystick_effect_SetParameters( IDirectInputEffect *ifa
         impl->params.cbTypeSpecificParams = params->cbTypeSpecificParams;
     }
 
-    if ((flags & DIEP_ENVELOPE) && params->lpEnvelope)
+    if (!(flags & DIEP_ENVELOPE))
+        TRACE( "Keeping previous effect envelope\n" );
+    else if (params->lpEnvelope)
     {
         if (params->lpEnvelope->dwSize != sizeof(DIENVELOPE)) return DIERR_INVALIDPARAM;
         impl->params.lpEnvelope = &impl->envelope;
         if (memcmp( impl->params.lpEnvelope, params->lpEnvelope, sizeof(DIENVELOPE) ))
             impl->modified |= DIEP_ENVELOPE;
         memcpy( impl->params.lpEnvelope, params->lpEnvelope, sizeof(DIENVELOPE) );
+    }
+    else
+    {
+        flags &= ~DIEP_ENVELOPE;
+        impl->flags &= ~DIEP_ENVELOPE;
+        impl->modified &= ~DIEP_ENVELOPE;
+        impl->params.lpEnvelope = NULL;
     }
 
     if (flags & DIEP_DURATION)
@@ -3013,6 +2979,7 @@ static HRESULT WINAPI hid_joystick_effect_Download( IDirectInputEffect *iface )
         case PID_USAGE_ET_SAWTOOTH_DOWN:
         case PID_USAGE_ET_CONSTANT_FORCE:
         case PID_USAGE_ET_RAMP:
+            if (!(impl->flags & DIEP_ENVELOPE)) break;
             if (!(impl->modified & DIEP_ENVELOPE)) break;
 
             set_parameter_value( impl, impl->set_envelope_buf, set_envelope->attack_level_caps,
@@ -3120,7 +3087,7 @@ static HRESULT WINAPI hid_joystick_effect_Unload( IDirectInputEffect *iface )
             else hr = DIERR_INPUTLOST;
         }
 
-        impl->modified = impl->flags;
+        impl->modified = ~0;
         impl->index = 0;
         check_empty_force_feedback_state( joystick );
     }
@@ -3164,7 +3131,7 @@ static HRESULT hid_joystick_create_effect( IDirectInputDevice8W *iface, IDirectI
     impl->IDirectInputEffect_iface.lpVtbl = &hid_joystick_effect_vtbl;
     impl->ref = 1;
     impl->joystick = joystick;
-    hid_joystick_addref( &joystick->base.IDirectInputDevice8W_iface );
+    dinput_device_internal_addref( &joystick->base );
 
     EnterCriticalSection( &joystick->base.crit );
     list_add_tail( &joystick->effect_list, &impl->entry );
@@ -3181,6 +3148,7 @@ static HRESULT hid_joystick_create_effect( IDirectInputDevice8W *iface, IDirectI
     impl->params.rgdwAxes = impl->axes;
     impl->params.rglDirection = impl->directions;
     impl->params.dwTriggerButton = -1;
+    impl->modified = ~0;
     impl->status = 0;
 
     *out = &impl->IDirectInputEffect_iface;

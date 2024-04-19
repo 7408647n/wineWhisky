@@ -161,6 +161,7 @@ static HRESULT get_moniker_comparison_data(IMoniker *pMoniker, MonikerComparison
         {
             ERR("Failed to copy comparison data into buffer, hr = %#lx\n", hr);
             HeapFree(GetProcessHeap(), 0, *moniker_data);
+            *moniker_data = NULL;
             return hr;
         }
         (*moniker_data)->ulCntData = size;
@@ -540,13 +541,14 @@ RunningObjectTableImpl_GetObject( IRunningObjectTable* iface,
         {
             IStream *pStream;
             hr = create_stream_on_mip_ro(rot_entry->object, &pStream);
+            LeaveCriticalSection(&This->lock);
+
             if (hr == S_OK)
             {
                 hr = CoUnmarshalInterface(pStream, &IID_IUnknown, (void **)ppunkObject);
                 IStream_Release(pStream);
             }
 
-            LeaveCriticalSection(&This->lock);
             HeapFree(GetProcessHeap(), 0, moniker_data);
 
             return hr;
@@ -705,10 +707,19 @@ static const IRunningObjectTableVtbl VT_RunningObjectTableImpl =
     RunningObjectTableImpl_EnumRunning
 };
 
+static RunningObjectTableImpl rot;
+
+static RTL_CRITICAL_SECTION_DEBUG critsect_debug =
+{
+    0, 0, &rot.lock,
+    { &critsect_debug.ProcessLocksList, &critsect_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": RunningObjectTable_section") }
+};
+
 static RunningObjectTableImpl rot =
 {
     .IRunningObjectTable_iface.lpVtbl = &VT_RunningObjectTableImpl,
-    .lock.LockCount = -1,
+    .lock = { &critsect_debug, -1, 0, 0, 0, 0 },
     .rot = LIST_INIT(rot.rot),
 };
 
@@ -1032,8 +1043,8 @@ static ULONG   WINAPI EnumMonikerImpl_Release(IEnumMoniker* iface)
         TRACE("(%p) Deleting\n",This);
 
         for (i = 0; i < This->moniker_list->size; i++)
-            HeapFree(GetProcessHeap(), 0, This->moniker_list->interfaces[i]);
-        HeapFree(GetProcessHeap(), 0, This->moniker_list);
+            free(This->moniker_list->interfaces[i]);
+        free(This->moniker_list);
         HeapFree(GetProcessHeap(), 0, This);
     }
 
@@ -1118,7 +1129,7 @@ static HRESULT   WINAPI EnumMonikerImpl_Clone(IEnumMoniker* iface, IEnumMoniker 
 
     *ppenum = NULL;
 
-    moniker_list = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(InterfaceList, interfaces[This->moniker_list->size]));
+    moniker_list = malloc(FIELD_OFFSET(InterfaceList, interfaces[This->moniker_list->size]));
     if (!moniker_list)
         return E_OUTOFMEMORY;
 
@@ -1126,13 +1137,13 @@ static HRESULT   WINAPI EnumMonikerImpl_Clone(IEnumMoniker* iface, IEnumMoniker 
     for (i = 0; i < This->moniker_list->size; i++)
     {
         SIZE_T size = FIELD_OFFSET(InterfaceData, abData[This->moniker_list->interfaces[i]->ulCntData]);
-        moniker_list->interfaces[i] = HeapAlloc(GetProcessHeap(), 0, size);
+        moniker_list->interfaces[i] = malloc(size);
         if (!moniker_list->interfaces[i])
         {
             ULONG end = i;
             for (i = 0; i < end; i++)
-                HeapFree(GetProcessHeap(), 0, moniker_list->interfaces[i]);
-            HeapFree(GetProcessHeap(), 0, moniker_list);
+                free(moniker_list->interfaces[i]);
+            free(moniker_list);
             return E_OUTOFMEMORY;
         }
         memcpy(moniker_list->interfaces[i], This->moniker_list->interfaces[i], size);
@@ -1363,10 +1374,10 @@ HRESULT MonikerMarshal_Create(IMoniker *inner, IUnknown **outer)
 
 void * __RPC_USER MIDL_user_allocate(SIZE_T size)
 {
-    return HeapAlloc(GetProcessHeap(), 0, size);
+    return malloc(size);
 }
 
 void __RPC_USER MIDL_user_free(void *p)
 {
-    HeapFree(GetProcessHeap(), 0, p);
+    free(p);
 }

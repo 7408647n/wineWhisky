@@ -42,11 +42,17 @@ static const char textA[] =
 "{ \n"
 "    ForceRemove eebf73c4-50fd-478f-bbcf-db212221227a \n"
 "    { \n"
-"        val 'string' = s 'string' \n"
+"        val 'str1' = s 'string' \n"
+"        val 'str2' = s 'str\\\"ing' \n"
+"        val 'str3' = s 'str''ing' \n"
 "        val 'dword_quoted_dec' = d '1' \n"
 "        val 'dword_unquoted_dec' = d 1 \n"
 "        val 'dword_quoted_hex' = d '0xA' \n"
 "        val 'dword_unquoted_hex' = d 0xA \n"
+"        val 'dword_negative' = d -2147483648 \n"
+"        val 'dword_ulong' = d 2147483649 \n"
+"        val 'dword_max' = d 4294967295 \n"
+"        val 'dword_overrange' = d 4294967296 \n"
 "        val 'binary_quoted' = b 'deadbeef' \n"
 "        val 'binary_unquoted' = b dead0123 \n"
 "    } \n"
@@ -57,7 +63,24 @@ static void test_registrar(void)
     IRegistrar *registrar = NULL;
     HRESULT hr;
     INT count;
+    int i;
     WCHAR *textW = NULL;
+    struct dword_test
+    {
+        const char *name;
+        BOOL preserved;
+        LONGLONG value;
+    } dword_tests[] =
+    {
+        { "dword_unquoted_dec", TRUE,  1 },
+        { "dword_quoted_dec",   TRUE,  1 },
+        { "dword_quoted_hex",   FALSE, 0xA },
+        { "dword_unquoted_hex", FALSE, 0xA },
+        { "dword_negative",     FALSE, -2147483648 },
+        { "dword_ulong",        TRUE,  2147483649 },
+        { "dword_max",          TRUE,  4294967295 },
+        { "dword_overrange",    FALSE, 4294967296 },
+    };
 
     if (!GetProcAddress(GetModuleHandleA("atl.dll"), "AtlAxAttachControl"))
     {
@@ -81,6 +104,7 @@ static void test_registrar(void)
         LONG lret;
         HKEY key;
         BYTE bytes[4];
+        char buffer[16];
 
         MultiByteToWideChar(CP_ACP, 0, textA, -1, textW, count);
         hr = IRegistrar_StringRegister(registrar, textW);
@@ -94,25 +118,31 @@ static void test_registrar(void)
         lret = RegOpenKeyA(HKEY_CURRENT_USER, "eebf73c4-50fd-478f-bbcf-db212221227a", &key);
         ok(lret == ERROR_SUCCESS, "error %ld opening registry key\n", lret);
 
-        size = sizeof(dword);
-        lret = RegQueryValueExA(key, "dword_unquoted_hex", NULL, NULL, (BYTE*)&dword, &size);
+        size = sizeof(buffer);
+        lret = RegQueryValueExA(key, "str1", NULL, NULL, (BYTE*)buffer, &size);
         ok(lret == ERROR_SUCCESS, "RegQueryValueExA failed, error %ld\n", lret);
-        ok(dword != 0xA, "unquoted hex is not supposed to be preserved\n");
+        ok(!strcmp( buffer, "string"), "wrong data %s\n", debugstr_a(buffer));
 
-        size = sizeof(dword);
-        lret = RegQueryValueExA(key, "dword_quoted_hex", NULL, NULL, (BYTE*)&dword, &size);
+        size = sizeof(buffer);
+        lret = RegQueryValueExA(key, "str2", NULL, NULL, (BYTE*)buffer, &size);
         ok(lret == ERROR_SUCCESS, "RegQueryValueExA failed, error %ld\n", lret);
-        ok(dword != 0xA, "quoted hex is not supposed to be preserved\n");
+        ok(!strcmp( buffer, "str\\\"ing"), "wrong data %s\n", debugstr_a(buffer));
 
-        size = sizeof(dword);
-        lret = RegQueryValueExA(key, "dword_unquoted_dec", NULL, NULL, (BYTE*)&dword, &size);
+        size = sizeof(buffer);
+        lret = RegQueryValueExA(key, "str3", NULL, NULL, (BYTE*)buffer, &size);
         ok(lret == ERROR_SUCCESS, "RegQueryValueExA failed, error %ld\n", lret);
-        ok(dword == 1, "unquoted dec is not supposed to be %ld\n", dword);
+        ok(!strcmp( buffer, "str'ing"), "wrong data %s\n", debugstr_a(buffer));
 
-        size = sizeof(dword);
-        lret = RegQueryValueExA(key, "dword_quoted_dec", NULL, NULL, (BYTE*)&dword, &size);
-        ok(lret == ERROR_SUCCESS, "RegQueryValueExA failed, error %ld\n", lret);
-        ok(dword == 1, "quoted dec is not supposed to be %ld\n", dword);
+        for (i = 0; i < ARRAYSIZE(dword_tests); i++)
+        {
+            size = sizeof(dword);
+            lret = RegQueryValueExA(key, dword_tests[i].name, NULL, NULL, (BYTE*)&dword, &size);
+            ok(lret == ERROR_SUCCESS, "Test %d: RegQueryValueExA failed %ld.\n", i, lret);
+            if (dword_tests[i].preserved)
+                ok(dword == dword_tests[i].value, "Test %d: got unexpected value %lu.\n", i, dword);
+            else
+                ok(dword != dword_tests[i].value, "Test %d: is not supposed to be preserved.\n", i);
+        }
 
         size = 4;
         lret = RegQueryValueExA(key, "binary_quoted", NULL, NULL, bytes, &size);

@@ -67,22 +67,45 @@ static ULONG WINAPI IDirectMusicComposerImpl_Release(IDirectMusicComposer *iface
 
     TRACE("(%p) ref=%ld\n", This, ref);
 
-    if (ref == 0) {
-        HeapFree(GetProcessHeap(), 0, This);
-        DMCOMPOS_UnlockModule();
-    }
+    if (!ref) free(This);
 
     return ref;
 }
 
 /* IDirectMusicComposerImpl IDirectMusicComposer part: */
 static HRESULT WINAPI IDirectMusicComposerImpl_ComposeSegmentFromTemplate(IDirectMusicComposer *iface,
-        IDirectMusicStyle *pStyle, IDirectMusicSegment *pTemplate, WORD wActivity,
-        IDirectMusicChordMap *pChordMap, IDirectMusicSegment **ppSegment)
+        IDirectMusicStyle *style, IDirectMusicSegment *template, WORD activity, IDirectMusicChordMap *chordmap,
+        IDirectMusicSegment **segment)
 {
-        IDirectMusicComposerImpl *This = impl_from_IDirectMusicComposer(iface);
-	FIXME("(%p, %p, %p, %d, %p, %p): stub\n", This, pStyle, pTemplate, wActivity, pChordMap, ppSegment);
-	return S_OK;
+    IDirectMusicComposerImpl *This = impl_from_IDirectMusicComposer(iface);
+    IDirectMusicTrack *track;
+    HRESULT hr;
+
+    FIXME("(%p, %p, %p, %d, %p, %p): semi-stub\n", This, style, template, activity, chordmap, segment);
+
+    if (!segment)
+        return E_POINTER;
+    if (!template)
+        return E_INVALIDARG;
+
+    if (!style) {
+        hr = IDirectMusicSegment_GetTrack(template, &CLSID_DirectMusicStyleTrack, 0xFFFFFFFF,
+                DMUS_SEG_ANYTRACK, &track);
+        if (FAILED(hr))
+            return E_INVALIDARG;
+        else
+            IDirectMusicTrack_Release(track);   /* Temp to not leak memory */
+    }
+    if (!chordmap) {
+        hr = IDirectMusicSegment_GetTrack(template, &CLSID_DirectMusicChordMapTrack, 0xFFFFFFFF,
+                DMUS_SEG_ANYTRACK, &track);
+        if (FAILED(hr))
+            return E_INVALIDARG;
+        else
+            IDirectMusicTrack_Release(track);   /* Temp to not leak memory */
+    }
+
+    return IDirectMusicSegment_Clone(template, -1, 0, segment);
 }
 
 static HRESULT WINAPI IDirectMusicComposerImpl_ComposeSegmentFromShape(IDirectMusicComposer *iface,
@@ -144,20 +167,16 @@ static const IDirectMusicComposerVtbl dmcomposer_vtbl = {
 };
 
 /* for ClassFactory */
-HRESULT WINAPI create_dmcomposer(REFIID riid, void **ret_iface)
+HRESULT create_dmcomposer(REFIID riid, void **ret_iface)
 {
     IDirectMusicComposerImpl *obj;
     HRESULT hr;
 
-    obj = HeapAlloc(GetProcessHeap(), 0, sizeof(*obj));
-    if (!obj) {
-        *ret_iface = NULL;
-        return E_OUTOFMEMORY;
-    }
+    *ret_iface = NULL;
+    if (!(obj = calloc(1, sizeof(*obj)))) return E_OUTOFMEMORY;
     obj->IDirectMusicComposer_iface.lpVtbl = &dmcomposer_vtbl;
     obj->ref = 1;
 
-    DMCOMPOS_LockModule();
     hr = IDirectMusicComposer_QueryInterface(&obj->IDirectMusicComposer_iface, riid, ret_iface);
     IDirectMusicComposer_Release(&obj->IDirectMusicComposer_iface);
 

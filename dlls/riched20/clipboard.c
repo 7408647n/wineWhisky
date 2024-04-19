@@ -18,8 +18,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#define NONAMELESSUNION
-
 #include "editor.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(richedit);
@@ -89,7 +87,7 @@ static ULONG WINAPI EnumFormatImpl_Release(IEnumFORMATETC *iface)
 
     if(!ref) {
         GlobalFree(This->fmtetc);
-        heap_free(This);
+        free(This);
     }
 
     return ref;
@@ -165,7 +163,7 @@ static HRESULT EnumFormatImpl_Create(const FORMATETC *fmtetc, UINT fmtetc_cnt,
     EnumFormatImpl *ret;
     TRACE("\n");
 
-    ret = heap_alloc(sizeof(EnumFormatImpl));
+    ret = malloc(sizeof(EnumFormatImpl));
     ret->IEnumFORMATETC_iface.lpVtbl = &VT_EnumFormatImpl;
     ret->ref = 1;
     ret->cur = 0;
@@ -208,7 +206,7 @@ static ULONG WINAPI DataObjectImpl_Release(IDataObject* iface)
         if(This->unicode) GlobalFree(This->unicode);
         if(This->rtf) GlobalFree(This->rtf);
         if(This->fmtetc) GlobalFree(This->fmtetc);
-        heap_free(This);
+        free(This);
     }
 
     return ref;
@@ -226,9 +224,9 @@ static HRESULT WINAPI DataObjectImpl_GetData(IDataObject* iface, FORMATETC *pfor
         return DV_E_TYMED;
 
     if(This->unicode && pformatetc->cfFormat == CF_UNICODETEXT)
-        pmedium->u.hGlobal = This->unicode;
+        pmedium->hGlobal = This->unicode;
     else if(This->rtf && pformatetc->cfFormat == cfRTF)
-        pmedium->u.hGlobal = This->rtf;
+        pmedium->hGlobal = This->rtf;
     else
         return DV_E_FORMATETC;
 
@@ -375,7 +373,7 @@ static DWORD CALLBACK ME_AppendToHGLOBAL(DWORD_PTR dwCookie, LPBYTE lpBuff, LONG
     if (pData->nLength+cb+1 >= cb) {
         /* round up to 2^17 */
         int nNewSize = (((nMaxSize+cb+1)|0x1FFFF)+1) & 0xFFFE0000;
-        pData->hData = GlobalReAlloc(pData->hData, nNewSize, 0);
+        pData->hData = GlobalReAlloc(pData->hData, nNewSize, GMEM_MOVEABLE);
     }
     pDest = GlobalLock(pData->hData);
     memcpy(pDest + pData->nLength, lpBuff, cb);
@@ -397,7 +395,7 @@ static HGLOBAL get_rtf_text(ME_TextEditor *editor, const ME_Cursor *start, int n
     es.dwCookie = (DWORD_PTR)&gds;
     es.pfnCallback = ME_AppendToHGLOBAL;
     ME_StreamOutRange(editor, SF_RTF, start, nChars, &es);
-    GlobalReAlloc(gds.hData, gds.nLength+1, 0);
+    GlobalReAlloc(gds.hData, gds.nLength+1, GMEM_MOVEABLE);
     return gds.hData;
 }
 
@@ -407,7 +405,7 @@ HRESULT ME_GetDataObject(ME_TextEditor *editor, const ME_Cursor *start, int nCha
     DataObjectImpl *obj;
     TRACE("(%p,%d,%d)\n", editor, ME_GetCursorOfs(start), nChars);
 
-    obj = heap_alloc(sizeof(DataObjectImpl));
+    obj = malloc(sizeof(DataObjectImpl));
     if(cfRTF == 0)
         cfRTF = RegisterClipboardFormatA("Rich Text Format");
 

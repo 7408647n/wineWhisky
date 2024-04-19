@@ -63,8 +63,6 @@
 #include "request.h"
 #include "user.h"
 #include "security.h"
-#include "esync.h"
-#include "msync.h"
 
 /* process object */
 
@@ -97,8 +95,6 @@ static struct security_descriptor *process_get_sd( struct object *obj );
 static void process_poll_event( struct fd *fd, int event );
 static struct list *process_get_kernel_obj_list( struct object *obj );
 static void process_destroy( struct object *obj );
-static struct esync_fd *process_get_esync_fd( struct object *obj, enum esync_type *type );
-static unsigned int process_get_msync_idx( struct object *obj, enum msync_type *type );
 static void terminate_process( struct process *process, struct thread *skip, int exit_code );
 
 static const struct object_ops process_ops =
@@ -109,8 +105,6 @@ static const struct object_ops process_ops =
     add_queue,                   /* add_queue */
     remove_queue,                /* remove_queue */
     process_signaled,            /* signaled */
-    process_get_esync_fd,        /* get_esync_fd */
-    process_get_msync_idx,       /* get_msync_idx */
     no_satisfied,                /* satisfied */
     no_signal,                   /* signal */
     no_get_fd,                   /* get_fd */
@@ -162,8 +156,6 @@ static const struct object_ops startup_info_ops =
     add_queue,                     /* add_queue */
     remove_queue,                  /* remove_queue */
     startup_info_signaled,         /* signaled */
-    NULL,                          /* get_esync_fd */
-    NULL,                          /* get_msync_idx */
     no_satisfied,                  /* satisfied */
     no_signal,                     /* signal */
     no_get_fd,                     /* get_fd */
@@ -225,8 +217,6 @@ static const struct object_ops job_ops =
     add_queue,                     /* add_queue */
     remove_queue,                  /* remove_queue */
     job_signaled,                  /* signaled */
-    NULL,                          /* get_esync_fd */
-    NULL,                          /* get_msync_idx */
     no_satisfied,                  /* satisfied */
     no_signal,                     /* signal */
     no_get_fd,                     /* get_fd */
@@ -482,162 +472,6 @@ static void kill_all_processes(void);
 
 #define PTID_OFFSET 8  /* offset for first ptid value */
 
-/* crossover usage logging support */
-
-#include <sys/types.h>
-#include <sys/stat.h>
-#include "wine/unicode.h"
-
-/* get the next char value taking surrogates into account */
-static inline unsigned int get_surrogate_value( const WCHAR *src, unsigned int srclen )
-{
-    if (src[0] >= 0xd800 && src[0] <= 0xdfff)  /* surrogate pair */
-    {
-        if (src[0] > 0xdbff || /* invalid high surrogate */
-            srclen <= 1 ||     /* missing low surrogate */
-            src[1] < 0xdc00 || src[1] > 0xdfff) /* invalid low surrogate */
-            return 0;
-        return 0x10000 + ((src[0] & 0x3ff) << 10) + (src[1] & 0x3ff);
-    }
-    return src[0];
-}
-
-/* query necessary dst length for src string */
-static inline int get_length_utf8( const WCHAR *src, unsigned int srclen )
-{
-    int len;
-    unsigned int val;
-
-    for (len = 0; srclen; srclen--, src++)
-    {
-        if (*src < 0x80)  /* 0x00-0x7f: 1 byte */
-        {
-            len++;
-            continue;
-        }
-        if (*src < 0x800)  /* 0x80-0x7ff: 2 bytes */
-        {
-            len += 2;
-            continue;
-        }
-        if (!(val = get_surrogate_value( src, srclen ))) continue;
-        if (val < 0x10000)  /* 0x800-0xffff: 3 bytes */
-            len += 3;
-        else   /* 0x10000-0x10ffff: 4 bytes */
-        {
-            len += 4;
-            src++;
-            srclen--;
-        }
-    }
-    return len;
-}
-
-/* wide char to UTF-8 string conversion */
-/* return -1 on dst buffer overflow, -2 on invalid input char */
-static int utf8_wcstombs( const WCHAR *src, int srclen, char *dst, int dstlen )
-{
-    int len;
-
-    for (len = dstlen; srclen; srclen--, src++)
-    {
-        WCHAR ch = *src;
-        unsigned int val;
-
-        if (ch < 0x80)  /* 0x00-0x7f: 1 byte */
-        {
-            *dst++ = ch;
-            continue;
-        }
-        if (ch < 0x800)  /* 0x80-0x7ff: 2 bytes */
-        {
-            dst[1] = 0x80 | (ch & 0x3f);
-            ch >>= 6;
-            dst[0] = 0xc0 | ch;
-            dst += 2;
-            continue;
-        }
-        if (!(val = get_surrogate_value( src, srclen ))) continue;
-        if (val < 0x10000)  /* 0x800-0xffff: 3 bytes */
-        {
-            dst[2] = 0x80 | (val & 0x3f);
-            val >>= 6;
-            dst[1] = 0x80 | (val & 0x3f);
-            val >>= 6;
-            dst[0] = 0xe0 | val;
-            dst += 3;
-        }
-        else   /* 0x10000-0x10ffff: 4 bytes */
-        {
-            dst[3] = 0x80 | (val & 0x3f);
-            val >>= 6;
-            dst[2] = 0x80 | (val & 0x3f);
-            val >>= 6;
-            dst[1] = 0x80 | (val & 0x3f);
-            val >>= 6;
-            dst[0] = 0xf0 | val;
-            dst += 4;
-            src++;
-            srclen--;
-        }
-    }
-    return dstlen - len;
-}
-
-static void log_process_event( struct process *process, const char *fmt, ... )
-{
-    static unsigned int bottle_inode = 0;
-    const char *name = getenv( "CX_WINE_USAGE_LOGFILE" );
-    const char *appid = getenv( "CX_BOTTLE_CREATOR_APPID" );
-    struct memory_view *exe;
-    struct unicode_str nt_name;
-    char *ptr, *buffer, prefix[128], bottleid[12];
-    int fd, len1, len2, len3, len4;
-    va_list args;
-
-    appid = appid ? appid : "--unknown--";
-
-    if (!name || name[0] != '/') return;  /* needs to be an absolute path */
-
-    if ((fd = open( name, O_WRONLY | O_APPEND | O_CREAT, 0600 )) == -1) return;
-
-    if (!(exe = get_exe_view( process )) || !get_view_nt_name( exe, &nt_name ))
-        goto done;
-
-    if (!bottle_inode)
-    {
-        struct stat st;
-        if (!fstat( config_dir_fd, &st ))
-            bottle_inode = st.st_ino;
-    }
-
-    va_start( args, fmt );
-    len1 = vsnprintf( prefix, sizeof(prefix), fmt, args );
-    va_end( args );
-    len2 = snprintf( bottleid, sizeof(bottleid), "%u ", bottle_inode );
-    len3 = get_length_utf8( nt_name.str, nt_name.len/sizeof(WCHAR) );
-    len4 = strlen( appid );
-
-    if (len1 < 0 || len1 >= sizeof(prefix) ||
-        len2 < 0 || len2 >= sizeof(bottleid) ||
-        len3 < 0)
-        goto done;
-    if (!(buffer = ptr = malloc( len1 + len2 + len3 + len4 + 3 ))) goto done;
-    memcpy( ptr, prefix, len1 );
-    ptr += len1;
-    memcpy( ptr, bottleid, len2 );
-    ptr += len2;
-    ptr += utf8_wcstombs( nt_name.str, nt_name.len/sizeof(WCHAR), ptr, len3 );
-    *ptr++ = ' ';
-    memcpy( ptr, appid, len4 );
-    ptr += len4;
-    *ptr++ = '\n';
-    write( fd, buffer, ptr - buffer );
-    free( buffer );
-done:
-    close( fd );
-}
-
 static unsigned int index_from_ptid(unsigned int id) { return id / 4; }
 static unsigned int ptid_from_index(unsigned int index) { return index * 4; }
 
@@ -822,6 +656,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->msg_fd          = NULL;
     process->sigkill_timeout = NULL;
     process->sigkill_delay   = TICKS_PER_SEC / 64;
+    process->machine         = native_machine;
     process->unix_pid        = -1;
     process->exit_code       = STILL_ACTIVE;
     process->running_threads = 0;
@@ -844,19 +679,18 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->desktop         = 0;
     process->token           = NULL;
     process->trace_data      = 0;
+    process->rawinput_devices = NULL;
+    process->rawinput_device_count = 0;
     process->rawinput_mouse  = NULL;
     process->rawinput_kbd    = NULL;
     memset( &process->image_info, 0, sizeof(process->image_info) );
-    process->esync_fd        = NULL;
-    process->msync_idx       = 0;
+    list_init( &process->rawinput_entry );
     list_init( &process->kernel_object );
     list_init( &process->thread_list );
     list_init( &process->locks );
     list_init( &process->asyncs );
     list_init( &process->classes );
-    list_init( &process->surfaces );
     list_init( &process->views );
-    list_init( &process->rawinput_devices );
 
     process->end_time = 0;
 
@@ -877,7 +711,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     if (!parent)
     {
         process->handles = alloc_handle_table( process, 0 );
-        process->token = token_create_admin( TRUE, -1, TokenElevationTypeFull, default_session_id );
+        process->token = token_create_admin( TRUE, -1, TokenElevationTypeLimited, default_session_id );
         process->affinity = ~0;
     }
     else
@@ -906,12 +740,6 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
      * makes more sense for the time being. */
     if (!token_assign_label( process->token, &high_label_sid ))
         goto error;
-
-    if (do_msync())
-        process->msync_idx = msync_alloc_shm( 0, 0 );
-
-    if (do_esync())
-        process->esync_fd = esync_create_fd( 0, 0 );
 
     set_fd_events( process->msg_fd, POLLIN );  /* start listening to events */
     return process;
@@ -957,10 +785,10 @@ static void process_destroy( struct object *obj )
     if (process->idle_event) release_object( process->idle_event );
     if (process->id) free_ptid( process->id );
     if (process->token) release_object( process->token );
+    list_remove( &process->rawinput_entry );
+    free( process->rawinput_devices );
     free( process->dir_cache );
     free( process->image );
-    if (do_esync()) esync_close_fd( process->esync_fd );
-    if (do_msync()) msync_destroy_semaphore( process->msync_idx );
 }
 
 /* dump a process on stdout for debugging purposes */
@@ -976,20 +804,6 @@ static int process_signaled( struct object *obj, struct wait_queue_entry *entry 
 {
     struct process *process = (struct process *)obj;
     return !process->running_threads;
-}
-
-static struct esync_fd *process_get_esync_fd( struct object *obj, enum esync_type *type )
-{
-    struct process *process = (struct process *)obj;
-    *type = ESYNC_MANUAL_SERVER;
-    return process->esync_fd;
-}
-
-static unsigned int process_get_msync_idx( struct object *obj, enum msync_type *type )
-{
-    struct process *process = (struct process *)obj;
-    *type = MSYNC_MANUAL_SERVER;
-    return process->msync_idx;
 }
 
 static unsigned int process_map_access( struct object *obj, unsigned int access )
@@ -1150,8 +964,6 @@ void kill_console_processes( struct thread *renderer, int exit_code )
 /* a process has been killed (i.e. its last thread died) */
 static void process_killed( struct process *process )
 {
-    struct list *ptr;
-
     assert( list_empty( &process->thread_list ));
     process->end_time = current_time;
     close_process_desktop( process );
@@ -1163,19 +975,9 @@ static void process_killed( struct process *process )
     process->idle_event = NULL;
     assert( !process->console );
 
-    if (!process->is_system)
-        log_process_event( process, "exit %x %u ", process->exit_code, (unsigned)((process->end_time-process->start_time)/TICKS_PER_SEC) );
-
-    while ((ptr = list_head( &process->rawinput_devices )))
-    {
-        struct rawinput_device_entry *entry = LIST_ENTRY( ptr, struct rawinput_device_entry, entry );
-        list_remove( &entry->entry );
-        free( entry );
-    }
     destroy_process_classes( process );
     free_mapped_views( process );
     free_process_user_handles( process );
-    remove_process_surfaces( process );
     remove_process_locks( process );
     set_process_startup_state( process, STARTUP_ABORTED );
     finish_process_tracing( process );
@@ -1333,7 +1135,7 @@ DECL_HANDLER(new_process)
 {
     struct startup_info *info;
     const void *info_ptr;
-    struct unicode_str name;
+    struct unicode_str name, desktop_path = {0};
     const struct security_descriptor *sd;
     const struct object_attributes *objattr = get_req_object_attributes( &sd, &name, NULL );
     struct process *process = NULL;
@@ -1476,7 +1278,9 @@ DECL_HANDLER(new_process)
         FIXUP_LEN( info->data->imagepath_len );
         FIXUP_LEN( info->data->cmdline_len );
         FIXUP_LEN( info->data->title_len );
+        desktop_path.str = (WCHAR *)((char *)info->data + pos);
         FIXUP_LEN( info->data->desktop_len );
+        desktop_path.len = info->data->desktop_len;
         FIXUP_LEN( info->data->shellinfo_len );
         FIXUP_LEN( info->data->runtime_len );
 #undef FIXUP_LEN
@@ -1497,6 +1301,7 @@ DECL_HANDLER(new_process)
                                     handles, req->handles_size / sizeof(*handles), token )))
         goto done;
 
+    process->machine = req->machine;
     process->startup_info = (struct startup_info *)grab_object( info );
 
     job = parent->job;
@@ -1526,7 +1331,7 @@ DECL_HANDLER(new_process)
     }
 
     /* connect to the window station */
-    connect_process_winstation( process, parent_thread, parent );
+    connect_process_winstation( process, &desktop_path, parent_thread, parent );
 
     /* inherit the process console, but keep pseudo handles (< 0), and 0 (= not attached to a console) as is */
     if ((int)info->data->console > 0)
@@ -1536,11 +1341,11 @@ DECL_HANDLER(new_process)
     if (!(req->flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) && info->data->console != 1)
     {
         info->data->hstdin  = duplicate_handle( parent, info->data->hstdin, process,
-                                                0, OBJ_INHERIT, DUPLICATE_SAME_ACCESS );
+                                                0, 0, DUPLICATE_SAME_ACCESS | DUPLICATE_SAME_ATTRIBUTES );
         info->data->hstdout = duplicate_handle( parent, info->data->hstdout, process,
-                                                0, OBJ_INHERIT, DUPLICATE_SAME_ACCESS );
+                                                0, 0, DUPLICATE_SAME_ACCESS | DUPLICATE_SAME_ATTRIBUTES );
         info->data->hstderr = duplicate_handle( parent, info->data->hstderr, process,
-                                                0, OBJ_INHERIT, DUPLICATE_SAME_ACCESS );
+                                                0, 0, DUPLICATE_SAME_ACCESS | DUPLICATE_SAME_ATTRIBUTES );
         /* some handles above may have been invalid; this is not an error */
         if (get_error() == STATUS_INVALID_HANDLE ||
             get_error() == STATUS_OBJECT_TYPE_MISMATCH) clear_error();
@@ -1558,7 +1363,10 @@ DECL_HANDLER(new_process)
         /* debug_children is set to 1 by default */
     }
 
-    if (!info->data->console_flags) process->group_id = parent->group_id;
+    if (info->data->process_group_id == parent->group_id)
+        process->group_id = parent->group_id;
+    else
+        info->data->process_group_id = process->group_id;
 
     info->process = (struct process *)grab_object( process );
     reply->info = alloc_handle( current->process, info, SYNCHRONIZE, 0 );
@@ -1597,6 +1405,7 @@ DECL_HANDLER(get_startup_info)
     if (!info) return;
 
     /* we return the data directly without making a copy so this can only be called once */
+    reply->machine = process->machine;
     reply->info_size = info->info_size;
     size = info->data_size;
     if (size > get_reply_max_size()) size = get_reply_max_size();
@@ -1609,37 +1418,26 @@ DECL_HANDLER(get_startup_info)
 DECL_HANDLER(init_process_done)
 {
     struct process *process = current->process;
-    struct memory_view *view;
-    client_ptr_t base;
-    const pe_image_info_t *image_info;
 
     if (is_process_init_done(process))
     {
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
-    if (!(view = get_exe_view( process )))
-    {
-        set_error( STATUS_DLL_NOT_FOUND );
-        return;
-    }
-    if (!(image_info = get_view_image_info( view, &base ))) return;
 
     current->teb      = req->teb;
     process->peb      = req->peb;
     process->ldt_copy = req->ldt_copy;
 
     process->start_time = current_time;
-    current->entry_point = base + image_info->entry_point;
 
     init_process_tracing( process );
     generate_startup_debug_events( process );
     set_process_startup_state( process, STARTUP_DONE );
 
-    if (image_info->subsystem != IMAGE_SUBSYSTEM_WINDOWS_CUI)
+    if (process->image_info.subsystem != IMAGE_SUBSYSTEM_WINDOWS_CUI)
         process->idle_event = create_event( NULL, NULL, 0, 1, 0, NULL );
     if (process->debug_obj) set_process_debug_flag( process, 1 );
-    reply->entry = current->entry_point;
     reply->suspend = (current->suspend || process->suspend);
 }
 
@@ -1737,6 +1535,7 @@ DECL_HANDLER(get_process_image_name)
         }
         else set_error( STATUS_BUFFER_TOO_SMALL );
     }
+    else set_error( STATUS_INVALID_HANDLE );
     release_object( process );
 }
 
@@ -1753,7 +1552,7 @@ DECL_HANDLER(get_process_vm_counters)
         char proc_path[32], line[256];
         unsigned long value;
 
-        sprintf( proc_path, "/proc/%u/status", process->unix_pid );
+        snprintf( proc_path, sizeof(proc_path), "/proc/%u/status", process->unix_pid );
         if ((f = fopen( proc_path, "r" )))
         {
             while (fgets( line, sizeof(line), f ))
@@ -1827,6 +1626,16 @@ DECL_HANDLER(set_process_info)
     {
         if (req->mask & SET_PROCESS_INFO_PRIORITY) process->priority = req->priority;
         if (req->mask & SET_PROCESS_INFO_AFFINITY) set_process_affinity( process, req->affinity );
+        if (req->mask & SET_PROCESS_INFO_TOKEN)
+        {
+            struct token *token;
+
+            if ((token = get_token_obj( current->process, req->token, TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY )))
+            {
+                release_object( process->token );
+                process->token = token;
+            }
+        }
         release_object( process );
     }
 }
@@ -1862,7 +1671,6 @@ DECL_HANDLER(write_process_memory)
     {
         data_size_t len = get_req_data_size();
         if (len) write_process_memory( process, req->addr, len, get_req_data() );
-        else set_error( STATUS_INVALID_PARAMETER );
         release_object( process );
     }
 }

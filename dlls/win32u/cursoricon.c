@@ -70,12 +70,18 @@ static struct cursoricon_object *get_icon_ptr( HICON handle )
     return obj;
 }
 
+BOOL process_wine_setcursor( HWND hwnd, HWND window, HCURSOR handle )
+{
+    TRACE( "hwnd %p, window %p, hcursor %p\n", hwnd, window, handle );
+    user_driver->pSetCursor( window, handle );
+    return TRUE;
+}
+
 /***********************************************************************
  *	     NtUserShowCursor    (win32u.@)
  */
 INT WINAPI NtUserShowCursor( BOOL show )
 {
-    HCURSOR cursor;
     int increment = show ? 1 : -1;
     int count;
 
@@ -84,16 +90,11 @@ INT WINAPI NtUserShowCursor( BOOL show )
         req->flags = SET_CURSOR_COUNT;
         req->show_count = increment;
         wine_server_call( req );
-        cursor = wine_server_ptr_handle( reply->prev_handle );
         count = reply->prev_count + increment;
     }
     SERVER_END_REQ;
 
     TRACE("%d, count=%d\n", show, count );
-
-    if (show && !count) user_driver->pSetCursor( cursor );
-    else if (!show && count == -1) user_driver->pSetCursor( 0 );
-
     return count;
 }
 
@@ -104,7 +105,6 @@ HCURSOR WINAPI NtUserSetCursor( HCURSOR cursor )
 {
     struct cursoricon_object *obj;
     HCURSOR old_cursor;
-    int show_count;
     BOOL ret;
 
     TRACE( "%p\n", cursor );
@@ -114,15 +114,10 @@ HCURSOR WINAPI NtUserSetCursor( HCURSOR cursor )
         req->flags = SET_CURSOR_HANDLE;
         req->handle = wine_server_user_handle( cursor );
         if ((ret = !wine_server_call_err( req )))
-        {
             old_cursor = wine_server_ptr_handle( reply->prev_handle );
-            show_count = reply->prev_count;
-        }
     }
     SERVER_END_REQ;
     if (!ret) return 0;
-
-    user_driver->pSetCursor( show_count >= 0 ? cursor : 0 );
 
     if (!(obj = get_icon_ptr( old_cursor ))) return 0;
     release_user_handle_ptr( obj );
@@ -143,82 +138,6 @@ HCURSOR WINAPI NtUserGetCursor(void)
         ret = wine_server_ptr_handle( reply->prev_handle );
     }
     SERVER_END_REQ;
-    return ret;
-}
-
-/***********************************************************************
- *	     NtUserClipCursor (win32u.@)
- */
-BOOL WINAPI NtUserClipCursor( const RECT *rect )
-{
-    UINT dpi;
-    BOOL ret;
-    RECT new_rect;
-
-    TRACE( "Clipping to %s\n", wine_dbgstr_rect(rect) );
-
-    if (rect)
-    {
-        if (rect->left > rect->right || rect->top > rect->bottom) return FALSE;
-        if ((dpi = get_thread_dpi()))
-        {
-            HMONITOR monitor = monitor_from_rect( rect, MONITOR_DEFAULTTOPRIMARY, dpi );
-            new_rect = map_dpi_rect( *rect, dpi, get_monitor_dpi( monitor ));
-            rect = &new_rect;
-        }
-    }
-
-    SERVER_START_REQ( set_cursor )
-    {
-        req->clip_msg = WM_WINE_CLIPCURSOR;
-        if (rect)
-        {
-            req->flags       = SET_CURSOR_CLIP;
-            req->clip.left   = rect->left;
-            req->clip.top    = rect->top;
-            req->clip.right  = rect->right;
-            req->clip.bottom = rect->bottom;
-        }
-        else req->flags = SET_CURSOR_NOCLIP;
-
-        if ((ret = !wine_server_call( req )))
-        {
-            new_rect.left   = reply->new_clip.left;
-            new_rect.top    = reply->new_clip.top;
-            new_rect.right  = reply->new_clip.right;
-            new_rect.bottom = reply->new_clip.bottom;
-        }
-    }
-    SERVER_END_REQ;
-    if (ret) user_driver->pClipCursor( &new_rect );
-    return ret;
-}
-
-BOOL get_clip_cursor( RECT *rect )
-{
-    UINT dpi;
-    BOOL ret;
-
-    if (!rect) return FALSE;
-
-    SERVER_START_REQ( set_cursor )
-    {
-        req->flags = 0;
-        if ((ret = !wine_server_call( req )))
-        {
-            rect->left   = reply->new_clip.left;
-            rect->top    = reply->new_clip.top;
-            rect->right  = reply->new_clip.right;
-            rect->bottom = reply->new_clip.bottom;
-        }
-    }
-    SERVER_END_REQ;
-
-    if (ret && (dpi = get_thread_dpi()))
-    {
-        HMONITOR monitor = monitor_from_rect( rect, MONITOR_DEFAULTTOPRIMARY, 0 );
-        *rect = map_dpi_rect( *rect, get_monitor_dpi( monitor ), dpi );
-    }
     return ret;
 }
 
@@ -330,7 +249,7 @@ BOOL WINAPI NtUserSetCursorIconData( HCURSOR cursor, UNICODE_STRING *module, UNI
     {
         /* already initialized */
         release_user_handle_ptr( obj );
-        SetLastError( ERROR_INVALID_CURSOR_HANDLE );
+        RtlSetLastWin32Error( ERROR_INVALID_CURSOR_HANDLE );
         return FALSE;
     }
 
@@ -450,7 +369,7 @@ BOOL WINAPI NtUserGetIconSize( HICON handle, UINT step, LONG *width, LONG *heigh
 
     if (!(obj = get_icon_frame_ptr( handle, step )))
     {
-        SetLastError( ERROR_INVALID_CURSOR_HANDLE );
+        RtlSetLastWin32Error( ERROR_INVALID_CURSOR_HANDLE );
         return FALSE;
     }
 
@@ -474,7 +393,7 @@ HCURSOR WINAPI NtUserGetCursorFrameInfo( HCURSOR cursor, DWORD istep, DWORD *rat
 
     if (!(obj = get_icon_ptr( cursor ))) return 0;
 
-    TRACE( "%p => %d %p %p\n", cursor, istep, rate_jiffies, num_steps );
+    TRACE( "%p => %d %p %p\n", cursor, (int)istep, rate_jiffies, num_steps );
 
     icon_steps = obj->is_ani ? obj->ani.num_steps : 1;
     if (istep < icon_steps || !obj->is_ani)
@@ -555,7 +474,7 @@ BOOL WINAPI NtUserGetIconInfo( HICON icon, ICONINFO *info, UNICODE_STRING *modul
 
     if (!(obj = get_icon_ptr( icon )))
     {
-        SetLastError( ERROR_INVALID_CURSOR_HANDLE );
+        RtlSetLastWin32Error( ERROR_INVALID_CURSOR_HANDLE );
         return FALSE;
     }
     if (!(frame_obj = get_icon_frame_ptr( icon, 0 )))
@@ -703,11 +622,11 @@ BOOL WINAPI NtUserDrawIconEx( HDC hdc, INT x0, INT y0, HICON icon, INT width,
         }
         if (alpha_blend)
         {
-            BLENDFUNCTION pixelblend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
             NtGdiSelectBitmap( mem_dc, obj->frame.alpha );
             if (NtGdiAlphaBlend( hdc_dest, x, y, width, height, mem_dc,
                                  0, 0, obj->frame.width, obj->frame.height,
-                                 pixelblend, 0 )) goto done;
+                                 MAKEFOURCC( AC_SRC_OVER, 0, 255, AC_SRC_ALPHA ), 0 ))
+                goto done;
         }
     }
 
@@ -781,4 +700,42 @@ ULONG_PTR set_icon_param( HICON handle, ULONG_PTR param )
         release_user_handle_ptr( obj );
     }
     return ret;
+}
+
+/******************************************************************************
+ *	     CopyImage (win32u.so)
+ */
+HANDLE WINAPI CopyImage( HANDLE hwnd, UINT type, INT dx, INT dy, UINT flags )
+{
+    void *ret_ptr;
+    ULONG ret_len;
+    NTSTATUS ret;
+    struct copy_image_params params =
+        { .hwnd = hwnd, .type = type, .dx = dx, .dy = dy, .flags = flags };
+
+    ret = KeUserModeCallback( NtUserCopyImage, &params, sizeof(params), &ret_ptr, &ret_len );
+    if (!ret && ret_len == sizeof(HANDLE)) return *(HANDLE *)ret_ptr;
+    return 0;
+}
+
+/******************************************************************************
+ *           LoadImage (win32u.so)
+ */
+HANDLE WINAPI LoadImageW( HINSTANCE hinst, const WCHAR *name, UINT type,
+                          INT dx, INT dy, UINT flags )
+{
+    void *ret_ptr;
+    ULONG ret_len;
+    NTSTATUS ret;
+    struct load_image_params params =
+        { .hinst = hinst, .name = name, .type = type, .dx = dx, .dy = dy, .flags = flags };
+
+    if (HIWORD(name))
+    {
+        ERR( "name %s not supported in Unix modules\n", debugstr_w( name ));
+        return 0;
+    }
+    ret = KeUserModeCallback( NtUserLoadImage, &params, sizeof(params), &ret_ptr, &ret_len );
+    if (!ret && ret_len == sizeof(HANDLE)) return *(HANDLE *)ret_ptr;
+    return 0;
 }

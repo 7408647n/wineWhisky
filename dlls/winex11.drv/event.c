@@ -19,6 +19,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#if 0
+#pragma makedep unix
+#endif
+
 #include "config.h"
 
 #include <poll.h>
@@ -35,13 +39,7 @@
 #include <stdarg.h>
 #include <string.h>
 
-#include "windef.h"
-#include "winbase.h"
-
 #include "x11drv.h"
-
-/* avoid conflict with field names in included win32 headers */
-#undef Status
 #include "shlobj.h"  /* DROPFILES */
 #include "shellapi.h"
 
@@ -49,8 +47,7 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(event);
-
-extern BOOL ximInComposeMode;
+WINE_DECLARE_DEBUG_CHANNEL(xdnd);
 
 #define DndNotDnd       -1    /* OffiX drag&drop */
 #define DndUnknown      0
@@ -232,17 +229,14 @@ static Bool filter_event( Display *display, XEvent *event, char *arg )
     case KeyRelease:
     case KeymapNotify:
     case MappingNotify:
-        return (mask & (QS_KEY|QS_HOTKEY)) != 0;
+        return (mask & (QS_KEY | QS_HOTKEY | QS_RAWINPUT)) != 0;
     case ButtonPress:
     case ButtonRelease:
-        return (mask & QS_MOUSEBUTTON) != 0;
-#ifdef GenericEvent
-    case GenericEvent:
-#endif
+        return (mask & (QS_MOUSEBUTTON | QS_RAWINPUT)) != 0;
     case MotionNotify:
     case EnterNotify:
     case LeaveNotify:
-        return (mask & QS_MOUSEMOVE) != 0;
+        return (mask & (QS_MOUSEMOVE | QS_RAWINPUT)) != 0;
     case Expose:
         return (mask & QS_PAINT) != 0;
     case FocusIn:
@@ -253,6 +247,13 @@ static Bool filter_event( Display *display, XEvent *event, char *arg )
     case PropertyNotify:
     case ClientMessage:
         return (mask & QS_POSTMESSAGE) != 0;
+#ifdef GenericEvent
+    case GenericEvent:
+#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
+        if (event->xcookie.extension == xinput2_opcode) return (mask & QS_INPUT) != 0;
+#endif
+        /* fallthrough */
+#endif
     default:
         return (mask & QS_SENDMESSAGE) != 0;
     }
@@ -473,33 +474,16 @@ static BOOL process_events( Display *display, Bool (*filter)(Display*, XEvent*,X
 
 
 /***********************************************************************
- *           MsgWaitForMultipleObjectsEx   (X11DRV.@)
+ *           ProcessEvents   (X11DRV.@)
  */
-DWORD X11DRV_MsgWaitForMultipleObjectsEx( DWORD count, const HANDLE *handles,
-                                          DWORD timeout, DWORD mask, DWORD flags )
+BOOL X11DRV_ProcessEvents( DWORD mask )
 {
     struct x11drv_thread_data *data = x11drv_thread_data();
-    DWORD ret;
 
-    if (!data)
-    {
-        if (!count && !timeout) return WAIT_TIMEOUT;
-        return WaitForMultipleObjectsEx( count, handles, flags & MWMO_WAITALL,
-                                         timeout, flags & MWMO_ALERTABLE );
-    }
-
+    if (!data) return FALSE;
     if (data->current_event) mask = 0;  /* don't process nested events */
 
-    if (process_events( data->display, filter_event, mask )) ret = count - 1;
-    else if (count || timeout)
-    {
-        ret = WaitForMultipleObjectsEx( count, handles, flags & MWMO_WAITALL,
-                                        timeout, flags & MWMO_ALERTABLE );
-        if (ret == count - 1) process_events( data->display, filter_event, mask );
-    }
-    else ret = WAIT_TIMEOUT;
-
-    return ret;
+    return process_events( data->display, filter_event, mask );
 }
 
 /***********************************************************************
@@ -511,7 +495,7 @@ DWORD X11DRV_MsgWaitForMultipleObjectsEx( DWORD count, const HANDLE *handles,
 DWORD EVENT_x11_time_to_win32_time(Time time)
 {
   static DWORD adjust = 0;
-  DWORD now = GetTickCount();
+  DWORD now = NtGetTickCount();
   DWORD ret;
 
   if (! adjust && time != 0)
@@ -597,7 +581,7 @@ static void set_focus( Display *display, HWND hwnd, Time time )
     GUITHREADINFO threadinfo;
 
     TRACE( "setting foreground window to %p\n", hwnd );
-    NtUserSetForegroundWindow( hwnd, FALSE );
+    NtUserSetForegroundWindow( hwnd );
 
     threadinfo.cbSize = sizeof(threadinfo);
     NtUserGetGUIThreadInfo( 0, &threadinfo );
@@ -620,8 +604,12 @@ static void set_focus( Display *display, HWND hwnd, Time time )
 static void handle_manager_message( HWND hwnd, XClientMessageEvent *event )
 {
     if (hwnd != NtUserGetDesktopWindow()) return;
+
     if (systray_atom && event->data.l[1] == systray_atom)
-        change_systray_owner( event->display, event->data.l[2] );
+    {
+        TRACE( "new owner %lx\n", event->data.l[2] );
+        NtUserPostMessage( systray_hwnd, WM_USER + 1, 0, 0 );
+    }
 }
 
 
@@ -656,10 +644,11 @@ static void handle_wm_protocols( HWND hwnd, XClientMessageEvent *event )
             HMENU hSysMenu;
 
             if (NtUserGetClassLongW( hwnd, GCL_STYLE ) & CS_NOCLOSE) return;
-            hSysMenu = GetSystemMenu(hwnd, FALSE);
+            hSysMenu = NtUserGetSystemMenu( hwnd, FALSE );
             if (hSysMenu)
             {
-                UINT state = GetMenuState(hSysMenu, SC_CLOSE, MF_BYCOMMAND);
+                UINT state = NtUserThunkedMenuItemInfo( hSysMenu, SC_CLOSE, MF_BYCOMMAND,
+                                                        NtUserGetMenuState, NULL, NULL );
                 if (state == 0xFFFFFFFF || (state & (MF_DISABLED | MF_GRAYED)))
                     return;
             }
@@ -693,7 +682,8 @@ static void handle_wm_protocols( HWND hwnd, XClientMessageEvent *event )
         HWND last_focus = x11drv_thread_data()->last_focus;
 
         TRACE( "got take focus msg for %p, enabled=%d, visible=%d (style %08x), focus=%p, active=%p, fg=%p, last=%p\n",
-               hwnd, NtUserIsWindowEnabled(hwnd), NtUserIsWindowVisible(hwnd), NtUserGetWindowLongW(hwnd, GWL_STYLE),
+               hwnd, NtUserIsWindowEnabled(hwnd), NtUserIsWindowVisible(hwnd),
+               (int)NtUserGetWindowLongW(hwnd, GWL_STYLE),
                get_focus(), get_active_window(), NtUserGetForegroundWindow(), last_focus );
 
         if (can_activate_window(hwnd))
@@ -756,45 +746,47 @@ static const char * const focus_modes[] =
     "NotifyWhileGrabbed"
 };
 
+BOOL is_current_process_focused(void)
+{
+    Display *display = x11drv_thread_data()->display;
+    Window focus;
+    int revert;
+    HWND hwnd;
+
+    XGetInputFocus( display, &focus, &revert );
+    if (focus && !XFindContext( display, focus, winContext, (char **)&hwnd )) return TRUE;
+    return FALSE;
+}
+
 /**********************************************************************
  *              X11DRV_FocusIn
  */
 static BOOL X11DRV_FocusIn( HWND hwnd, XEvent *xev )
 {
     XFocusChangeEvent *event = &xev->xfocus;
-    XIC xic;
+    BOOL was_grabbed;
 
     if (!hwnd) return FALSE;
 
     TRACE( "win %p xwin %lx detail=%s mode=%s\n", hwnd, event->window, focus_details[event->detail], focus_modes[event->mode] );
 
     if (event->detail == NotifyPointer) return FALSE;
+    /* when focusing in the virtual desktop window, re-apply the cursor clipping rect */
+    if (is_virtual_desktop() && hwnd == NtUserGetDesktopWindow()) retry_grab_clipping_window();
     if (hwnd == NtUserGetDesktopWindow()) return FALSE;
 
-    switch (event->mode)
-    {
-    case NotifyGrab:
-        /* these are received when moving undecorated managed windows on mutter */
-        keyboard_grabbed = TRUE;
-        return FALSE;
-    case NotifyWhileGrabbed:
-        keyboard_grabbed = TRUE;
-        break;
-    case NotifyNormal:
-        keyboard_grabbed = FALSE;
-        break;
-    case NotifyUngrab:
-        keyboard_grabbed = FALSE;
-        retry_grab_clipping_window();
-        return TRUE; /* ignore wm specific NotifyUngrab / NotifyGrab events w.r.t focus */
-    }
+    x11drv_thread_data()->keymapnotify_hwnd = hwnd;
 
-    if ((xic = X11DRV_get_ic( hwnd ))) XSetICFocus( xic );
-    if (use_take_focus)
-    {
-        if (hwnd == NtUserGetForegroundWindow()) clip_fullscreen_window( hwnd, FALSE );
-        return TRUE;
-    }
+    /* when keyboard grab is released, re-apply the cursor clipping rect */
+    was_grabbed = keyboard_grabbed;
+    keyboard_grabbed = event->mode == NotifyGrab || event->mode == NotifyWhileGrabbed;
+    if (was_grabbed > keyboard_grabbed) retry_grab_clipping_window();
+    /* ignore wm specific NotifyUngrab / NotifyGrab events w.r.t focus */
+    if (event->mode == NotifyGrab || event->mode == NotifyUngrab) return FALSE;
+
+    xim_set_focus( hwnd, TRUE );
+
+    if (use_take_focus) return TRUE;
 
     if (!can_activate_window(hwnd))
     {
@@ -804,7 +796,7 @@ static BOOL X11DRV_FocusIn( HWND hwnd, XEvent *xev )
         if (!hwnd) hwnd = x11drv_thread_data()->last_focus;
         if (hwnd && can_activate_window(hwnd)) set_focus( event->display, hwnd, CurrentTime );
     }
-    else NtUserSetForegroundWindow( hwnd, FALSE );
+    else NtUserSetForegroundWindow( hwnd );
     return TRUE;
 }
 
@@ -813,35 +805,20 @@ static BOOL X11DRV_FocusIn( HWND hwnd, XEvent *xev )
  */
 static void focus_out( Display *display , HWND hwnd )
  {
-    HWND hwnd_tmp;
-    Window focus_win;
-    int revert;
-    XIC xic;
-
-    if (ximInComposeMode) return;
+    if (xim_in_compose_mode()) return;
 
     x11drv_thread_data()->last_focus = hwnd;
-    if ((xic = X11DRV_get_ic( hwnd ))) XUnsetICFocus( xic );
+    xim_set_focus( hwnd, FALSE );
 
-    if (is_virtual_desktop())
-    {
-        if (hwnd == NtUserGetDesktopWindow()) reset_clipping_window();
-        return;
-    }
+    if (is_virtual_desktop()) return;
     if (hwnd != NtUserGetForegroundWindow()) return;
-    send_message( hwnd, WM_CANCELMODE, 0, 0 );
+    if (!(NtUserGetWindowLongW( hwnd, GWL_STYLE ) & WS_MINIMIZE))
+        send_message( hwnd, WM_CANCELMODE, 0, 0 );
 
     /* don't reset the foreground window, if the window which is
        getting the focus is a Wine window */
 
-    XGetInputFocus( display, &focus_win, &revert );
-    if (focus_win)
-    {
-        if (XFindContext( display, focus_win, winContext, (char **)&hwnd_tmp ) != 0)
-            focus_win = 0;
-    }
-
-    if (!focus_win)
+    if (!is_current_process_focused())
     {
         /* Abey : 6-Oct-99. Check again if the focus out window is the
            Foreground window, because in most cases the messages sent
@@ -850,7 +827,7 @@ static void focus_out( Display *display , HWND hwnd )
         if (hwnd == NtUserGetForegroundWindow())
         {
             TRACE( "lost focus, setting fg to desktop\n" );
-            NtUserSetForegroundWindow( NtUserGetDesktopWindow(), FALSE );
+            NtUserSetForegroundWindow( NtUserGetDesktopWindow() );
         }
     }
  }
@@ -868,34 +845,22 @@ static BOOL X11DRV_FocusOut( HWND hwnd, XEvent *xev )
 
     if (event->detail == NotifyPointer)
     {
-        if (!hwnd && event->window == x11drv_thread_data()->clip_window) reset_clipping_window();
+        if (!hwnd && event->window == x11drv_thread_data()->clip_window)
+        {
+            NtUserClipCursor( NULL );
+            /* NtUserClipCursor will ask the foreground window to ungrab the cursor, but
+             * it might not be responsive, so unmap the clipping window ourselves too */
+            XUnmapWindow( event->display, event->window );
+        }
         return TRUE;
     }
     if (!hwnd) return FALSE;
 
-    switch (event->mode)
-    {
-    case NotifyUngrab:
-        /* these are received when moving undecorated managed windows on mutter */
-        keyboard_grabbed = FALSE;
-        return FALSE;
-    case NotifyNormal:
-        keyboard_grabbed = FALSE;
-        break;
-    case NotifyWhileGrabbed:
-        keyboard_grabbed = TRUE;
-        break;
-    case NotifyGrab:
-        keyboard_grabbed = TRUE;
-
-        /* This will do nothing due to keyboard_grabbed == TRUE, but it
-         * will save the current clipping rect so we can restore it on
-         * FocusIn with NotifyUngrab mode.
-         */
-        retry_grab_clipping_window();
-
-        return TRUE; /* ignore wm specific NotifyUngrab / NotifyGrab events w.r.t focus */
-    }
+    /* in virtual desktop mode or when keyboard is grabbed, release any cursor grab but keep the clipping rect */
+    keyboard_grabbed = event->mode == NotifyGrab || event->mode == NotifyWhileGrabbed;
+    if (is_virtual_desktop() || keyboard_grabbed) ungrab_clipping_window();
+    /* ignore wm specific NotifyUngrab / NotifyGrab events w.r.t focus */
+    if (event->mode == NotifyGrab || event->mode == NotifyUngrab) return FALSE;
 
     focus_out( event->display, hwnd );
     return TRUE;
@@ -1128,7 +1093,8 @@ static BOOL X11DRV_ConfigureNotify( HWND hwnd, XEvent *xev )
     if (root_coords) NtUserMapWindowPoints( 0, parent, (POINT *)&rect, 2 );
 
     TRACE( "win %p/%lx new X rect %d,%d,%dx%d (event %d,%d,%dx%d)\n",
-           hwnd, data->whole_window, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top,
+           hwnd, data->whole_window, (int)rect.left, (int)rect.top,
+           (int)(rect.right-rect.left), (int)(rect.bottom-rect.top),
            event->x, event->y, event->width, event->height );
 
     /* Compare what has changed */
@@ -1144,7 +1110,7 @@ static BOOL X11DRV_ConfigureNotify( HWND hwnd, XEvent *xev )
     if (data->window_rect.left == x && data->window_rect.top == y) flags |= SWP_NOMOVE;
     else
         TRACE( "%p moving from (%d,%d) to (%d,%d)\n",
-               hwnd, data->window_rect.left, data->window_rect.top, x, y );
+               hwnd, (int)data->window_rect.left, (int)data->window_rect.top, x, y );
 
     if ((data->window_rect.right - data->window_rect.left == cx &&
          data->window_rect.bottom - data->window_rect.top == cy) ||
@@ -1152,8 +1118,8 @@ static BOOL X11DRV_ConfigureNotify( HWND hwnd, XEvent *xev )
         flags |= SWP_NOSIZE;
     else
         TRACE( "%p resizing from (%dx%d) to (%dx%d)\n",
-               hwnd, data->window_rect.right - data->window_rect.left,
-               data->window_rect.bottom - data->window_rect.top, cx, cy );
+               hwnd, (int)(data->window_rect.right - data->window_rect.left),
+               (int)(data->window_rect.bottom - data->window_rect.top), cx, cy );
 
     style = NtUserGetWindowLongW( data->hwnd, GWL_STYLE );
     if ((style & WS_CAPTION) == WS_CAPTION || !NtUserIsWindowRectFullScreen( &data->whole_rect ))
@@ -1259,7 +1225,7 @@ static int get_window_wm_state( Display *display, Window window )
 static void handle_wm_state_notify( HWND hwnd, XPropertyEvent *event, BOOL update_window )
 {
     struct x11drv_win_data *data = get_win_data( hwnd );
-    DWORD style;
+    UINT style;
 
     if (!data) return;
 
@@ -1364,7 +1330,7 @@ void wait_for_withdrawn_state( HWND hwnd, BOOL set )
 {
     Display *display = thread_display();
     struct x11drv_win_data *data;
-    DWORD end = GetTickCount() + 2000;
+    DWORD end = NtGetTickCount() + 2000;
 
     TRACE( "waiting for window %p to become %swithdrawn\n", hwnd, set ? "" : "not " );
 
@@ -1400,7 +1366,7 @@ void wait_for_withdrawn_state( HWND hwnd, BOOL set )
         if (!count)
         {
             struct pollfd pfd;
-            int timeout = end - GetTickCount();
+            int timeout = end - NtGetTickCount();
 
             pfd.fd = ConnectionNumber(display);
             pfd.events = POLLIN;
@@ -1475,6 +1441,12 @@ static HWND find_drop_window( HWND hQueryWnd, LPPOINT lpPt )
     return hQueryWnd;
 }
 
+static void post_drop( HWND hwnd, DROPFILES *drop, ULONG size )
+{
+    drop->fWide = HandleToUlong( hwnd ); /* abuse fWide to pass window handle */
+    x11drv_client_func( client_func_dnd_post_drop, drop, size );
+}
+
 /**********************************************************************
  *           EVENT_DropFromOffix
  *
@@ -1488,7 +1460,7 @@ static void EVENT_DropFromOffiX( HWND hWnd, XClientMessageEvent *event )
     unsigned long	aux_long;
     unsigned char*	p_data = NULL;
     Atom atom_aux;
-    int			x, y, cx, cy, dummy;
+    int x, y, cx, cy, dummy, format;
     Window		win, w_aux_root, w_aux_child;
 
     if (!(data = get_win_data( hWnd ))) return;
@@ -1514,50 +1486,23 @@ static void EVENT_DropFromOffiX( HWND hWnd, XClientMessageEvent *event )
 
     XGetWindowProperty( event->display, DefaultRootWindow(event->display),
                         x11drv_atom(DndSelection), 0, 65535, FALSE,
-                        AnyPropertyType, &atom_aux, &dummy,
+                        AnyPropertyType, &atom_aux, &format,
                         &data_length, &aux_long, &p_data);
 
-    if( !aux_long && p_data)  /* don't bother if > 64K */
+    if (!aux_long && p_data)  /* don't bother if > 64K */
     {
-        char *p = (char *)p_data;
-        char *p_drop;
+        DROPFILES *drop;
+        size_t drop_size;
 
-        aux_long = 0;
-        while( *p )  /* calculate buffer size */
+        drop = file_list_to_drop_files( p_data, get_property_size( format, data_length ), &drop_size );
+        if (drop)
         {
-            INT len = GetShortPathNameA( p, NULL, 0 );
-            if (len) aux_long += len + 1;
-            p += strlen(p) + 1;
-        }
-        if( aux_long && aux_long < 65535 )
-        {
-            HDROP                 hDrop;
-            DROPFILES *lpDrop;
-
-            aux_long += sizeof(DROPFILES) + 1;
-            hDrop = GlobalAlloc( GMEM_SHARE, aux_long );
-            lpDrop = GlobalLock( hDrop );
-
-            if( lpDrop )
-            {
-                lpDrop->pFiles = sizeof(DROPFILES);
-                lpDrop->pt = pt;
-                lpDrop->fNC = FALSE;
-                lpDrop->fWide = FALSE;
-                p_drop = (char *)(lpDrop + 1);
-                p = (char *)p_data;
-                while(*p)
-                {
-                    if (GetShortPathNameA( p, p_drop, aux_long - (p_drop - (char *)lpDrop) ))
-                        p_drop += strlen( p_drop ) + 1;
-                    p += strlen(p) + 1;
-                }
-                *p_drop = '\0';
-                PostMessageA( hWnd, WM_DROPFILES, (WPARAM)hDrop, 0L );
-            }
+            post_drop( hWnd, drop, drop_size );
+            free( drop );
         }
     }
-    if( p_data ) XFree(p_data);
+
+    if (p_data) XFree(p_data);
 }
 
 /**********************************************************************
@@ -1572,14 +1517,11 @@ static void EVENT_DropURLs( HWND hWnd, XClientMessageEvent *event )
 {
   struct x11drv_win_data *win_data;
   unsigned long	data_length;
-  unsigned long	aux_long, drop_len = 0;
+  unsigned long	aux_long;
   unsigned char	*p_data = NULL; /* property data */
-  char		*p_drop = NULL;
-  char          *p, *next;
   int		x, y;
-  POINT pos;
-  DROPFILES *lpDrop;
-  HDROP hDrop;
+  DROPFILES *drop;
+  int format;
   union {
     Atom	atom_aux;
     int         i;
@@ -1591,87 +1533,38 @@ static void EVENT_DropURLs( HWND hWnd, XClientMessageEvent *event )
 
   XGetWindowProperty( event->display, DefaultRootWindow(event->display),
                       x11drv_atom(DndSelection), 0, 65535, FALSE,
-                      AnyPropertyType, &u.atom_aux, &u.i,
+                      AnyPropertyType, &u.atom_aux, &format,
                       &data_length, &aux_long, &p_data);
   if (aux_long)
     WARN("property too large, truncated!\n");
   TRACE("urls=%s\n", p_data);
 
-  if( !aux_long && p_data) {	/* don't bother if > 64K */
-    /* calculate length */
-    p = (char*) p_data;
-    next = strchr(p, '\n');
-    while (p) {
-      if (next) *next=0;
-      if (strncmp(p,"file:",5) == 0 ) {
-	INT len = GetShortPathNameA( p+5, NULL, 0 );
-	if (len) drop_len += len + 1;
-      }
-      if (next) {
-	*next = '\n';
-	p = next + 1;
-	next = strchr(p, '\n');
-      } else {
-	p = NULL;
-      }
-    }
+  if (!aux_long && p_data) /* don't bother if > 64K */
+  {
+      size_t drop_size;
+      drop = uri_list_to_drop_files( p_data, get_property_size( format, data_length ), &drop_size );
 
-    if( drop_len && drop_len < 65535 ) {
-      XQueryPointer( event->display, root_window, &u.w_aux, &u.w_aux,
-                     &x, &y, &u.i, &u.i, &u.u);
-      pos = root_to_virtual_screen( x, y );
-
-      drop_len += sizeof(DROPFILES) + 1;
-      hDrop = GlobalAlloc( GMEM_SHARE, drop_len );
-      lpDrop = GlobalLock( hDrop );
-
-      if( lpDrop && (win_data = get_win_data( hWnd )))
+      if (drop)
       {
-	  lpDrop->pFiles = sizeof(DROPFILES);
-	  lpDrop->pt = pos;
-	  lpDrop->fNC =
-	    (pos.x < (win_data->client_rect.left - win_data->whole_rect.left)  ||
-	     pos.y < (win_data->client_rect.top - win_data->whole_rect.top)    ||
-	     pos.x > (win_data->client_rect.right - win_data->whole_rect.left) ||
-	     pos.y > (win_data->client_rect.bottom - win_data->whole_rect.top) );
-	  lpDrop->fWide = FALSE;
-	  p_drop = (char*)(lpDrop + 1);
-          release_win_data( win_data );
-      }
+          XQueryPointer( event->display, root_window, &u.w_aux, &u.w_aux,
+                         &x, &y, &u.i, &u.i, &u.u);
+          drop->pt = root_to_virtual_screen( x, y );
 
-      /* create message content */
-      if (p_drop) {
-	p = (char*) p_data;
-	next = strchr(p, '\n');
-	while (p) {
-	  if (next) *next=0;
-	  if (strncmp(p,"file:",5) == 0 ) {
-	    INT len = GetShortPathNameA( p+5, p_drop, 65535 );
-	    if (len) {
-	      TRACE("drop file %s as %s\n", p+5, p_drop);
-	      p_drop += len+1;
-	    } else {
-	      WARN("can't convert file %s to dos name\n", p+5);
-	    }
-	  } else {
-	    WARN("unknown mime type %s\n", p);
-	  }
-	  if (next) {
-	    *next = '\n';
-	    p = next + 1;
-	    next = strchr(p, '\n');
-	  } else {
-	    p = NULL;
-	  }
-	  *p_drop = '\0';
-	}
+          if ((win_data = get_win_data( hWnd )))
+          {
+              drop->fNC =
+                  (drop->pt.x < (win_data->client_rect.left - win_data->whole_rect.left)  ||
+                   drop->pt.y < (win_data->client_rect.top - win_data->whole_rect.top)    ||
+                   drop->pt.x > (win_data->client_rect.right - win_data->whole_rect.left) ||
+                   drop->pt.y > (win_data->client_rect.bottom - win_data->whole_rect.top) );
+              release_win_data( win_data );
+          }
 
-        GlobalUnlock(hDrop);
-        PostMessageA( hWnd, WM_DROPFILES, (WPARAM)hDrop, 0L );
+          post_drop( hWnd, drop, drop_size );
+          free( drop );
       }
-    }
   }
-  if( p_data ) XFree(p_data);
+  if (p_data) XFree( p_data );
 }
 
 
@@ -1752,6 +1645,186 @@ static void handle_dnd_protocol( HWND hwnd, XClientMessageEvent *event )
 }
 
 
+/**************************************************************************
+ *           handle_xdnd_enter_event
+ *
+ * Handle an XdndEnter event.
+ */
+static void handle_xdnd_enter_event( HWND hWnd, XClientMessageEvent *event )
+{
+    struct format_entry *data;
+    unsigned long count = 0;
+    Atom *xdndtypes;
+    size_t size;
+    int version;
+
+    version = (event->data.l[1] & 0xFF000000) >> 24;
+
+    TRACE( "ver(%d) check-XdndTypeList(%ld) data=%ld,%ld,%ld,%ld,%ld\n",
+           version, (event->data.l[1] & 1),
+           event->data.l[0], event->data.l[1], event->data.l[2],
+           event->data.l[3], event->data.l[4] );
+
+    if (version > WINE_XDND_VERSION)
+    {
+        ERR("ignoring unsupported XDND version %d\n", version);
+        return;
+    }
+
+    /* If the source supports more than 3 data types we retrieve
+     * the entire list. */
+    if (event->data.l[1] & 1)
+    {
+        Atom acttype;
+        int actfmt;
+        unsigned long bytesret;
+
+        /* Request supported formats from source window */
+        XGetWindowProperty( event->display, event->data.l[0], x11drv_atom(XdndTypeList),
+                            0, 65535, FALSE, AnyPropertyType, &acttype, &actfmt, &count,
+                            &bytesret, (unsigned char **)&xdndtypes );
+    }
+    else
+    {
+        count = 3;
+        xdndtypes = (Atom *)&event->data.l[2];
+    }
+
+    if (TRACE_ON(xdnd))
+    {
+        unsigned int i;
+
+        for (i = 0; i < count; i++)
+        {
+            if (xdndtypes[i] != 0)
+            {
+                char * pn = XGetAtomName( event->display, xdndtypes[i] );
+                TRACE( "XDNDEnterAtom %ld: %s\n", xdndtypes[i], pn );
+                XFree( pn );
+            }
+        }
+    }
+
+    data = import_xdnd_selection( event->display, event->window, x11drv_atom(XdndSelection),
+                                  xdndtypes, count, &size );
+    if (data)
+    {
+        x11drv_client_func( client_func_dnd_enter_event, data, size );
+        free( data );
+    }
+
+    if (event->data.l[1] & 1)
+        XFree(xdndtypes);
+}
+
+
+static DWORD xdnd_action_to_drop_effect( long action )
+{
+    /* In Windows, nothing but the given effects is allowed.
+     * In X the given action is just a hint, and you can always
+     * XdndActionCopy and XdndActionPrivate, so be more permissive. */
+    if (action == x11drv_atom(XdndActionCopy))
+        return DROPEFFECT_COPY;
+    else if (action == x11drv_atom(XdndActionMove))
+        return DROPEFFECT_MOVE | DROPEFFECT_COPY;
+    else if (action == x11drv_atom(XdndActionLink))
+        return DROPEFFECT_LINK | DROPEFFECT_COPY;
+    else if (action == x11drv_atom(XdndActionAsk))
+        /* FIXME: should we somehow ask the user what to do here? */
+        return DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
+
+    FIXME( "unknown action %ld, assuming DROPEFFECT_COPY\n", action );
+    return DROPEFFECT_COPY;
+}
+
+
+static long drop_effect_to_xdnd_action( UINT effect )
+{
+    if (effect == DROPEFFECT_COPY)
+        return x11drv_atom(XdndActionCopy);
+    else if (effect == DROPEFFECT_MOVE)
+        return x11drv_atom(XdndActionMove);
+    else if (effect == DROPEFFECT_LINK)
+        return x11drv_atom(XdndActionLink);
+    else if (effect == DROPEFFECT_NONE)
+        return None;
+
+    FIXME( "unknown drop effect %u, assuming XdndActionCopy\n", effect );
+    return x11drv_atom(XdndActionCopy);
+}
+
+
+static void handle_xdnd_position_event( HWND hwnd, XClientMessageEvent *event )
+{
+    struct dnd_position_event_params params;
+    XClientMessageEvent e;
+    void *ret_ptr;
+    ULONG ret_len;
+    UINT effect;
+
+    params.hwnd = HandleToUlong( hwnd );
+    params.point = root_to_virtual_screen( event->data.l[2] >> 16, event->data.l[2] & 0xFFFF );
+    params.effect = effect = xdnd_action_to_drop_effect( event->data.l[4] );
+
+    if (KeUserModeCallback( client_func_dnd_position_event, &params, sizeof(params),
+                            &ret_ptr, &ret_len ) || ret_len != sizeof(effect))
+        return;
+    effect = *(UINT *)ret_ptr;
+
+    TRACE( "actionRequested(%ld) chosen(0x%x) at x(%d),y(%d)\n",
+           event->data.l[4], effect, (int)params.point.x, (int)params.point.y );
+
+    /*
+     * Let source know if we're accepting the drop by
+     * sending a status message.
+     */
+    e.type = ClientMessage;
+    e.display = event->display;
+    e.window = event->data.l[0];
+    e.message_type = x11drv_atom(XdndStatus);
+    e.format = 32;
+    e.data.l[0] = event->window;
+    e.data.l[1] = !!effect;
+    e.data.l[2] = 0; /* Empty Rect */
+    e.data.l[3] = 0; /* Empty Rect */
+    e.data.l[4] = drop_effect_to_xdnd_action( effect );
+    XSendEvent( event->display, event->data.l[0], False, NoEventMask, (XEvent *)&e );
+}
+
+
+static void handle_xdnd_drop_event( HWND hwnd, XClientMessageEvent *event )
+{
+    XClientMessageEvent e;
+    void *ret_ptr;
+    ULONG ret_len;
+    ULONG arg = HandleToUlong( hwnd );
+    UINT effect;
+
+    if (KeUserModeCallback( client_func_dnd_drop_event, &arg, sizeof(arg),
+                            &ret_ptr, &ret_len ) || ret_len != sizeof(effect))
+        return;
+    effect = *(UINT *)ret_ptr;
+
+    /* Tell the target we are finished. */
+    memset( &e, 0, sizeof(e) );
+    e.type = ClientMessage;
+    e.display = event->display;
+    e.window = event->data.l[0];
+    e.message_type = x11drv_atom(XdndFinished);
+    e.format = 32;
+    e.data.l[0] = event->window;
+    e.data.l[1] = !!effect;
+    e.data.l[2] = drop_effect_to_xdnd_action( effect );
+    XSendEvent( event->display, event->data.l[0], False, NoEventMask, (XEvent *)&e );
+}
+
+
+static void handle_xdnd_leave_event( HWND hwnd, XClientMessageEvent *event )
+{
+    x11drv_client_func( client_func_dnd_leave_event, NULL, 0 );
+}
+
+
 struct client_message_handler
 {
     int    atom;                                  /* protocol atom */
@@ -1764,10 +1837,10 @@ static const struct client_message_handler client_messages[] =
     { XATOM_WM_PROTOCOLS, handle_wm_protocols },
     { XATOM__XEMBED,      handle_xembed_protocol },
     { XATOM_DndProtocol,  handle_dnd_protocol },
-    { XATOM_XdndEnter,    X11DRV_XDND_EnterEvent },
-    { XATOM_XdndPosition, X11DRV_XDND_PositionEvent },
-    { XATOM_XdndDrop,     X11DRV_XDND_DropEvent },
-    { XATOM_XdndLeave,    X11DRV_XDND_LeaveEvent }
+    { XATOM_XdndEnter,    handle_xdnd_enter_event },
+    { XATOM_XdndPosition, handle_xdnd_position_event },
+    { XATOM_XdndDrop,     handle_xdnd_drop_event },
+    { XATOM_XdndLeave,    handle_xdnd_leave_event }
 };
 
 

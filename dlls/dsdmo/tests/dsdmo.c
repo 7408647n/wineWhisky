@@ -24,6 +24,7 @@
 #include "mmsystem.h"
 #include "dmo.h"
 #include "initguid.h"
+#include "medparam.h"
 #include "dsound.h"
 #include "uuids.h"
 #include "wine/test.h"
@@ -131,28 +132,35 @@ static void test_aggregation(const GUID *clsid)
 
 static void test_interfaces(const GUID *clsid, const GUID *iid)
 {
+    static const GUID *guids[] =
+    {
+        &IID_IMediaObject,
+        &IID_IMediaObjectInPlace,
+        &IID_IMediaParams,
+        &IID_IMediaParamInfo,
+    };
     IUnknown *unk, *unk2, *unk3;
+    unsigned int i;
     HRESULT hr;
     ULONG ref;
 
     hr = CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, iid, (void **)&unk);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
-    hr = IUnknown_QueryInterface(unk, &IID_IMediaObject, (void **)&unk2);
-    ok(hr == S_OK, "Got hr %#lx.\n", hr);
-    hr = IUnknown_QueryInterface(unk2, iid, (void **)&unk3);
-    ok(hr == S_OK, "Got hr %#lx.\n", hr);
-    ok(unk3 == unk, "Interface pointers didn't match.\n");
-    IUnknown_Release(unk3);
-    IUnknown_Release(unk2);
+    for (i = 0; i < ARRAY_SIZE(guids); ++i)
+    {
+        winetest_push_context("GUID %s", debugstr_guid(guids[i]));
 
-    hr = IUnknown_QueryInterface(unk, &IID_IMediaObjectInPlace, (void **)&unk2);
-    ok(hr == S_OK, "Got hr %#lx.\n", hr);
-    hr = IUnknown_QueryInterface(unk2, iid, (void **)&unk3);
-    ok(hr == S_OK, "Got hr %#lx.\n", hr);
-    ok(unk3 == unk, "Interface pointers didn't match.\n");
-    IUnknown_Release(unk3);
-    IUnknown_Release(unk2);
+        hr = IUnknown_QueryInterface(unk, guids[i], (void **)&unk2);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        hr = IUnknown_QueryInterface(unk2, iid, (void **)&unk3);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        ok(unk3 == unk, "Interface pointers didn't match.\n");
+        IUnknown_Release(unk3);
+        IUnknown_Release(unk2);
+
+        winetest_pop_context();
+    }
 
     ref = IUnknown_Release(unk);
     ok(!ref, "Got outstanding refcount %ld.\n", ref);
@@ -300,11 +308,14 @@ static void test_chorus_parameters(void)
 
     hr = CoCreateInstance(&GUID_DSFX_STANDARD_CHORUS, NULL, CLSCTX_INPROC_SERVER,
             &IID_IDirectSoundFXChorus, (void **)&chorus);
-    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
     if (hr != S_OK)
         return;
 
     hr = IDirectSoundFXChorus_GetAllParameters(chorus, &params);
+    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (hr != S_OK)
+        return;
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
     ok(params.fWetDryMix == 50.0f, "Got wetness %.8e%%.\n", params.fWetDryMix);
     ok(params.fDepth == 10.0f, "Got depth %.8e.\n", params.fDepth);
@@ -327,12 +338,12 @@ static void test_compressor_parameters(void)
 
     hr = CoCreateInstance(&GUID_DSFX_STANDARD_COMPRESSOR, NULL, CLSCTX_INPROC_SERVER,
             &IID_IDirectSoundFXCompressor, (void **)&compressor);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectSoundFXCompressor_GetAllParameters(compressor, &params);
     todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
     if (hr != S_OK)
         return;
-
-    hr = IDirectSoundFXCompressor_GetAllParameters(compressor, &params);
-    ok(hr == S_OK, "Got hr %#lx.\n", hr);
     ok(params.fGain == 0.0f, "Got gain %.8e dB.\n", params.fGain);
     ok(params.fAttack == 10.0f, "Got attack time %.8e ms.\n", params.fAttack);
     ok(params.fThreshold == -20.0f, "Got threshold %.8e dB.\n", params.fThreshold);
@@ -352,12 +363,14 @@ static void test_distortion_parameters(void)
 
     hr = CoCreateInstance(&GUID_DSFX_STANDARD_DISTORTION, NULL, CLSCTX_INPROC_SERVER,
             &IID_IDirectSoundFXDistortion, (void **)&distortion);
-    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
     if (hr != S_OK)
         return;
 
     hr = IDirectSoundFXDistortion_GetAllParameters(distortion, &params);
-    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (hr != S_OK)
+        return;
     ok(params.fGain == -18.0f, "Got gain %.8e dB.\n", params.fGain);
     ok(params.fEdge == 15.0f, "Got edge %.8e%%.\n", params.fEdge);
     ok(params.fPostEQCenterFrequency == 2400.0f, "Got center frequency %.8e Hz.\n", params.fPostEQCenterFrequency);
@@ -377,12 +390,14 @@ static void test_echo_parameters(void)
 
     hr = CoCreateInstance(&GUID_DSFX_STANDARD_ECHO, NULL, CLSCTX_INPROC_SERVER,
             &IID_IDirectSoundFXEcho, (void **)&echo);
-    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
     if (hr != S_OK)
         return;
 
     hr = IDirectSoundFXEcho_GetAllParameters(echo, &params);
-    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (hr != S_OK)
+        return;
     ok(params.fWetDryMix == 50.0f, "Got %.8e%% wetness.\n", params.fWetDryMix);
     ok(params.fFeedback == 50.0f, "Got %.8e%% feedback.\n", params.fFeedback);
     ok(params.fLeftDelay == 500.0f, "Got left delay %.8e ms.\n", params.fLeftDelay);
@@ -402,11 +417,14 @@ static void test_flanger_parameters(void)
 
     hr = CoCreateInstance(&GUID_DSFX_STANDARD_FLANGER, NULL, CLSCTX_INPROC_SERVER,
             &IID_IDirectSoundFXFlanger, (void **)&flanger);
-    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
     if (hr != S_OK)
         return;
 
     hr = IDirectSoundFXFlanger_GetAllParameters(flanger, &params);
+    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (hr != S_OK)
+        return;
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
     ok(params.fWetDryMix == 50.0f, "Got %.8e%% wetness.\n", params.fWetDryMix);
     ok(params.fDepth == 100.0f, "Got %.8e * 0.01%% depth.\n", params.fDepth);
@@ -428,12 +446,14 @@ static void test_gargle_parameters(void)
 
     hr = CoCreateInstance(&GUID_DSFX_STANDARD_GARGLE, NULL, CLSCTX_INPROC_SERVER,
             &IID_IDirectSoundFXGargle, (void **)&gargle);
-    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
     if (hr != S_OK)
         return;
 
     hr = IDirectSoundFXGargle_GetAllParameters(gargle, &params);
-    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    todo_wine ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (hr != S_OK)
+        return;
     ok(params.dwRateHz == 20, "Got rate %lu Hz.\n", params.dwRateHz);
     ok(params.dwWaveShape == DSFXGARGLE_WAVE_TRIANGLE, "Got wave shape %lu.\n", params.dwWaveShape);
 
@@ -530,16 +550,15 @@ START_TEST(dsdmo)
     {
         const GUID *clsid;
         const GUID *iid;
-        BOOL todo;
     }
     tests[] =
     {
-        {&GUID_DSFX_STANDARD_CHORUS,        &IID_IDirectSoundFXChorus, TRUE},
-        {&GUID_DSFX_STANDARD_COMPRESSOR,    &IID_IDirectSoundFXCompressor, TRUE},
-        {&GUID_DSFX_STANDARD_DISTORTION,    &IID_IDirectSoundFXDistortion, TRUE},
-        {&GUID_DSFX_STANDARD_ECHO,          &IID_IDirectSoundFXEcho, TRUE},
-        {&GUID_DSFX_STANDARD_FLANGER,       &IID_IDirectSoundFXFlanger, TRUE},
-        {&GUID_DSFX_STANDARD_GARGLE,        &IID_IDirectSoundFXGargle, TRUE},
+        {&GUID_DSFX_STANDARD_CHORUS,        &IID_IDirectSoundFXChorus},
+        {&GUID_DSFX_STANDARD_COMPRESSOR,    &IID_IDirectSoundFXCompressor},
+        {&GUID_DSFX_STANDARD_DISTORTION,    &IID_IDirectSoundFXDistortion},
+        {&GUID_DSFX_STANDARD_ECHO,          &IID_IDirectSoundFXEcho},
+        {&GUID_DSFX_STANDARD_FLANGER,       &IID_IDirectSoundFXFlanger},
+        {&GUID_DSFX_STANDARD_GARGLE,        &IID_IDirectSoundFXGargle},
         {&GUID_DSFX_STANDARD_I3DL2REVERB,   &IID_IDirectSoundFXI3DL2Reverb},
         {&GUID_DSFX_STANDARD_PARAMEQ,       &IID_IDirectSoundFXParamEq},
         {&GUID_DSFX_WAVES_REVERB,           &IID_IDirectSoundFXWavesReverb},
@@ -554,8 +573,7 @@ START_TEST(dsdmo)
         HRESULT hr;
 
         hr = CoCreateInstance(tests[i].clsid, NULL, CLSCTX_INPROC_SERVER, tests[i].iid, (void **)&unk);
-        todo_wine_if(tests[i].todo) ok(hr == S_OK, "Failed to create %s, hr %#lx.\n",
-                debugstr_guid(tests[i].clsid), hr);
+        ok(hr == S_OK, "For clsid %s, got hr %#lx.\n", debugstr_guid(tests[i].clsid), hr);
         if (hr == S_OK)
             IUnknown_Release(unk);
         else

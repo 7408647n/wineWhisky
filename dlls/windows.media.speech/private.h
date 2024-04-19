@@ -23,6 +23,7 @@
 #include <stdarg.h>
 
 #define COBJMACROS
+#include "corerror.h"
 #include "windef.h"
 #include "winbase.h"
 #include "winstring.h"
@@ -69,9 +70,12 @@ struct vector_iids
     const GUID *view;
 };
 
-typedef HRESULT (WINAPI *async_operation_callback)( IInspectable *invoker, IInspectable **result );
+typedef HRESULT (*async_action_callback)( IInspectable *invoker );
+typedef HRESULT (*async_operation_inspectable_callback)( IInspectable *invoker, IInspectable **result );
 
-HRESULT async_operation_create( const GUID *iid, IInspectable *invoker, async_operation_callback callback, IAsyncOperation_IInspectable **out );
+HRESULT async_action_create( IInspectable *invoker, async_action_callback callback, IAsyncAction **out );
+HRESULT async_operation_inspectable_create( const GUID *iid, IInspectable *invoker, async_operation_inspectable_callback callback,
+                                            IAsyncOperation_IInspectable **out );
 
 HRESULT typed_event_handlers_append( struct list *list, ITypedEventHandler_IInspectable_IInspectable *handler, EventRegistrationToken *token );
 HRESULT typed_event_handlers_remove( struct list *list, EventRegistrationToken *token );

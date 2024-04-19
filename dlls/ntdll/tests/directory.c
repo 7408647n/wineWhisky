@@ -55,7 +55,6 @@ static NTSTATUS (WINAPI *pRtlWow64EnableFsRedirectionEx)( ULONG disable, ULONG *
 
 /* The attribute sets to test */
 static struct testfile_s {
-    BOOL todo;                /* set if it doesn't work on wine yet */
     BOOL attr_done;           /* set if attributes were tested for this file already */
     const DWORD attr;         /* desired attribute */
     WCHAR name[20];           /* filename to use */
@@ -63,16 +62,17 @@ static struct testfile_s {
     const char *description;  /* for error messages */
     int nfound;               /* How many were found (expect 1) */
 } testfiles[] = {
-    { 0, 0, FILE_ATTRIBUTE_NORMAL,    {'l','o','n','g','f','i','l','e','n','a','m','e','.','t','m','p'}, "normal" },
-    { 0, 0, FILE_ATTRIBUTE_NORMAL,    {'n','.','t','m','p',}, "normal" },
-    { 1, 0, FILE_ATTRIBUTE_HIDDEN,    {'h','.','t','m','p',}, "hidden" },
-    { 1, 0, FILE_ATTRIBUTE_SYSTEM,    {'s','.','t','m','p',}, "system" },
-    { 0, 0, FILE_ATTRIBUTE_DIRECTORY, {'d','.','t','m','p',}, "directory" },
-    { 0, 0, FILE_ATTRIBUTE_NORMAL,    {0xe9,'a','.','t','m','p'}, "normal" },
-    { 0, 0, FILE_ATTRIBUTE_NORMAL,    {0xc9,'b','.','t','m','p'}, "normal" },
-    { 0, 0, FILE_ATTRIBUTE_NORMAL,    {'e','a','.','t','m','p'},  "normal" },
-    { 0, 0, FILE_ATTRIBUTE_DIRECTORY, {'.'},                  ". directory" },
-    { 0, 0, FILE_ATTRIBUTE_DIRECTORY, {'.','.'},              ".. directory" }
+    { 0, FILE_ATTRIBUTE_NORMAL,    {'l','o','n','g','f','i','l','e','n','a','m','e','.','t','m','p'}, "normal" },
+    { 0, FILE_ATTRIBUTE_NORMAL,    {'n','.','t','m','p',}, "normal" },
+    { 0, FILE_ATTRIBUTE_HIDDEN,    {'h','.','t','m','p',}, "hidden" },
+    { 0, FILE_ATTRIBUTE_SYSTEM,    {'s','.','t','m','p',}, "system" },
+    { 0, FILE_ATTRIBUTE_DIRECTORY, {'d','.','t','m','p',}, "directory" },
+    { 0, FILE_ATTRIBUTE_NORMAL,    {0xe9,'a','.','t','m','p'}, "normal" },
+    { 0, FILE_ATTRIBUTE_NORMAL,    {0xc9,'b','.','t','m','p'}, "normal" },
+    { 0, FILE_ATTRIBUTE_NORMAL,    {'e','a','.','t','m','p'},  "normal" },
+    { 0, FILE_ATTRIBUTE_NORMAL,    {'e','a'},                  "normal" },
+    { 0, FILE_ATTRIBUTE_DIRECTORY, {'.'},                  ". directory" },
+    { 0, FILE_ATTRIBUTE_DIRECTORY, {'.','.'},              ".. directory" }
 };
 static const int test_dir_count = ARRAY_SIZE(testfiles);
 static const int max_test_dir_size = ARRAY_SIZE(testfiles) + 5;  /* size of above plus some for .. etc */
@@ -162,8 +162,8 @@ static void tally_test_file(FILE_BOTH_DIRECTORY_INFORMATION *dir_info)
         if (namelen != len || memcmp(nameW, testfiles[i].name, len*sizeof(WCHAR)))
             continue;
         if (!testfiles[i].attr_done) {
-            todo_wine_if (testfiles[i].todo)
-                ok (attrib == (testfiles[i].attr & attribmask), "file %s: expected %s (%lx), got %lx (is your linux new enough?)\n", wine_dbgstr_w(testfiles[i].name), testfiles[i].description, testfiles[i].attr, attrib);
+            ok (attrib == (testfiles[i].attr & attribmask), "file %s: expected %s (%lx), got %lx\n",
+                wine_dbgstr_w(testfiles[i].name), testfiles[i].description, testfiles[i].attr, attrib);
             testfiles[i].attr_done = TRUE;
         }
         testfiles[i].nfound++;
@@ -201,11 +201,11 @@ static void test_flags_NtQueryDirectoryFile(OBJECT_ATTRIBUTES *attr, const char 
        return;
     }
 
-    U(io).Status = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
     status = pNtQueryDirectoryFile( dirh, NULL, NULL, NULL, &io, data, data_size,
                                     FileBothDirectoryInformation, single_entry, mask, restart_flag );
     ok (status == STATUS_SUCCESS, "failed to query directory; status %lx\n", status);
-    ok (U(io).Status == STATUS_SUCCESS, "failed to query directory; status %lx\n", U(io).Status);
+    ok (io.Status == STATUS_SUCCESS, "failed to query directory; status %lx\n", io.Status);
     data_len = io.Information;
     ok (data_len >= sizeof(FILE_BOTH_DIRECTORY_INFORMATION), "not enough data in directory\n");
 
@@ -221,10 +221,10 @@ static void test_flags_NtQueryDirectoryFile(OBJECT_ATTRIBUTES *attr, const char 
         tally_test_file(dir_info);
 
         if (dir_info->NextEntryOffset == 0) {
-            U(io).Status = 0xdeadbeef;
+            io.Status = 0xdeadbeef;
             status = pNtQueryDirectoryFile( new_dirh, 0, NULL, NULL, &io, data, data_size,
                                             FileBothDirectoryInformation, single_entry, &dummy_mask, FALSE );
-            ok (U(io).Status == status, "wrong status %lx / %lx\n", status, U(io).Status);
+            ok (io.Status == status, "wrong status %lx / %lx\n", status, io.Status);
             if (status == STATUS_NO_MORE_FILES) break;
             ok (status == STATUS_SUCCESS, "failed to query directory; status %lx\n", status);
             data_len = io.Information;
@@ -238,13 +238,13 @@ static void test_flags_NtQueryDirectoryFile(OBJECT_ATTRIBUTES *attr, const char 
     }
     ok(numfiles < max_test_dir_size, "too many loops\n");
 
-    if (mask)
+    if (mask && !wcspbrk( mask->Buffer, L"*?" ))
         for (i = 0; i < test_dir_count; i++)
             ok(testfiles[i].nfound == (testfiles[i].name == mask->Buffer),
                "Wrong number %d of %s files found (single_entry=%d,mask=%s)\n",
                testfiles[i].nfound, testfiles[i].description, single_entry,
                wine_dbgstr_wn(mask->Buffer, mask->Length/sizeof(WCHAR) ));
-    else
+    else if (!mask)
         for (i = 0; i < test_dir_count; i++)
             ok(testfiles[i].nfound == 1, "Wrong number %d of %s files found (single_entry=%d,restart=%d)\n",
                testfiles[i].nfound, testfiles[i].description, single_entry, restart_flag);
@@ -275,11 +275,11 @@ static void test_directory_sort( const WCHAR *testdir )
                         FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_DIRECTORY_FILE );
     ok(status == STATUS_SUCCESS, "failed to open dir %s\n", wine_dbgstr_w(testdir) );
 
-    U(io).Status = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
     status = pNtQueryDirectoryFile( handle, NULL, NULL, NULL, &io, data, sizeof(data),
                                     FileBothDirectoryInformation, FALSE, NULL, TRUE );
     ok( status == STATUS_SUCCESS, "failed to query directory; status %lx\n", status );
-    ok( U(io).Status == STATUS_SUCCESS, "failed to query directory; status %lx\n", U(io).Status );
+    ok( io.Status == STATUS_SUCCESS, "failed to query directory; status %lx\n", io.Status );
     data_len = io.Information;
     ok( data_len >= sizeof(FILE_BOTH_DIRECTORY_INFORMATION), "not enough data in directory\n" );
     data_pos = 0;
@@ -313,10 +313,10 @@ static void test_directory_sort( const WCHAR *testdir )
 
         if (info->NextEntryOffset == 0)
         {
-            U(io).Status = 0xdeadbeef;
+            io.Status = 0xdeadbeef;
             status = pNtQueryDirectoryFile( handle, 0, NULL, NULL, &io, data, sizeof(data),
                                             FileBothDirectoryInformation, FALSE, NULL, FALSE );
-            ok (U(io).Status == status, "wrong status %lx / %lx\n", status, U(io).Status);
+            ok (io.Status == status, "wrong status %lx / %lx\n", status, io.Status);
             if (status == STATUS_NO_MORE_FILES) break;
             ok( status == STATUS_SUCCESS, "failed to query directory; status %lx\n", status );
             data_len = io.Information;
@@ -339,15 +339,15 @@ static void test_NtQueryDirectoryFile_classes( HANDLE handle, UNICODE_STRING *ma
 
     for (class = 0; class < FileMaximumInformation; class++)
     {
-        U(io).Status = 0xdeadbeef;
-        U(io).Information = 0xdeadbeef;
+        io.Status = 0xdeadbeef;
+        io.Information = 0xdeadbeef;
         data_size = 0;
         memset( data, 0x55, sizeof(data) );
 
         status = pNtQueryDirectoryFile( handle, 0, NULL, NULL, &io, data, data_size,
                                         class, FALSE, mask, TRUE );
-        ok( U(io).Status == 0xdeadbeef, "%u: wrong status %lx\n", class, U(io).Status );
-        ok( U(io).Information == 0xdeadbeef, "%u: wrong info %Ix\n", class, U(io).Information );
+        ok( io.Status == 0xdeadbeef, "%u: wrong status %lx\n", class, io.Status );
+        ok( io.Information == 0xdeadbeef, "%u: wrong info %Ix\n", class, io.Information );
         ok(data[0] == 0x55555555, "%u: wrong offset %lx\n",  class, data[0] );
 
         switch (class)
@@ -380,15 +380,15 @@ static void test_NtQueryDirectoryFile_classes( HANDLE handle, UNICODE_STRING *ma
                                             class, FALSE, mask, TRUE );
             if (status == STATUS_BUFFER_OVERFLOW)
             {
-                ok( U(io).Status == STATUS_BUFFER_OVERFLOW, "%u: wrong status %lx\n", class, U(io).Status );
-                ok( U(io).Information == data_size || broken(!U(io).Information), /* win10 1709 */
-                    "%u: wrong info %Ix\n", class, U(io).Information );
-                if (U(io).Information) ok(data[0] == 0, "%u: wrong offset %lx\n",  class, data[0] );
+                ok( io.Status == STATUS_BUFFER_OVERFLOW, "%u: wrong status %lx\n", class, io.Status );
+                ok( io.Information == data_size || broken(!io.Information), /* win10 1709 */
+                    "%u: wrong info %Ix\n", class, io.Information );
+                if (io.Information) ok(data[0] == 0, "%u: wrong offset %lx\n",  class, data[0] );
             }
             else
             {
-                ok( U(io).Status == 0xdeadbeef, "%u: wrong status %lx\n", class, U(io).Status );
-                ok( U(io).Information == 0xdeadbeef, "%u: wrong info %Ix\n", class, U(io).Information );
+                ok( io.Status == 0xdeadbeef || io.Status == status, "%u: wrong status %lx\n", class, io.Status );
+                ok( io.Information == (io.Status == 0xdeadbeef ? 0xdeadbeef : 0), "%u: wrong info %Ix\n", class, io.Information );
                 ok(data[0] == 0x55555555, "%u: wrong offset %lx\n",  class, data[0] );
             }
             if (status != STATUS_INFO_LENGTH_MISMATCH) break;
@@ -449,11 +449,27 @@ static void test_NtQueryDirectoryFile_classes( HANDLE handle, UNICODE_STRING *ma
 
 static void test_NtQueryDirectoryFile(void)
 {
+    static const struct
+    {
+        const WCHAR *mask;
+        int found[ARRAY_SIZE(testfiles)];
+        BOOL todo_missing;
+    }
+    mask_tests[] =
+    {
+        {L"*.", {0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1}, TRUE},
+        {L"*.*", {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1}, TRUE},
+        {L"*.**", {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1}, TRUE},
+        {L"*", {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}},
+        {L"**", {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}},
+        {L"??.???", {0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0}},
+    };
+
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING ntdirname, mask;
     char testdirA[MAX_PATH], buffer[MAX_PATH];
     WCHAR testdirW[MAX_PATH];
-    int i;
+    int i, j;
     IO_STATUS_BLOCK io;
     WCHAR short_name[12];
     UINT data_size;
@@ -495,6 +511,19 @@ static void test_NtQueryDirectoryFile(void)
         test_flags_NtQueryDirectoryFile(&attr, testdirA, &mask, TRUE, FALSE);
     }
 
+    for (i = 0; i < ARRAY_SIZE(mask_tests); ++i)
+    {
+        winetest_push_context("mask %s", debugstr_w(mask_tests[i].mask));
+        RtlInitUnicodeString(&mask, mask_tests[i].mask);
+        test_flags_NtQueryDirectoryFile(&attr, testdirA, &mask, FALSE, TRUE);
+        for (j = 0; j < test_dir_count; j++)
+        {
+            todo_wine_if(mask_tests[i].todo_missing && !mask_tests[i].found[j])
+            ok(testfiles[j].nfound == mask_tests[i].found[j], "%S, got %d.\n", testfiles[j].name, testfiles[j].nfound);
+        }
+        winetest_pop_context();
+    }
+
     /* short path passed as mask */
     status = pNtOpenFile(&dirh, SYNCHRONIZE | FILE_LIST_DIRECTORY, &attr, &io, FILE_SHARE_READ,
             FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_DIRECTORY_FILE);
@@ -520,11 +549,11 @@ static void test_NtQueryDirectoryFile(void)
     mask.Buffer = testfiles[0].name;
     mask.Length = mask.MaximumLength = lstrlenW(testfiles[0].name) * sizeof(WCHAR);
     data_size = offsetof(FILE_BOTH_DIRECTORY_INFORMATION, FileName[256]);
-    U(io).Status = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
     status = pNtQueryDirectoryFile(dirh, 0, NULL, NULL, &io, data, data_size,
                                    FileBothDirectoryInformation, TRUE, &mask, FALSE);
     ok(status == STATUS_SUCCESS, "failed to query directory; status %lx\n", status);
-    ok(U(io).Status == STATUS_SUCCESS, "failed to query directory; status %lx\n", U(io).Status);
+    ok(io.Status == STATUS_SUCCESS, "failed to query directory; status %lx\n", io.Status);
     ok(fbdi->ShortName[0], "ShortName is empty\n");
 
     status = pNtQueryInformationFile( dirh, &io, &pos_info, sizeof(pos_info), FilePositionInformation );
@@ -535,14 +564,14 @@ static void test_NtQueryDirectoryFile(void)
     mask.Length = mask.MaximumLength = fbdi->ShortNameLength;
     memcpy(short_name, fbdi->ShortName, mask.Length);
     mask.Buffer = short_name;
-    U(io).Status = 0xdeadbeef;
-    U(io).Information = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
+    io.Information = 0xdeadbeef;
     status = pNtQueryDirectoryFile(dirh, 0, NULL, NULL, &io, data, data_size,
                                    FileBothDirectoryInformation, TRUE, &mask, TRUE);
     ok(status == STATUS_SUCCESS, "failed to query directory status %lx\n", status);
-    ok(U(io).Status == STATUS_SUCCESS, "failed to query directory status %lx\n", U(io).Status);
-    ok(U(io).Information == offsetof(FILE_BOTH_DIRECTORY_INFORMATION, FileName[lstrlenW(testfiles[0].name)]),
-       "wrong info %Ix\n", U(io).Information);
+    ok(io.Status == STATUS_SUCCESS, "failed to query directory status %lx\n", io.Status);
+    ok(io.Information == offsetof(FILE_BOTH_DIRECTORY_INFORMATION, FileName[lstrlenW(testfiles[0].name)]),
+       "wrong info %Ix\n", io.Information);
     ok(fbdi->FileNameLength == lstrlenW(testfiles[0].name)*sizeof(WCHAR) &&
             !memcmp(fbdi->FileName, testfiles[0].name, fbdi->FileNameLength),
             "incorrect long file name: %s\n", wine_dbgstr_wn(fbdi->FileName,
@@ -555,15 +584,15 @@ static void test_NtQueryDirectoryFile(void)
 
     /* tests with short buffer */
     memset( data, 0x55, data_size );
-    U(io).Status = 0xdeadbeef;
-    U(io).Information = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
+    io.Information = 0xdeadbeef;
     data_size = offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] );
     status = pNtQueryDirectoryFile(dirh, 0, NULL, NULL, &io, data, data_size,
                                    FileBothDirectoryInformation, TRUE, &mask, TRUE);
     ok( status == STATUS_BUFFER_OVERFLOW, "wrong status %lx\n", status );
-    ok( U(io).Status == STATUS_BUFFER_OVERFLOW, "wrong status %lx\n", U(io).Status );
-    ok( U(io).Information == data_size || broken( U(io).Information == 0),
-        "wrong info %Ix\n", U(io).Information );
+    ok( io.Status == STATUS_BUFFER_OVERFLOW, "wrong status %lx\n", io.Status );
+    ok( io.Information == data_size || broken( io.Information == 0),
+        "wrong info %Ix\n", io.Information );
     ok( fbdi->NextEntryOffset == 0 || fbdi->NextEntryOffset == 0x55555555, /* win10 >= 1709 */
         "wrong offset %lx\n",  fbdi->NextEntryOffset );
     if (!fbdi->NextEntryOffset)
@@ -580,12 +609,12 @@ static void test_NtQueryDirectoryFile(void)
 
     /* mask may or may not be ignored when restarting the search */
     pRtlInitUnicodeString( &mask, dummyW );
-    U(io).Status = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
     data_size = offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[256] );
     status = pNtQueryDirectoryFile(dirh, 0, NULL, NULL, &io, data, data_size,
                                    FileBothDirectoryInformation, TRUE, &mask, TRUE);
     ok( status == STATUS_SUCCESS || status == STATUS_NO_MORE_FILES, "wrong status %lx\n", status );
-    ok( U(io).Status == status, "wrong status %lx / %lx\n", U(io).Status, status );
+    ok( io.Status == status, "wrong status %lx / %lx\n", io.Status, status );
     if (!status)
         ok( fbdi->FileNameLength == lstrlenW(testfiles[0].name)*sizeof(WCHAR) &&
             !memcmp(fbdi->FileName, testfiles[0].name, fbdi->FileNameLength),
@@ -600,13 +629,13 @@ static void test_NtQueryDirectoryFile(void)
 
     memset( data, 0x55, data_size );
     data_size = sizeof(data);
-    U(io).Status = 0xdeadbeef;
-    U(io).Information = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
+    io.Information = 0xdeadbeef;
     status = pNtQueryDirectoryFile(dirh, 0, NULL, NULL, &io, data, data_size,
                                    FileBothDirectoryInformation, FALSE, NULL, TRUE);
     ok(status == STATUS_SUCCESS, "wrong status %lx\n", status);
-    ok(U(io).Status == STATUS_SUCCESS, "wrong status %lx\n", U(io).Status);
-    ok(U(io).Information > 0 && U(io).Information < data_size, "wrong info %Ix\n", U(io).Information);
+    ok(io.Status == STATUS_SUCCESS, "wrong status %lx\n", io.Status);
+    ok(io.Information > 0 && io.Information < data_size, "wrong info %Ix\n", io.Information);
     ok( fbdi->NextEntryOffset == ((offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] ) + 7) & ~7),
         "wrong offset %lx\n",  fbdi->NextEntryOffset );
     ok( fbdi->FileNameLength == sizeof(WCHAR), "wrong length %lx\n", fbdi->FileNameLength );
@@ -622,14 +651,14 @@ static void test_NtQueryDirectoryFile(void)
 
     data_size = fbdi->NextEntryOffset + offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] );
     memset( data, 0x55, data_size );
-    U(io).Status = 0xdeadbeef;
-    U(io).Information = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
+    io.Information = 0xdeadbeef;
     status = pNtQueryDirectoryFile( dirh, 0, NULL, NULL, &io, data, data_size,
                                     FileBothDirectoryInformation, FALSE, NULL, TRUE );
     ok( status == STATUS_SUCCESS, "wrong status %lx\n", status );
-    ok( U(io).Status == STATUS_SUCCESS, "wrong status %lx\n", U(io).Status );
-    ok( U(io).Information == offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] ),
-        "wrong info %Ix\n", U(io).Information );
+    ok( io.Status == STATUS_SUCCESS, "wrong status %lx\n", io.Status );
+    ok( io.Information == offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] ),
+        "wrong info %Ix\n", io.Information );
     ok( fbdi->NextEntryOffset == 0, "wrong offset %lx\n",  fbdi->NextEntryOffset );
     ok( fbdi->FileNameLength == sizeof(WCHAR), "wrong length %lx\n", fbdi->FileNameLength );
     ok( fbdi->FileName[0] == '.', "incorrect long file name: %s\n",
@@ -639,27 +668,27 @@ static void test_NtQueryDirectoryFile(void)
 
     data_size = fbdi->NextEntryOffset + offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[2] );
     memset( data, 0x55, data_size );
-    U(io).Status = 0xdeadbeef;
-    U(io).Information = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
+    io.Information = 0xdeadbeef;
     status = pNtQueryDirectoryFile( dirh, 0, NULL, NULL, &io, data, data_size,
                                     FileBothDirectoryInformation, FALSE, NULL, TRUE );
     ok( status == STATUS_SUCCESS, "wrong status %lx\n", status );
-    ok( U(io).Status == STATUS_SUCCESS, "wrong status %lx\n", U(io).Status );
-    ok( U(io).Information == offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] ),
-        "wrong info %Ix\n", U(io).Information );
+    ok( io.Status == STATUS_SUCCESS, "wrong status %lx\n", io.Status );
+    ok( io.Information == offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] ),
+        "wrong info %Ix\n", io.Information );
     ok( fbdi->NextEntryOffset == 0, "wrong offset %lx\n",  fbdi->NextEntryOffset );
 
     data_size = ((offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] ) + 7) & ~7) +
                   offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[2] );
     memset( data, 0x55, data_size );
-    U(io).Status = 0xdeadbeef;
-    U(io).Information = 0xdeadbeef;
-    status = pNtQueryDirectoryFile( dirh, 0, NULL, NULL, &io, data, (data_size + 7) & ~7,
+    io.Status = 0xdeadbeef;
+    io.Information = 0xdeadbeef;
+    status = pNtQueryDirectoryFile( dirh, 0, NULL, NULL, &io, data, data_size + 16,
                                     FileBothDirectoryInformation, FALSE, NULL, TRUE );
     ok( status == STATUS_SUCCESS, "wrong status %lx\n", status );
-    ok( U(io).Status == STATUS_SUCCESS, "wrong status %lx\n", U(io).Status );
-    ok( U(io).Information == data_size || U(io).Information == ((data_size + 7) & ~7),
-        "wrong info %Ix / %x\n", U(io).Information, data_size );
+    ok( io.Status == STATUS_SUCCESS, "wrong status %lx\n", io.Status );
+    ok( io.Information == data_size || io.Information == ((data_size + 7) & ~7),
+        "wrong info %Ix / %x\n", io.Information, data_size );
     ok( fbdi->NextEntryOffset == ((offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[1] ) + 7) & ~7),
         "wrong offset %lx\n",  fbdi->NextEntryOffset );
     ok( fbdi->FileNameLength == sizeof(WCHAR), "wrong length %lx\n", fbdi->FileNameLength );
@@ -675,13 +704,13 @@ static void test_NtQueryDirectoryFile(void)
     data_size = ((offsetof( FILE_NAMES_INFORMATION, FileName[1] ) + 7) & ~7) +
                   offsetof( FILE_NAMES_INFORMATION, FileName[2] );
     memset( data, 0x55, data_size );
-    U(io).Status = 0xdeadbeef;
-    U(io).Information = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
+    io.Information = 0xdeadbeef;
     status = pNtQueryDirectoryFile( dirh, 0, NULL, NULL, &io, data, data_size,
                                     FileNamesInformation, FALSE, NULL, TRUE );
     ok( status == STATUS_SUCCESS, "wrong status %lx\n", status );
-    ok( U(io).Status == STATUS_SUCCESS, "wrong status %lx\n", U(io).Status );
-    ok( U(io).Information == data_size, "wrong info %Ix / %x\n", U(io).Information, data_size );
+    ok( io.Status == STATUS_SUCCESS, "wrong status %lx\n", io.Status );
+    ok( io.Information == data_size, "wrong info %Ix / %x\n", io.Information, data_size );
     names = (FILE_NAMES_INFORMATION *)data;
     ok( names->NextEntryOffset == ((offsetof( FILE_NAMES_INFORMATION, FileName[1] ) + 7) & ~7),
         "wrong offset %lx\n",  names->NextEntryOffset );
@@ -703,42 +732,42 @@ static void test_NtQueryDirectoryFile(void)
     ok(status == STATUS_SUCCESS, "failed to open dir '%s'\n", testdirA);
 
     pRtlInitUnicodeString( &mask, dummyW );
-    U(io).Status = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
     data_size = sizeof(data);
     status = pNtQueryDirectoryFile(dirh, 0, NULL, NULL, &io, data, data_size,
                                    FileBothDirectoryInformation, TRUE, &mask, TRUE);
     ok(status == STATUS_NO_SUCH_FILE, "wrong status %lx\n", status);
-    ok(U(io).Status == 0xdeadbeef, "wrong status %lx\n", U(io).Status);
+    ok(io.Status == 0xdeadbeef, "wrong status %lx\n", io.Status);
 
-    U(io).Status = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
     status = pNtQueryDirectoryFile(dirh, 0, NULL, NULL, &io, data, data_size,
                                    FileBothDirectoryInformation, TRUE, NULL, FALSE);
     ok(status == STATUS_NO_MORE_FILES, "wrong status %lx\n", status);
-    ok(U(io).Status == STATUS_NO_MORE_FILES, "wrong status %lx\n", U(io).Status);
+    ok(io.Status == STATUS_NO_MORE_FILES, "wrong status %lx\n", io.Status);
 
-    U(io).Status = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
     status = pNtQueryDirectoryFile(dirh, 0, NULL, NULL, &io, data, data_size,
                                    FileBothDirectoryInformation, TRUE, NULL, TRUE);
     ok(status == STATUS_NO_MORE_FILES, "wrong status %lx\n", status);
-    ok(U(io).Status == STATUS_NO_MORE_FILES, "wrong status %lx\n", U(io).Status);
+    ok(io.Status == STATUS_NO_MORE_FILES, "wrong status %lx\n", io.Status);
 
     pNtClose(dirh);
 
-    U(io).Status = 0xdeadbeef;
+    io.Status = 0xdeadbeef;
     status = pNtQueryDirectoryFile( (HANDLE)0xbeef, 0, NULL, NULL, &io, data, data_size,
                                     FileBothDirectoryInformation, TRUE, NULL, TRUE );
     ok(status == STATUS_INVALID_HANDLE, "wrong status %lx\n", status);
-    ok(U(io).Status == 0xdeadbeef, "wrong status %lx\n", U(io).Status);
+    ok(io.Status == 0xdeadbeef, "wrong status %lx\n", io.Status);
 
     GetModuleFileNameA( 0, buffer, sizeof(buffer) );
     h = CreateFileA( buffer, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, 0 );
     if (h != INVALID_HANDLE_VALUE)
     {
-        U(io).Status = 0xdeadbeef;
+        io.Status = 0xdeadbeef;
         status = pNtQueryDirectoryFile( h, 0, NULL, NULL, &io, data, data_size,
                                         FileBothDirectoryInformation, TRUE, NULL, TRUE );
         ok(status == STATUS_INVALID_PARAMETER, "wrong status %lx\n", status);
-        ok(U(io).Status == 0xdeadbeef, "wrong status %lx\n", U(io).Status);
+        ok(io.Status == 0xdeadbeef, "wrong status %lx\n", io.Status);
         CloseHandle ( h );
     }
 
@@ -825,7 +854,7 @@ static void test_NtQueryDirectoryFile_case(void)
     mask.Length = mask.MaximumLength = sizeof(testmask);
     pNtQueryDirectoryFile(dirh, NULL, NULL, NULL, &io, data, data_size,
                           FileBothDirectoryInformation, TRUE, &mask, FALSE);
-    ok(U(io).Status == STATUS_SUCCESS, "failed to query directory; status %lx\n", U(io).Status);
+    ok(io.Status == STATUS_SUCCESS, "failed to query directory; status %lx\n", io.Status);
     data_len = io.Information;
     ok(data_len >= sizeof(FILE_BOTH_DIRECTORY_INFORMATION), "not enough data in directory\n");
 

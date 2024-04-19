@@ -79,7 +79,6 @@ static void (WINAPI *pGetCurrentThreadStackLimits)(PULONG_PTR,PULONG_PTR);
 static BOOL (WINAPI *pGetThreadPriorityBoost)(HANDLE,PBOOL);
 static HANDLE (WINAPI *pOpenThread)(DWORD,BOOL,DWORD);
 static BOOL (WINAPI *pQueueUserWorkItem)(LPTHREAD_START_ROUTINE,PVOID,ULONG);
-static DWORD (WINAPI *pSetThreadIdealProcessor)(HANDLE,DWORD);
 static BOOL (WINAPI *pSetThreadPriorityBoost)(HANDLE,BOOL);
 static BOOL (WINAPI *pSetThreadStackGuarantee)(ULONG*);
 static BOOL (WINAPI *pRegisterWaitForSingleObject)(PHANDLE,HANDLE,WAITORTIMERCALLBACK,PVOID,ULONG,ULONG);
@@ -854,10 +853,20 @@ static VOID test_thread_processor(void)
    HANDLE curthread,curproc;
    DWORD_PTR processMask,systemMask,retMask;
    SYSTEM_INFO sysInfo;
-   int error=0;
-   BOOL is_wow64;
+   BOOL is_wow64, old_wow64 = FALSE;
+   DWORD ret;
 
    if (!pIsWow64Process || !pIsWow64Process( GetCurrentProcess(), &is_wow64 )) is_wow64 = FALSE;
+
+    if (is_wow64)
+    {
+        TEB64 *teb64 = ULongToPtr(NtCurrentTeb()->GdiBatchCount);
+        if (teb64)
+        {
+            PEB64 *peb64 = ULongToPtr(teb64->Peb);
+            old_wow64 = !peb64->LdrData;
+        }
+    }
 
    sysInfo.dwNumberOfProcessors=0;
    GetSystemInfo(&sysInfo);
@@ -896,43 +905,33 @@ static VOID test_thread_processor(void)
        retMask = SetThreadAffinityMask(curthread,~(ULONG_PTR)0 >> 3);
        ok(retMask == processMask, "SetThreadAffinityMask failed\n");
    }
-/* NOTE: This only works on WinNT/2000/XP) */
-    if (pSetThreadIdealProcessor)
+
+    SetLastError(0xdeadbeef);
+    ret = SetThreadIdealProcessor(GetCurrentThread(), 0);
+    ok(ret != ~0u, "Unexpected return value %lu.\n", ret);
+
+    if (is_wow64)
     {
         SetLastError(0xdeadbeef);
-        error=pSetThreadIdealProcessor(curthread,0);
-        if (GetLastError() != ERROR_CALL_NOT_IMPLEMENTED)
-        {
-            ok(error!=-1, "SetThreadIdealProcessor failed\n");
+        ret = SetThreadIdealProcessor(GetCurrentThread(), MAXIMUM_PROCESSORS + 1);
+        todo_wine_if(old_wow64)
+        ok(ret != ~0u, "Unexpected return value %lu.\n", ret);
 
-            if (is_wow64)
-            {
-                SetLastError(0xdeadbeef);
-                error=pSetThreadIdealProcessor(curthread,MAXIMUM_PROCESSORS+1);
-                todo_wine
-                ok(error!=-1, "SetThreadIdealProcessor failed for %u on Wow64\n", MAXIMUM_PROCESSORS+1);
-
-                SetLastError(0xdeadbeef);
-                error=pSetThreadIdealProcessor(curthread,65);
-                ok(error==-1, "SetThreadIdealProcessor succeeded with an illegal processor #\n");
-                ok(GetLastError()==ERROR_INVALID_PARAMETER,
-                   "Expected ERROR_INVALID_PARAMETER, got %ld\n", GetLastError());
-            }
-            else
-            {
-                SetLastError(0xdeadbeef);
-                error=pSetThreadIdealProcessor(curthread,MAXIMUM_PROCESSORS+1);
-                ok(error==-1, "SetThreadIdealProcessor succeeded with an illegal processor #\n");
-                ok(GetLastError()==ERROR_INVALID_PARAMETER,
-                   "Expected ERROR_INVALID_PARAMETER, got %ld\n", GetLastError());
-            }
-
-            error=pSetThreadIdealProcessor(curthread,MAXIMUM_PROCESSORS);
-            ok(error!=-1, "SetThreadIdealProcessor failed\n");
-        }
-        else
-            win_skip("SetThreadIdealProcessor is not implemented\n");
+        SetLastError(0xdeadbeef);
+        ret = SetThreadIdealProcessor(GetCurrentThread(), 65);
+        ok(ret == ~0u, "Unexpected return value %lu.\n", ret);
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "Unexpected error %ld.\n", GetLastError());
     }
+    else
+    {
+        SetLastError(0xdeadbeef);
+        ret = SetThreadIdealProcessor(GetCurrentThread(), MAXIMUM_PROCESSORS+1);
+        ok(ret == ~0u, "Unexpected return value %lu.\n", ret);
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "Unexpected error %ld.\n", GetLastError());
+    }
+
+    ret = SetThreadIdealProcessor(GetCurrentThread(), MAXIMUM_PROCESSORS);
+    ok(ret != ~0u, "Unexpected return value %lu.\n", ret);
 
     if (pGetThreadGroupAffinity && pSetThreadGroupAffinity)
     {
@@ -956,12 +955,15 @@ static VOID test_thread_processor(void)
            affinity_new.Mask, affinity.Mask);
 
         /* show that the "all processors" flag is not supported for SetThreadGroupAffinity */
-        affinity_new.Group = 0;
-        affinity_new.Mask  = ~0u;
-        SetLastError(0xdeadbeef);
-        ok(!pSetThreadGroupAffinity(curthread, &affinity_new, NULL), "SetThreadGroupAffinity succeeded\n");
-        ok(GetLastError() == ERROR_INVALID_PARAMETER,
-           "Expected ERROR_INVALID_PARAMETER, got %ld\n", GetLastError());
+        if (sysInfo.dwNumberOfProcessors < 8 * sizeof(DWORD_PTR))
+        {
+            affinity_new.Group = 0;
+            affinity_new.Mask  = ~(DWORD_PTR)0;
+            SetLastError(0xdeadbeef);
+            ok(!pSetThreadGroupAffinity(curthread, &affinity_new, NULL), "SetThreadGroupAffinity succeeded\n");
+            ok(GetLastError() == ERROR_INVALID_PARAMETER,
+               "Expected ERROR_INVALID_PARAMETER, got %ld\n", GetLastError());
+        }
 
         affinity_new.Group = 1; /* assumes that you have less than 64 logical processors */
         affinity_new.Mask  = 0x1;
@@ -1185,9 +1187,6 @@ static DWORD WINAPI test_stack( void *arg )
     ok( stack == NtCurrentTeb()->Tib.StackBase, "wrong stack %p/%p\n",
         stack, NtCurrentTeb()->Tib.StackBase );
     ok( !stack[-1], "wrong data %p = %08lx\n", stack - 1, stack[-1] );
-    ok( stack[-2] == (DWORD)arg, "wrong data %p = %08lx\n", stack - 2, stack[-2] );
-    ok( stack[-3] == (DWORD)test_stack, "wrong data %p = %08lx\n", stack - 3, stack[-3] );
-    ok( !stack[-4], "wrong data %p = %08lx\n", stack - 4, stack[-4] );
     return 0;
 }
 
@@ -2535,13 +2534,11 @@ static void test_thread_description(void)
     thread = OpenThread(THREAD_SET_LIMITED_INFORMATION, FALSE, GetCurrentThreadId());
 
     hr = pSetThreadDescription(thread, desc);
-    todo_wine
     ok(hr == HRESULT_FROM_NT(STATUS_SUCCESS), "Failed to set thread description, hr %#lx.\n", hr);
 
     ptr = NULL;
     hr = pGetThreadDescription(GetCurrentThread(), &ptr);
     ok(hr == HRESULT_FROM_NT(STATUS_SUCCESS), "Failed to get thread description, hr %#lx.\n", hr);
-    todo_wine
     ok(!lstrcmpW(ptr, desc), "Unexpected description %s.\n", wine_dbgstr_w(ptr));
     LocalFree(ptr);
 
@@ -2582,7 +2579,6 @@ static void init_funcs(void)
     X(GetThreadPriorityBoost);
     X(OpenThread);
     X(QueueUserWorkItem);
-    X(SetThreadIdealProcessor);
     X(SetThreadPriorityBoost);
     X(SetThreadStackGuarantee);
     X(RegisterWaitForSingleObject);

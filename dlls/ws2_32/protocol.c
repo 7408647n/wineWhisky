@@ -27,9 +27,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(winsock);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
-unixlib_handle_t ws_unix_handle = 0;
-
-#define WS_CALL(func, params) __wine_unix_call( ws_unix_handle, ws_unix_ ## func, params )
+#define WS_CALL(func, params) WINE_UNIX_CALL( ws_unix_ ## func, params )
 
 static char *get_fqdn(void)
 {
@@ -98,8 +96,8 @@ static int dns_only_query( const char *node, const struct addrinfo *hints, struc
         }
     }
 
-    for (ptr = rec; ptr; ptr = ptr->pNext) count++;
-    for (ptr = rec6; ptr; ptr = ptr->pNext) count++;
+    for (ptr = rec; ptr; ptr = ptr->pNext) { if (ptr->wType == DNS_TYPE_A) count++; };
+    for (ptr = rec6; ptr; ptr = ptr->pNext) { if (ptr->wType == DNS_TYPE_AAAA) count++; };
     if (!count)
     {
         DnsRecordListFree( (DNS_RECORD *)rec, DnsFreeRecordList );
@@ -116,6 +114,7 @@ static int dns_only_query( const char *node, const struct addrinfo *hints, struc
 
     for (ptr = rec; ptr; ptr = ptr->pNext)
     {
+        if (ptr->wType != DNS_TYPE_A) continue;
         info->ai_family   = AF_INET;
         info->ai_socktype = hints->ai_socktype;
         info->ai_protocol = hints->ai_protocol;
@@ -130,6 +129,7 @@ static int dns_only_query( const char *node, const struct addrinfo *hints, struc
     }
     for (ptr = rec6; ptr; ptr = ptr->pNext)
     {
+        if (ptr->wType != DNS_TYPE_AAAA) continue;
         info->ai_family   = AF_INET6;
         info->ai_socktype = hints->ai_socktype;
         info->ai_protocol = hints->ai_protocol;
@@ -356,7 +356,7 @@ static void WINAPI getaddrinfo_callback(TP_CALLBACK_INSTANCE *instance, void *co
     if (res)
     {
         *args->result = addrinfo_list_AtoW(res);
-        overlapped->u.Pointer = args->result;
+        overlapped->Pointer = args->result;
         freeaddrinfo(res);
     }
 
@@ -836,7 +836,7 @@ static struct hostent *get_local_ips( char *hostname )
         /* Check if this is a default route (there may be more than one) */
         if (!routes->table[n].dwForwardDest)
             ifdefault = ++default_routes;
-        else if (routes->table[n].u1.ForwardType != MIB_IPROUTE_TYPE_DIRECT)
+        else if (routes->table[n].ForwardType != MIB_IPROUTE_TYPE_DIRECT)
             continue;
         ifindex = routes->table[n].dwForwardIfIndex;
         ifmetric = routes->table[n].dwForwardMetric1;
@@ -1895,18 +1895,18 @@ u_long WINAPI inet_addr( const char *str )
 /***********************************************************************
  *      htonl   (ws2_32.8)
  */
-u_long WINAPI WS_htonl( u_long hostlong )
+u_long WINAPI htonl( u_long hostlong )
 {
-    return htonl( hostlong );
+    return RtlUlongByteSwap( hostlong );
 }
 
 
 /***********************************************************************
  *      htons   (ws2_32.9)
  */
-u_short WINAPI WS_htons( u_short hostshort )
+u_short WINAPI htons( u_short hostshort )
 {
-    return htons( hostshort );
+    return RtlUshortByteSwap( hostshort );
 }
 
 
@@ -1943,18 +1943,18 @@ int WINAPI WSAHtons( SOCKET s, u_short hostshort, u_short *netshort )
 /***********************************************************************
  *      ntohl   (ws2_32.14)
  */
-u_long WINAPI WS_ntohl( u_long netlong )
+u_long WINAPI ntohl( u_long netlong )
 {
-    return ntohl( netlong );
+    return RtlUlongByteSwap( netlong );
 }
 
 
 /***********************************************************************
  *      ntohs   (ws2_32.15)
  */
-u_short WINAPI WS_ntohs( u_short netshort )
+u_short WINAPI ntohs( u_short netshort )
 {
-    return ntohs( netshort );
+    return RtlUshortByteSwap( netshort );
 }
 
 

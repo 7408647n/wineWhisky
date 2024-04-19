@@ -33,12 +33,6 @@ enum startup_state { STARTUP_IN_PROGRESS, STARTUP_DONE, STARTUP_ABORTED };
 
 /* process structures */
 
-struct rawinput_device_entry
-{
-    struct list            entry;
-    struct rawinput_device device;
-};
-
 struct process
 {
     struct object        obj;             /* object header */
@@ -86,9 +80,11 @@ struct process
     client_ptr_t         ldt_copy;        /* pointer to LDT copy in client addr space */
     struct dir_cache    *dir_cache;       /* map of client-side directory cache */
     unsigned int         trace_data;      /* opaque data used by the process tracing mechanism */
-    struct list          rawinput_devices;/* list of registered rawinput devices */
+    struct rawinput_device *rawinput_devices;     /* list of registered rawinput devices */
+    unsigned int         rawinput_device_count;   /* number of registered rawinput devices */
     const struct rawinput_device *rawinput_mouse; /* rawinput mouse device, if any */
     const struct rawinput_device *rawinput_kbd;   /* rawinput keyboard device, if any */
+    struct list          rawinput_entry;  /* entry in the rawinput process list */
     struct list          kernel_object;   /* list of kernel object pointers */
     pe_image_info_t      image_info;      /* main exe image info */
     struct esync_fd     *esync_fd;        /* esync file descriptor (signaled on exit) */

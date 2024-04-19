@@ -29,8 +29,6 @@
 
 #include <stdio.h>
 
-#define NONAMELESSUNION
-
 #include "ieframe.h"
 
 #include "shlobj.h"
@@ -97,7 +95,7 @@ static BOOL run_winemenubuilder( const WCHAR *args )
     lstrcatW( app, menubuilder );
 
     len = (lstrlenW( app ) + lstrlenW( args ) + 1) * sizeof(WCHAR);
-    buffer = heap_alloc( len );
+    buffer = malloc( len );
     if( !buffer )
         return FALSE;
 
@@ -113,7 +111,7 @@ static BOOL run_winemenubuilder( const WCHAR *args )
     ret = CreateProcessW( app, buffer, NULL, NULL, FALSE, DETACHED_PROCESS, NULL, NULL, &si, &pi );
     Wow64RevertWow64FsRedirection( redir );
 
-    heap_free( buffer );
+    free( buffer );
 
     if (ret)
     {
@@ -132,13 +130,13 @@ static BOOL StartLinkProcessor( LPCOLESTR szLink )
     BOOL ret;
 
     len = sizeof(szFormat) + lstrlenW( szLink ) * sizeof(WCHAR);
-    buffer = heap_alloc( len );
+    buffer = malloc( len );
     if( !buffer )
         return FALSE;
 
     swprintf( buffer, len / sizeof(WCHAR), szFormat, szLink );
     ret = run_winemenubuilder( buffer );
-    heap_free( buffer );
+    free( buffer );
     return ret;
 }
 
@@ -193,7 +191,7 @@ static ULONG Unknown_Release(InternetShortcut *This)
         CoTaskMemFree(This->url);
         CoTaskMemFree(This->currentFile);
         IPropertySetStorage_Release(This->property_set_storage);
-        heap_free(This);
+        free(This);
         unlock_module();
     }
     return count;
@@ -374,13 +372,13 @@ static HRESULT WINAPI UniformResourceLocatorA_InvokeCommand(IUniformResourceLoca
     wideCommandInfo.hwndParent = pCommandInfo->hwndParent;
 
     len = MultiByteToWideChar(CP_ACP, 0, pCommandInfo->pcszVerb, -1, NULL, 0);
-    wideVerb = heap_alloc(len * sizeof(WCHAR));
+    wideVerb = malloc(len * sizeof(WCHAR));
     MultiByteToWideChar(CP_ACP, 0, pCommandInfo->pcszVerb, -1, wideVerb, len);
 
     wideCommandInfo.pcszVerb = wideVerb;
 
     res = UniformResourceLocatorW_InvokeCommand(&This->IUniformResourceLocatorW_iface, &wideCommandInfo);
-    heap_free(wideVerb);
+    free(wideVerb);
 
     return res;
 }
@@ -507,7 +505,7 @@ static HRESULT WINAPI PersistFile_Load(IPersistFile *pFile, LPCOLESTR pszFileNam
         PROPSPEC ps;
         PROPVARIANT pv;
         ps.ulKind = PRSPEC_PROPID;
-        ps.u.propid = PID_IS_ICONFILE;
+        ps.propid = PID_IS_ICONFILE;
         pv.vt = VT_LPWSTR;
         pv.pwszVal = iconfile;
         hr = IPropertyStorage_WriteMultiple(pPropStg, 1, &ps, &pv, 0);
@@ -523,7 +521,7 @@ static HRESULT WINAPI PersistFile_Load(IPersistFile *pFile, LPCOLESTR pszFileNam
         PROPVARIANT pv;
         iconindex = wcstol(iconindexstring, NULL, 10);
         ps.ulKind = PRSPEC_PROPID;
-        ps.u.propid = PID_IS_ICONINDEX;
+        ps.propid = PID_IS_ICONINDEX;
         pv.vt = VT_I4;
         pv.iVal = iconindex;
         hr = IPropertyStorage_WriteMultiple(pPropStg, 1, &ps, &pv, 0);
@@ -565,7 +563,7 @@ static HRESULT WINAPI PersistFile_Save(IPersistFile *pFile, LPCOLESTR pszFileNam
      *   An ASCII (probably UTF8?) value in "URL=..."
      */
     len = WideCharToMultiByte(CP_UTF8, 0, This->url, -1, NULL, 0, 0, 0);
-    url = heap_alloc(len);
+    url = malloc(len);
     if (url != NULL)
     {
         HANDLE file;
@@ -583,9 +581,9 @@ static HRESULT WINAPI PersistFile_Save(IPersistFile *pFile, LPCOLESTR pszFileNam
             PROPSPEC ps[2];
             PROPVARIANT pvread[2];
             ps[0].ulKind = PRSPEC_PROPID;
-            ps[0].u.propid = PID_IS_ICONFILE;
+            ps[0].propid = PID_IS_ICONFILE;
             ps[1].ulKind = PRSPEC_PROPID;
-            ps[1].u.propid = PID_IS_ICONINDEX;
+            ps[1].propid = PID_IS_ICONINDEX;
 
             WriteFile(file, str_header, ARRAY_SIZE(str_header) - 1, &bytesWritten, NULL);
             WriteFile(file, str_eol, ARRAY_SIZE(str_eol) - 1, &bytesWritten, NULL);
@@ -607,14 +605,14 @@ static HRESULT WINAPI PersistFile_Save(IPersistFile *pFile, LPCOLESTR pszFileNam
                 {
                     char indexString[50];
                     len = WideCharToMultiByte(CP_UTF8, 0, pvread[0].pwszVal, -1, NULL, 0, 0, 0);
-                    iconfile = heap_alloc(len);
+                    iconfile = malloc(len);
                     if (iconfile != NULL)
                     {
                         WideCharToMultiByte(CP_UTF8, 0, pvread[0].pwszVal, -1, iconfile, len, 0, 0);
                         WriteFile(file, str_ICONFILE, lstrlenA(str_ICONFILE), &bytesWritten, NULL);
                         WriteFile(file, iconfile, lstrlenA(iconfile), &bytesWritten, NULL);
                         WriteFile(file, str_eol, lstrlenA(str_eol), &bytesWritten, NULL);
-                        heap_free(iconfile);
+                        free(iconfile);
                     }
 
                     sprintf(indexString, "ICONINDEX=%d", pvread[1].iVal);
@@ -642,7 +640,7 @@ static HRESULT WINAPI PersistFile_Save(IPersistFile *pFile, LPCOLESTR pszFileNam
         }
         else
             hr = E_FAIL;
-        heap_free(url);
+        free(url);
     }
     else
         hr = E_OUTOFMEMORY;
@@ -718,8 +716,13 @@ static HRESULT WINAPI PropertySetStorage_Open(
         DWORD grfMode,
         IPropertyStorage **ppprstg)
 {
+    const DWORD STGM_ACCESS_MASK = 0x0000000f;
     InternetShortcut *This = impl_from_IPropertySetStorage(iface);
     TRACE("(%s, 0x%lx, %p)\n", debugstr_guid(rfmtid), grfMode, ppprstg);
+
+    /* ole32 doesn't like STGM_WRITE */
+    if ((grfMode & STGM_ACCESS_MASK) == STGM_WRITE)
+        grfMode = (grfMode & ~STGM_ACCESS_MASK) | STGM_READWRITE;
 
     /* Note:  The |STGM_SHARE_EXCLUSIVE is to cope with a bug in the implementation.  Should be fixed in ole32. */
     return IPropertySetStorage_Open(This->property_set_storage,
@@ -788,7 +791,7 @@ static InternetShortcut *create_shortcut(void)
 {
     InternetShortcut *newshortcut;
 
-    newshortcut = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(InternetShortcut));
+    newshortcut = calloc(1, sizeof(InternetShortcut));
     if (newshortcut)
     {
         HRESULT hr;
@@ -804,7 +807,7 @@ static InternetShortcut *create_shortcut(void)
         if (FAILED(hr))
         {
             TRACE("Failed to create the storage object needed for the shortcut.\n");
-            heap_free(newshortcut);
+            free(newshortcut);
             return NULL;
         }
 
@@ -813,7 +816,7 @@ static InternetShortcut *create_shortcut(void)
         {
             TRACE("Failed to create the property object needed for the shortcut.\n");
             IPropertySetStorage_Release(newshortcut->property_set_storage);
-            heap_free(newshortcut);
+            free(newshortcut);
             return NULL;
         }
         IPropertyStorage_Release(dummy);
@@ -859,7 +862,7 @@ void WINAPI OpenURL(HWND hWnd, HINSTANCE hInst, LPCSTR lpcstrUrl, int nShowCmd)
         return;
 
     len = MultiByteToWideChar(CP_ACP, 0, lpcstrUrl, -1, NULL, 0);
-    urlfilepath = heap_alloc(len * sizeof(WCHAR));
+    urlfilepath = malloc(len * sizeof(WCHAR));
     MultiByteToWideChar(CP_ACP, 0, lpcstrUrl, -1, urlfilepath, len);
 
     if(SUCCEEDED(IPersistFile_Load(&shortcut->IPersistFile_iface, urlfilepath, 0))) {
@@ -874,6 +877,6 @@ void WINAPI OpenURL(HWND hWnd, HINSTANCE hInst, LPCSTR lpcstrUrl, int nShowCmd)
             TRACE("failed to open URL: %s\n", debugstr_a(lpcstrUrl));
     }
 
-    heap_free(urlfilepath);
+    free(urlfilepath);
     Unknown_Release(shortcut);
 }

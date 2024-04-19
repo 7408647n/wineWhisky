@@ -166,7 +166,7 @@ static BOOL get_vis_rectangles( DC *dc_dst, struct bitblt_coords *dst,
     return intersect_vis_rectangles( dst, src );
 }
 
-void CDECL free_heap_bits( struct gdi_image_bits *bits )
+void free_heap_bits( struct gdi_image_bits *bits )
 {
     heapfree( bits->ptr );
 }
@@ -277,8 +277,8 @@ void get_mono_dc_colors( DC *dc, int color_table_size, BITMAPINFO *info, int cou
  *           null driver fallback implementations
  */
 
-BOOL CDECL nulldrv_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
-                               PHYSDEV src_dev, struct bitblt_coords *src, DWORD rop )
+BOOL nulldrv_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
+                         PHYSDEV src_dev, struct bitblt_coords *src, DWORD rop )
 {
     DC *dc_src = get_physdev_dc( src_dev ), *dc_dst = get_nulldrv_dc( dst_dev );
     char src_buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
@@ -329,8 +329,8 @@ BOOL CDECL nulldrv_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
 }
 
 
-BOOL CDECL nulldrv_AlphaBlend( PHYSDEV dst_dev, struct bitblt_coords *dst,
-                               PHYSDEV src_dev, struct bitblt_coords *src, BLENDFUNCTION func )
+BOOL nulldrv_AlphaBlend( PHYSDEV dst_dev, struct bitblt_coords *dst,
+                         PHYSDEV src_dev, struct bitblt_coords *src, BLENDFUNCTION func )
 {
     DC *dc_src = get_physdev_dc( src_dev ), *dc_dst = get_nulldrv_dc( dst_dev );
     char src_buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
@@ -363,13 +363,13 @@ BOOL CDECL nulldrv_AlphaBlend( PHYSDEV dst_dev, struct bitblt_coords *dst,
 
     if (bits.free) bits.free( &bits );
 done:
-    if (err) SetLastError( err );
+    if (err) RtlSetLastWin32Error( err );
     return !err;
 }
 
 
-DWORD CDECL nulldrv_BlendImage( PHYSDEV dev, BITMAPINFO *info, const struct gdi_image_bits *bits,
-                                struct bitblt_coords *src, struct bitblt_coords *dst, BLENDFUNCTION blend )
+DWORD nulldrv_BlendImage( PHYSDEV dev, BITMAPINFO *info, const struct gdi_image_bits *bits,
+                          struct bitblt_coords *src, struct bitblt_coords *dst, BLENDFUNCTION blend )
 {
     char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
     BITMAPINFO *dst_info = (BITMAPINFO *)buffer;
@@ -417,8 +417,8 @@ update_format:
     return ERROR_BAD_FORMAT;
 }
 
-BOOL CDECL nulldrv_GradientFill( PHYSDEV dev, TRIVERTEX *vert_array, ULONG nvert,
-                                 void * grad_array, ULONG ngrad, ULONG mode )
+BOOL nulldrv_GradientFill( PHYSDEV dev, TRIVERTEX *vert_array, ULONG nvert,
+                           void * grad_array, ULONG ngrad, ULONG mode )
 {
     DC *dc = get_nulldrv_dc( dev );
     char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
@@ -502,7 +502,7 @@ done:
     return ret;
 }
 
-COLORREF CDECL nulldrv_GetPixel( PHYSDEV dev, INT x, INT y )
+COLORREF nulldrv_GetPixel( PHYSDEV dev, INT x, INT y )
 {
     DC *dc = get_nulldrv_dc( dev );
     char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
@@ -560,7 +560,7 @@ BOOL WINAPI NtGdiPatBlt( HDC hdc, INT left, INT top, INT width, INT height, DWOR
 
         TRACE("dst %p log=%d,%d %dx%d phys=%d,%d %dx%d vis=%s  rop=%06x\n",
               hdc, dst.log_x, dst.log_y, dst.log_width, dst.log_height,
-              dst.x, dst.y, dst.width, dst.height, wine_dbgstr_rect(&dst.visrect), rop );
+              dst.x, dst.y, dst.width, dst.height, wine_dbgstr_rect(&dst.visrect), (int)rop );
 
         if (!ret)
         {
@@ -627,7 +627,7 @@ BOOL WINAPI NtGdiStretchBlt( HDC hdcDst, INT xDst, INT yDst, INT widthDst, INT h
               hdcSrc, src.log_x, src.log_y, src.log_width, src.log_height,
               src.x, src.y, src.width, src.height, wine_dbgstr_rect(&src.visrect),
               hdcDst, dst.log_x, dst.log_y, dst.log_width, dst.log_height,
-              dst.x, dst.y, dst.width, dst.height, wine_dbgstr_rect(&dst.visrect), rop );
+              dst.x, dst.y, dst.width, dst.height, wine_dbgstr_rect(&dst.visrect), (int)rop );
 
         if (!ret)
         {
@@ -792,7 +792,7 @@ BOOL WINAPI NtGdiMaskBlt( HDC hdcDest, INT nXDest, INT nYDest, INT nWidth, INT n
                             nXSrc, nYSrc, FRGND_ROP3(dwRop), bk_color, 0 );
 
     hbrMask = NtGdiCreatePatternBrushInternal( hbmMask, FALSE, FALSE );
-    hbrDst = NtGdiSelectBrush( hdcDest, get_stock_object(NULL_BRUSH) );
+    hbrDst = NtGdiSelectBrush( hdcDest, GetStockObject(NULL_BRUSH) );
 
     /* make bitmap */
     hDC1 = NtGdiCreateCompatibleDC( hdcDest );
@@ -958,8 +958,9 @@ error:
  */
 BOOL WINAPI NtGdiAlphaBlend( HDC hdcDst, int xDst, int yDst, int widthDst, int heightDst,
                              HDC hdcSrc, int xSrc, int ySrc, int widthSrc, int heightSrc,
-                             BLENDFUNCTION blendFunction, HANDLE xform )
+                             DWORD blend_func, HANDLE xform )
 {
+    BLENDFUNCTION blendFunction = *(BLENDFUNCTION *)&blend_func;
     BOOL ret = FALSE;
     DC *dcDst, *dcSrc;
 
@@ -1000,14 +1001,14 @@ BOOL WINAPI NtGdiAlphaBlend( HDC hdcDst, int xDst, int yDst, int widthDst, int h
               src.height > dcSrc->device_rect.bottom - dcSrc->attr->vis_rect.top - src.y)))
         {
             WARN( "Invalid src coords: (%d,%d), size %dx%d\n", src.x, src.y, src.width, src.height );
-            SetLastError( ERROR_INVALID_PARAMETER );
+            RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
             ret = FALSE;
         }
         else if (dst.log_width < 0 || dst.log_height < 0)
         {
             WARN( "Invalid dst coords: (%d,%d), size %dx%d\n",
                   dst.log_x, dst.log_y, dst.log_width, dst.log_height );
-            SetLastError( ERROR_INVALID_PARAMETER );
+            RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
             ret = FALSE;
         }
         else if (dcSrc == dcDst && src.x + src.width > dst.x && src.x < dst.x + dst.width &&
@@ -1015,7 +1016,7 @@ BOOL WINAPI NtGdiAlphaBlend( HDC hdcDst, int xDst, int yDst, int widthDst, int h
         {
             WARN( "Overlapping coords: (%d,%d), %dx%d and (%d,%d), %dx%d\n",
                   src.x, src.y, src.width, src.height, dst.x, dst.y, dst.width, dst.height );
-            SetLastError( ERROR_INVALID_PARAMETER );
+            RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
             ret = FALSE;
         }
         else if (!ret)
@@ -1069,7 +1070,8 @@ BOOL WINAPI NtGdiPlgBlt( HDC hdcDest, const POINT *lpPoint, HDC hdcSrc, INT nXSr
     }
 
     TRACE("hdcSrc=%p %d,%d,%dx%d -> hdcDest=%p %d,%d,%d,%d,%d,%d\n",
-        hdcSrc, nXSrc, nYSrc, nWidth, nHeight, hdcDest, plg[0].x, plg[0].y, plg[1].x, plg[1].y, plg[2].x, plg[2].y);
+          hdcSrc, nXSrc, nYSrc, nWidth, nHeight, hdcDest,
+          (int)plg[0].x, (int)plg[0].y, (int)plg[1].x, (int)plg[1].y, (int)plg[2].x, (int)plg[2].y);
 
     /* X components */
     xf.eM11 = (plg[1].x*(rect[2].y - rect[0].y) - plg[2].x*(rect[1].y - rect[0].y) - plg[0].x*(rect[2].y - rect[1].y)) / det;

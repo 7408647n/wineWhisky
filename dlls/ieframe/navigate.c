@@ -16,8 +16,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#define NONAMELESSUNION
-
 #include "ieframe.h"
 
 #include "exdispid.h"
@@ -80,7 +78,7 @@ static void dump_BINDINFO(BINDINFO *bi)
             "}\n",
 
             bi->cbSize, debugstr_w(bi->szExtraInfo),
-            bi->stgmedData.tymed, bi->stgmedData.u.hGlobal, bi->stgmedData.pUnkForRelease,
+            bi->stgmedData.tymed, bi->stgmedData.hGlobal, bi->stgmedData.pUnkForRelease,
             bi->grfBindInfoF > BINDINFOF_URLENCODEDEXTRAINFO
                 ? "unknown" : BINDINFOF_str[bi->grfBindInfoF],
             bi->dwBindVerb > BINDVERB_CUSTOM
@@ -132,14 +130,14 @@ HRESULT set_dochost_url(DocHost *This, const WCHAR *url)
     WCHAR *new_url;
 
     if(url) {
-        new_url = heap_strdupW(url);
+        new_url = wcsdup(url);
         if(!new_url)
             return E_OUTOFMEMORY;
     }else {
         new_url = NULL;
     }
 
-    heap_free(This->url);
+    free(This->url);
     This->url = new_url;
 
     This->container_vtbl->set_url(This, This->url);
@@ -215,7 +213,7 @@ static ULONG WINAPI BindStatusCallback_Release(IBindStatusCallback *iface)
             GlobalFree(This->post_data);
         SysFreeString(This->headers);
         SysFreeString(This->url);
-        heap_free(This);
+        free(This);
     }
 
     return ref;
@@ -308,12 +306,13 @@ static HRESULT WINAPI BindStatusCallback_OnProgress(IBindStatusCallback *iface,
     return S_OK;
 }
 
-void handle_navigation_error(DocHost* doc_host, HRESULT hres, BSTR url, IHTMLWindow2 *win2)
+void handle_navigation_error(DocHost* doc_host, HRESULT status_code, BSTR url, IHTMLWindow2 *win2)
 {
     VARIANT var_status_code, var_frame_name, var_url;
     DISPPARAMS dispparams;
     VARIANTARG params[5];
     VARIANT_BOOL cancel = VARIANT_FALSE;
+    HRESULT hres;
 
     dispparams.cArgs = 5;
     dispparams.cNamedArgs = 0;
@@ -326,7 +325,7 @@ void handle_navigation_error(DocHost* doc_host, HRESULT hres, BSTR url, IHTMLWin
     V_VT(params+1) = VT_VARIANT|VT_BYREF;
     V_VARIANTREF(params+1) = &var_status_code;
     V_VT(&var_status_code) = VT_I4;
-    V_I4(&var_status_code) = hres;
+    V_I4(&var_status_code) = status_code;
 
     V_VT(params+2) = VT_VARIANT|VT_BYREF;
     V_VARIANTREF(params+2) = &var_frame_name;
@@ -349,8 +348,48 @@ void handle_navigation_error(DocHost* doc_host, HRESULT hres, BSTR url, IHTMLWin
     call_sink(doc_host->cps.wbe2, DISPID_NAVIGATEERROR, &dispparams);
     SysFreeString(V_BSTR(&var_frame_name));
 
-    if(!cancel)
-        FIXME("Navigate to error page\n");
+    if(!cancel) {
+        IHTMLPrivateWindow *priv_window;
+        IHTMLWindow2 *tmp;
+
+        if(win2)
+            hres = IHTMLWindow2_QueryInterface(win2, &IID_IHTMLPrivateWindow, (void**)&priv_window);
+        else {
+            hres = get_window(doc_host, &tmp);
+            if(SUCCEEDED(hres)) {
+                if(!tmp)
+                    hres = E_UNEXPECTED;
+                else {
+                    hres = IHTMLWindow2_QueryInterface(tmp, &IID_IHTMLPrivateWindow, (void**)&priv_window);
+                    IHTMLWindow2_Release(tmp);
+                }
+            }
+        }
+        if(SUCCEEDED(hres)) {
+            /* Error page navigation URL is a local resource (varies on native, also depending on error),
+             * with the fragment being the original URL of the page that failed to load. We add a query
+             * with the error code so the generic error page can display the actual error code there. */
+            WCHAR buf[32], sysdirbuf[MAX_PATH];
+            BSTR nav_url;
+            UINT len;
+
+            if(SUCCEEDED(status_code))
+                len = swprintf(buf, ARRAY_SIZE(buf), L"ERROR.HTM?HTTP %u", status_code);
+            else
+                len = swprintf(buf, ARRAY_SIZE(buf), L"ERROR.HTM?0x%08x", status_code);
+
+            len = 6 /* res:// */ + GetSystemDirectoryW(sysdirbuf, ARRAY_SIZE(sysdirbuf)) +
+                  ARRAY_SIZE(L"\\shdoclc.dll/")-1 + len + 1 /* # */ + wcslen(url);
+
+            nav_url = SysAllocStringLen(NULL, len);
+            if(nav_url) {
+                swprintf(nav_url, len + 1, L"res://%s\\shdoclc.dll/%s#%s", sysdirbuf, buf, url);
+                IHTMLPrivateWindow_SuperNavigate(priv_window, nav_url, NULL, NULL, NULL, NULL, NULL, 2);
+                SysFreeString(nav_url);
+            }
+            IHTMLPrivateWindow_Release(priv_window);
+        }
+    }
 }
 
 static HRESULT WINAPI BindStatusCallback_OnStopBinding(IBindStatusCallback *iface,
@@ -392,7 +431,7 @@ static HRESULT WINAPI BindStatusCallback_GetBindInfo(IBindStatusCallback *iface,
         pbindinfo->dwBindVerb = BINDVERB_POST;
 
         pbindinfo->stgmedData.tymed = TYMED_HGLOBAL;
-        pbindinfo->stgmedData.u.hGlobal = This->post_data;
+        pbindinfo->stgmedData.hGlobal = This->post_data;
         pbindinfo->cbstgmedData = This->post_data_len;
         pbindinfo->stgmedData.pUnkForRelease = (IUnknown*)&This->IBindStatusCallback_iface;
         IBindStatusCallback_AddRef(&This->IBindStatusCallback_iface);
@@ -546,7 +585,7 @@ static const IHttpSecurityVtbl HttpSecurityVtbl = {
 static BindStatusCallback *create_callback(DocHost *doc_host, LPCWSTR url, PBYTE post_data,
         ULONG post_data_len, LPCWSTR headers)
 {
-    BindStatusCallback *ret = heap_alloc(sizeof(BindStatusCallback));
+    BindStatusCallback *ret = malloc(sizeof(BindStatusCallback));
 
     ret->IBindStatusCallback_iface.lpVtbl = &BindStatusCallbackVtbl;
     ret->IHttpNegotiate_iface.lpVtbl      = &HttpNegotiateVtbl;
@@ -780,7 +819,7 @@ static void doc_navigate_task_destr(task_header_t *t)
     SysFreeString(task->headers);
     if(task->post_data)
         SafeArrayDestroy(task->post_data);
-    heap_free(task);
+    free(task);
 }
 
 static void doc_navigate_proc(DocHost *This, task_header_t *t)
@@ -819,7 +858,7 @@ static HRESULT async_doc_navigate(DocHost *This, LPCWSTR url, LPCWSTR headers, P
 
     TRACE("%s\n", debugstr_w(url));
 
-    task = heap_alloc_zero(sizeof(*task));
+    task = calloc(1, sizeof(*task));
     if(!task)
         return E_OUTOFMEMORY;
 
@@ -920,7 +959,7 @@ static void navigate_bsc_task_destr(task_header_t *t)
     task_navigate_bsc_t *task = (task_navigate_bsc_t*)t;
 
     IBindStatusCallback_Release(&task->bsc->IBindStatusCallback_iface);
-    heap_free(task);
+    free(task);
 }
 
 static void navigate_bsc_proc(DocHost *This, task_header_t *t)
@@ -993,7 +1032,7 @@ HRESULT navigate_url(DocHost *This, LPCWSTR url, const VARIANT *Flags,
     }else {
         task_navigate_bsc_t *task;
 
-        task = heap_alloc(sizeof(*task));
+        task = malloc(sizeof(*task));
         task->bsc = create_callback(This, url, post_data, post_data_len, headers);
         push_dochost_task(This, &task->header, navigate_bsc_proc, navigate_bsc_task_destr, This->url == NULL);
     }
@@ -1040,7 +1079,7 @@ static HRESULT navigate_hlink(DocHost *This, IMoniker *mon, IBindCtx *bindctx,
     if(bindinfo.dwBindVerb == BINDVERB_POST) {
         post_data_len = bindinfo.cbstgmedData;
         if(post_data_len)
-            post_data = bindinfo.stgmedData.u.hGlobal;
+            post_data = bindinfo.stgmedData.hGlobal;
     }
 
     if(This->doc_navigate) {

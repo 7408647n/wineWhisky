@@ -18,8 +18,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#define NONAMELESSSTRUCT
-#define NONAMELESSUNION
 #include "ntdll_test.h"
 
 static NTSTATUS (WINAPI *pTpAllocCleanupGroup)(TP_CLEANUP_GROUP **);
@@ -33,15 +31,17 @@ static VOID     (WINAPI *pTpCallbackReleaseSemaphoreOnCompletion)(TP_CALLBACK_IN
 static void     (WINAPI *pTpCancelAsyncIoOperation)(TP_IO *);
 static VOID     (WINAPI *pTpDisassociateCallback)(TP_CALLBACK_INSTANCE *);
 static BOOL     (WINAPI *pTpIsTimerSet)(TP_TIMER *);
-static VOID     (WINAPI *pTpReleaseWait)(TP_WAIT *);
 static VOID     (WINAPI *pTpPostWork)(TP_WORK *);
+static NTSTATUS (WINAPI *pTpQueryPoolStackInformation)(TP_POOL *,TP_POOL_STACK_INFORMATION *);
 static VOID     (WINAPI *pTpReleaseCleanupGroup)(TP_CLEANUP_GROUP *);
 static VOID     (WINAPI *pTpReleaseCleanupGroupMembers)(TP_CLEANUP_GROUP *,BOOL,PVOID);
 static void     (WINAPI *pTpReleaseIoCompletion)(TP_IO *);
 static VOID     (WINAPI *pTpReleasePool)(TP_POOL *);
 static VOID     (WINAPI *pTpReleaseTimer)(TP_TIMER *);
+static VOID     (WINAPI *pTpReleaseWait)(TP_WAIT *);
 static VOID     (WINAPI *pTpReleaseWork)(TP_WORK *);
 static VOID     (WINAPI *pTpSetPoolMaxThreads)(TP_POOL *,DWORD);
+static NTSTATUS (WINAPI *pTpSetPoolStackInformation)(TP_POOL *,TP_POOL_STACK_INFORMATION *);
 static VOID     (WINAPI *pTpSetTimer)(TP_TIMER *,LARGE_INTEGER *,LONG,LONG);
 static VOID     (WINAPI *pTpSetWait)(TP_WAIT *,HANDLE,LARGE_INTEGER *);
 static NTSTATUS (WINAPI *pTpSimpleTryPost)(PTP_SIMPLE_CALLBACK,PVOID,TP_CALLBACK_ENVIRON *);
@@ -80,6 +80,7 @@ static BOOL init_threadpool(void)
     GET_PROC(TpDisassociateCallback);
     GET_PROC(TpIsTimerSet);
     GET_PROC(TpPostWork);
+    GET_PROC(TpQueryPoolStackInformation);
     GET_PROC(TpReleaseCleanupGroup);
     GET_PROC(TpReleaseCleanupGroupMembers);
     GET_PROC(TpReleaseIoCompletion);
@@ -88,6 +89,7 @@ static BOOL init_threadpool(void)
     GET_PROC(TpReleaseWait);
     GET_PROC(TpReleaseWork);
     GET_PROC(TpSetPoolMaxThreads);
+    GET_PROC(TpSetPoolStackInformation);
     GET_PROC(TpSetTimer);
     GET_PROC(TpSetWait);
     GET_PROC(TpSimpleTryPost);
@@ -575,6 +577,8 @@ static void CALLBACK simple2_cb(TP_CALLBACK_INSTANCE *instance, void *userdata)
 
 static void test_tp_simple(void)
 {
+    IMAGE_NT_HEADERS *nt = RtlImageNtHeader( NtCurrentTeb()->Peb->ImageBaseAddress );
+    TP_POOL_STACK_INFORMATION stack_info;
     TP_CALLBACK_ENVIRON environment;
     TP_CALLBACK_ENVIRON_V3 environment3;
     TP_CLEANUP_GROUP *group;
@@ -677,6 +681,22 @@ static void test_tp_simple(void)
     }
     pTpReleaseCleanupGroupMembers(group, TRUE, NULL);
     ok(userdata < 100, "expected userdata < 100, got %lu\n", userdata);
+
+    /* test querying and setting the stack size */
+    status = pTpQueryPoolStackInformation(pool, &stack_info);
+    ok(!status, "TpQueryPoolStackInformation failed: %lx\n", status);
+    ok(stack_info.StackReserve == nt->OptionalHeader.SizeOfStackReserve, "expected default StackReserve, got %Ix\n", stack_info.StackReserve);
+    ok(stack_info.StackCommit == nt->OptionalHeader.SizeOfStackCommit, "expected default StackCommit, got %Ix\n", stack_info.StackCommit);
+
+    /* threadpool does not validate the stack size values */
+    stack_info.StackReserve = stack_info.StackCommit = 1;
+    status = pTpSetPoolStackInformation(pool, &stack_info);
+    ok(!status, "TpSetPoolStackInformation failed: %lx\n", status);
+
+    status = pTpQueryPoolStackInformation(pool, &stack_info);
+    ok(!status, "TpQueryPoolStackInformation failed: %lx\n", status);
+    ok(stack_info.StackReserve == 1, "expected 1 byte StackReserve, got %ld\n", (ULONG)stack_info.StackReserve);
+    ok(stack_info.StackCommit == 1, "expected 1 byte StackCommit, got %ld\n", (ULONG)stack_info.StackCommit);
 
     /* cleanup */
     pTpReleaseCleanupGroup(group);
@@ -1163,11 +1183,6 @@ static void CALLBACK instance_semaphore_completion_cb(TP_CALLBACK_INSTANCE *inst
 static void CALLBACK instance_finalization_cb(TP_CALLBACK_INSTANCE *instance, void *userdata)
 {
     HANDLE *semaphores = userdata;
-    DWORD result;
-
-    Sleep(50);
-    result = WaitForSingleObject(semaphores[0], 100);
-    ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ReleaseSemaphore(semaphores[1], 1, NULL);
 }
 
@@ -1882,6 +1897,7 @@ static void CALLBACK multi_wait_cb(TP_CALLBACK_INSTANCE *instance, void *userdat
 
 static void test_tp_multi_wait(void)
 {
+    TP_POOL_STACK_INFORMATION stack_info;
     TP_CALLBACK_ENVIRON environment;
     HANDLE semaphores[512];
     TP_WAIT *waits[512];
@@ -1901,6 +1917,11 @@ static void test_tp_multi_wait(void)
     status = pTpAllocPool(&pool, NULL);
     ok(!status, "TpAllocPool failed with status %lx\n", status);
     ok(pool != NULL, "expected pool != NULL\n");
+    /* many threads -> use the smallest stack possible */
+    stack_info.StackReserve = 256 * 1024;
+    stack_info.StackCommit = 4 * 1024;
+    status = pTpSetPoolStackInformation(pool, &stack_info);
+    ok(!status, "TpQueryPoolStackInformation failed: %lx\n", status);
 
     memset(&environment, 0, sizeof(environment));
     environment.Version = 1;
@@ -1926,7 +1947,7 @@ static void test_tp_multi_wait(void)
         multi_wait_info.result = 0;
         ReleaseSemaphore(semaphores[i], 1, NULL);
 
-        result = WaitForSingleObject(semaphore, 100);
+        result = WaitForSingleObject(semaphore, 2000);
         ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
         ok(multi_wait_info.result == i, "expected result %d, got %lu\n", i, multi_wait_info.result);
 
@@ -1939,7 +1960,7 @@ static void test_tp_multi_wait(void)
         multi_wait_info.result = 0;
         ReleaseSemaphore(semaphores[i], 1, NULL);
 
-        result = WaitForSingleObject(semaphore, 100);
+        result = WaitForSingleObject(semaphore, 2000);
         ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
         ok(multi_wait_info.result == i, "expected result %d, got %lu\n", i, multi_wait_info.result);
 
@@ -1956,7 +1977,7 @@ static void test_tp_multi_wait(void)
 
     for (i = 0; i < ARRAY_SIZE(semaphores); i++)
     {
-        result = WaitForSingleObject(semaphore, 150);
+        result = WaitForSingleObject(semaphore, 2000);
         ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
     }
 
@@ -1995,7 +2016,7 @@ static void CALLBACK io_cb(TP_CALLBACK_INSTANCE *instance, void *userdata,
     struct io_cb_ctx *ctx = userdata;
     ++ctx->count;
     ctx->ovl = cvalue;
-    ctx->ret = iosb->u.Status;
+    ctx->ret = iosb->Status;
     ctx->length = iosb->Information;
     ctx->io = io;
 }

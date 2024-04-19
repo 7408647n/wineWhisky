@@ -23,9 +23,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(quartz);
 
-static unixlib_handle_t v4l_handle;
-
-#define V4L_CALL( func, params ) __wine_unix_call( v4l_handle, unix_ ## func, params )
+#define V4L_CALL( func, params ) WINE_UNIX_CALL( unix_ ## func, params )
 
 struct vfw_capture
 {
@@ -860,8 +858,7 @@ static const IAMVideoControlVtbl IAMVideoControl_VTable =
 
 static BOOL WINAPI load_capture_funcs(INIT_ONCE *once, void *param, void **context)
 {
-    NtQueryVirtualMemory( GetCurrentProcess(), qcap_instance, MemoryWineUnixFuncs,
-                          &v4l_handle, sizeof(v4l_handle), NULL );
+    __wine_init_unix_call();
     return TRUE;
 }
 
@@ -871,7 +868,7 @@ HRESULT vfw_capture_create(IUnknown *outer, IUnknown **out)
 {
     struct vfw_capture *object;
 
-    if (!InitOnceExecuteOnce(&init_once, load_capture_funcs, NULL, NULL) || !v4l_handle)
+    if (!InitOnceExecuteOnce(&init_once, load_capture_funcs, NULL, NULL) || !__wine_unixlib_handle)
         return E_FAIL;
 
     if (!(object = calloc(1, sizeof(*object))))
@@ -891,7 +888,7 @@ HRESULT vfw_capture_create(IUnknown *outer, IUnknown **out)
 
     object->state = State_Stopped;
     InitializeConditionVariable(&object->state_cv);
-    InitializeCriticalSection(&object->state_cs);
+    InitializeCriticalSectionEx(&object->state_cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
     object->state_cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": vfw_capture.state_cs");
 
     TRACE("Created VFW capture filter %p.\n", object);

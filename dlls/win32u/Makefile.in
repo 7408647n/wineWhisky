@@ -1,14 +1,14 @@
-EXTRADEFS = -DWINE_NO_LONG_TYPES
+EXTRADEFS = -D_WIN32U_
 MODULE    = win32u.dll
+UNIXLIB   = win32u.so
 IMPORTLIB = win32u
-EXTRAINCL = $(FREETYPE_CFLAGS) $(FONTCONFIG_CFLAGS)
-EXTRALIBS = $(CARBON_LIBS) $(APPKIT_LIBS) $(PTHREAD_LIBS) -lm
-IMPORTS   = ntdll winecrt0 kernel32
+IMPORTS   = ntdll winecrt0
+UNIX_CFLAGS  = $(FREETYPE_CFLAGS) $(FONTCONFIG_CFLAGS)
+UNIX_LIBS    = $(CARBON_LIBS) $(APPKIT_LIBS) $(PTHREAD_LIBS) -lm
 
-EXTRADLLFLAGS = -nodefaultlibs -Wb,--syscall-table,1 -mcygwin
+EXTRADLLFLAGS = -nodefaultlibs
 
-C_SRCS = \
-	32on64hack.c \
+SOURCES = \
 	bitblt.c \
 	bitmap.c \
 	brush.c \
@@ -16,6 +16,7 @@ C_SRCS = \
 	clipboard.c \
 	clipping.c \
 	cursoricon.c \
+	d3dkmt.c \
 	dc.c \
 	dce.c \
 	defwnd.c \
@@ -32,6 +33,7 @@ C_SRCS = \
 	freetype.c \
 	gdiobj.c \
 	hook.c \
+	imm.c \
 	input.c \
 	main.c \
 	mapping.c \
@@ -43,9 +45,13 @@ C_SRCS = \
 	path.c \
 	pen.c \
 	printdrv.c \
+	rawinput.c \
 	region.c \
+	scroll.c \
 	spy.c \
+	syscall.c \
 	sysparams.c \
+	systray.c \
 	vertical.c \
 	vulkan.c \
 	window.c \

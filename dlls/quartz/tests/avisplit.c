@@ -1215,6 +1215,7 @@ static void test_connect_pin(void)
     ok(hr == S_OK, "Got hr %#x.\n", hr);
     ok(compare_media_types(&mt, &req_mt), "Media types didn't match.\n");
     ok(compare_media_types(&testsource.source.pin.mt, &req_mt), "Media types didn't match.\n");
+    FreeMediaType(&mt);
 
     hr = IMediaControl_Pause(control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);
@@ -1263,6 +1264,7 @@ static void test_connect_pin(void)
     ok(hr == S_OK, "Got hr %#x.\n", hr);
     ok(compare_media_types(&mt, &req_mt), "Media types didn't match.\n");
     ok(compare_media_types(&testsink.sink.pin.mt, &req_mt), "Media types didn't match.\n");
+    FreeMediaType(&mt);
 
     hr = IMediaControl_Pause(control);
     ok(hr == S_OK, "Got hr %#x.\n", hr);

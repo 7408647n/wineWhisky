@@ -82,11 +82,21 @@ struct alsa_stream
     pthread_mutex_t lock;
 };
 
-#define                     EXTRA_SAFE_RT   40000
+#define EXTRA_SAFE_RT 40000
+
+static const REFERENCE_TIME def_period = 100000;
+static const REFERENCE_TIME min_period = 50000;
 
 static const WCHAR drv_keyW[] = {'S','o','f','t','w','a','r','e','\\',
     'W','i','n','e','\\','D','r','i','v','e','r','s','\\',
     'w','i','n','e','a','l','s','a','.','d','r','v'};
+
+static ULONG_PTR zero_bits = 0;
+
+static NTSTATUS alsa_not_implemented(void *args)
+{
+    return STATUS_SUCCESS;
+}
 
 static inline void ascii_to_unicode( WCHAR *dst, const char *src, size_t len )
 {
@@ -123,10 +133,10 @@ static HKEY open_hkcu(void)
 
     sid = ((TOKEN_USER *)sid_data)->User.Sid;
     len = sprintf( buffer, "\\Registry\\User\\S-%u-%u", sid->Revision,
-                 MAKELONG( MAKEWORD( sid->IdentifierAuthority.Value[5], sid->IdentifierAuthority.Value[4] ),
-                           MAKEWORD( sid->IdentifierAuthority.Value[3], sid->IdentifierAuthority.Value[2] )));
+                   (unsigned)MAKELONG( MAKEWORD( sid->IdentifierAuthority.Value[5], sid->IdentifierAuthority.Value[4] ),
+                                       MAKEWORD( sid->IdentifierAuthority.Value[3], sid->IdentifierAuthority.Value[2] )));
     for (i = 0; i < sid->SubAuthorityCount; i++)
-        len += sprintf( buffer + len, "-%u", sid->SubAuthority[i] );
+        len += sprintf( buffer + len, "-%u", (unsigned)sid->SubAuthority[i] );
     ascii_to_unicode( bufferW, buffer, len + 1 );
 
     return reg_open_key( NULL, bufferW, len * sizeof(WCHAR) );
@@ -142,7 +152,7 @@ static HKEY reg_open_hkcu_key( const WCHAR *name, ULONG name_len )
     return key;
 }
 
-ULONG reg_query_value( HKEY hkey, const WCHAR *name,
+static ULONG reg_query_value( HKEY hkey, const WCHAR *name,
                        KEY_VALUE_PARTIAL_INFORMATION *info, ULONG size )
 {
     unsigned int name_size = name ? wcslen( name ) * sizeof(WCHAR) : 0;
@@ -468,7 +478,28 @@ static WCHAR *alsa_get_card_name(int card)
     return ret;
 }
 
-static NTSTATUS get_endpoint_ids(void *args)
+static NTSTATUS alsa_process_attach(void *args)
+{
+#ifdef _WIN64
+    if (NtCurrentTeb()->WowTebOffset)
+    {
+        SYSTEM_BASIC_INFORMATION info;
+
+        NtQuerySystemInformation(SystemEmulationBasicInformation, &info, sizeof(info), NULL);
+        zero_bits = (ULONG_PTR)info.HighestUserAddress | 0x7fffffff;
+    }
+#endif
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS alsa_main_loop(void *args)
+{
+    struct main_loop_params *params = args;
+    NtSetEvent(params->event, NULL);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS alsa_get_endpoint_ids(void *args)
 {
     static const WCHAR defaultW[] = {'d','e','f','a','u','l','t',0};
     struct get_endpoint_ids_params *params = args;
@@ -637,7 +668,7 @@ static snd_pcm_format_t alsa_format(const WAVEFORMATEX *fmt)
     return format;
 }
 
-static int alsa_channel_index(DWORD flag)
+static int alsa_channel_index(UINT flag)
 {
     switch(flag){
     case SPEAKER_FRONT_LEFT:
@@ -702,7 +733,7 @@ static HRESULT map_channels(EDataFlow flow, const WAVEFORMATEX *fmt, int *alsa_c
 
     if(flow != eCapture && (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE || fmt->nChannels > 2) ){
         WAVEFORMATEXTENSIBLE *fmtex = (void*)fmt;
-        DWORD mask, flag = SPEAKER_FRONT_LEFT;
+        UINT mask, flag = SPEAKER_FRONT_LEFT;
         UINT i = 0;
 
         if(fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
@@ -766,25 +797,48 @@ static void silence_buffer(struct alsa_stream *stream, BYTE *buffer, UINT32 fram
         memset(buffer, 0, frames * stream->fmt->nBlockAlign);
 }
 
-static ULONG_PTR zero_bits(void)
-{
-#ifdef _WIN64
-    return !NtCurrentTeb()->WowTebOffset ? 0 : 0x7fffffff;
-#else
-    return 0;
-#endif
-}
-
-static NTSTATUS create_stream(void *args)
+static NTSTATUS alsa_create_stream(void *args)
 {
     struct create_stream_params *params = args;
     struct alsa_stream *stream;
     snd_pcm_sw_params_t *sw_params = NULL;
     snd_pcm_format_t format;
     unsigned int rate, alsa_period_us, i;
-    WAVEFORMATEXTENSIBLE *fmtex;
+    WAVEFORMATEXTENSIBLE *fmtex = (WAVEFORMATEXTENSIBLE *)params->fmt;
     int err;
     SIZE_T size;
+
+    params->result = S_OK;
+
+    if (params->share == AUDCLNT_SHAREMODE_SHARED) {
+        params->period = def_period;
+        if (params->duration < 3 * params->period)
+            params->duration = 3 * params->period;
+    } else {
+        if (fmtex->Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+           (fmtex->dwChannelMask == 0 || fmtex->dwChannelMask & SPEAKER_RESERVED))
+            params->result = AUDCLNT_E_UNSUPPORTED_FORMAT;
+        else {
+            if (!params->period)
+                params->period = def_period;
+            if (params->period < min_period || params->period > 5000000)
+                params->result = AUDCLNT_E_INVALID_DEVICE_PERIOD;
+            else if (params->duration > 20000000) /* The smaller the period, the lower this limit. */
+                params->result = AUDCLNT_E_BUFFER_SIZE_ERROR;
+            else if (params->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) {
+                if (params->duration != params->period)
+                    params->result = AUDCLNT_E_BUFDURATION_PERIOD_NOT_EQUAL;
+
+                FIXME("EXCLUSIVE mode with EVENTCALLBACK\n");
+
+                params->result = AUDCLNT_E_DEVICE_IN_USE;
+            } else if (params->duration < 8 * params->period)
+                params->duration = 8 * params->period; /* May grow above 2s. */
+        }
+    }
+
+    if (FAILED(params->result))
+        return STATUS_SUCCESS;
 
     stream = calloc(1, sizeof(*stream));
     if(!stream){
@@ -792,7 +846,7 @@ static NTSTATUS create_stream(void *args)
         return STATUS_SUCCESS;
     }
 
-    params->result = alsa_open_device(params->alsa_name, params->flow, &stream->pcm_handle, &stream->hw_params);
+    params->result = alsa_open_device(params->device, params->flow, &stream->pcm_handle, &stream->hw_params);
     if(FAILED(params->result)){
         free(stream);
         return STATUS_SUCCESS;
@@ -957,7 +1011,7 @@ static NTSTATUS create_stream(void *args)
     stream->fmt = &fmtex->Format;
 
     size = stream->bufsize_frames * params->fmt->nBlockAlign;
-    if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, zero_bits(), &size,
+    if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, zero_bits, &size,
                                MEM_COMMIT, PAGE_READWRITE)){
         params->result = E_OUTOFMEMORY;
         goto exit;
@@ -1003,13 +1057,14 @@ exit:
         free(stream->vols);
         free(stream);
     }else{
+        *params->channel_count = params->fmt->nChannels;
         *params->stream = (stream_handle)(UINT_PTR)stream;
     }
 
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS release_stream(void *args)
+static NTSTATUS alsa_release_stream(void *args)
 {
     struct release_stream_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1505,7 +1560,7 @@ static int alsa_rewind_best_effort(struct alsa_stream *stream)
     return len;
 }
 
-static NTSTATUS start(void *args)
+static NTSTATUS alsa_start(void *args)
 {
     struct start_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1551,7 +1606,7 @@ static NTSTATUS start(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS stop(void *args)
+static NTSTATUS alsa_stop(void *args)
 {
     struct stop_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1569,7 +1624,7 @@ static NTSTATUS stop(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS reset(void *args)
+static NTSTATUS alsa_reset(void *args)
 {
     struct reset_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1604,7 +1659,7 @@ static NTSTATUS reset(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS timer_loop(void *args)
+static NTSTATUS alsa_timer_loop(void *args)
 {
     struct timer_loop_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1642,7 +1697,7 @@ static NTSTATUS timer_loop(void *args)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS get_render_buffer(void *args)
+static NTSTATUS alsa_get_render_buffer(void *args)
 {
     struct get_render_buffer_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1670,7 +1725,7 @@ static NTSTATUS get_render_buffer(void *args)
                 stream->tmp_buffer = NULL;
             }
             size = frames * stream->fmt->nBlockAlign;
-            if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits(), &size,
+            if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits, &size,
                                        MEM_COMMIT, PAGE_READWRITE)){
                 stream->tmp_buffer_frames = 0;
                 return alsa_unlock_result(stream, &params->result, E_OUTOFMEMORY);
@@ -1706,7 +1761,7 @@ static void alsa_wrap_buffer(struct alsa_stream *stream, BYTE *buffer, UINT32 wr
     }
 }
 
-static NTSTATUS release_render_buffer(void *args)
+static NTSTATUS alsa_release_render_buffer(void *args)
 {
     struct release_render_buffer_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1746,7 +1801,7 @@ static NTSTATUS release_render_buffer(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS get_capture_buffer(void *args)
+static NTSTATUS alsa_get_capture_buffer(void *args)
 {
     struct get_capture_buffer_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1773,7 +1828,7 @@ static NTSTATUS get_capture_buffer(void *args)
                 stream->tmp_buffer = NULL;
             }
             size = *frames * stream->fmt->nBlockAlign;
-            if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits(), &size,
+            if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits, &size,
                                        MEM_COMMIT, PAGE_READWRITE)){
                 stream->tmp_buffer_frames = 0;
                 return alsa_unlock_result(stream, &params->result, E_OUTOFMEMORY);
@@ -1807,7 +1862,7 @@ static NTSTATUS get_capture_buffer(void *args)
     return alsa_unlock_result(stream, &params->result, *frames ? S_OK : AUDCLNT_S_BUFFER_EMPTY);
 }
 
-static NTSTATUS release_capture_buffer(void *args)
+static NTSTATUS alsa_release_capture_buffer(void *args)
 {
     struct release_capture_buffer_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -1835,7 +1890,7 @@ static NTSTATUS release_capture_buffer(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS is_format_supported(void *args)
+static NTSTATUS alsa_is_format_supported(void *args)
 {
     struct is_format_supported_params *params = args;
     const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)params->fmt_in;
@@ -1869,7 +1924,7 @@ static NTSTATUS is_format_supported(void *args)
         return STATUS_SUCCESS;
     }
 
-    params->result = alsa_open_device(params->alsa_name, params->flow, &pcm_handle, &hw_params);
+    params->result = alsa_open_device(params->device, params->flow, &pcm_handle, &hw_params);
     if(FAILED(params->result))
         return STATUS_SUCCESS;
 
@@ -1959,7 +2014,7 @@ exit:
     if(params->result == S_FALSE && !params->fmt_out)
         params->result = AUDCLNT_E_UNSUPPORTED_FORMAT;
 
-    if(params->result == S_FALSE && params->fmt_out) {
+    if(params->result == S_FALSE) {
         closest->Format.nBlockAlign = closest->Format.nChannels * closest->Format.wBitsPerSample / 8;
         closest->Format.nAvgBytesPerSec = closest->Format.nBlockAlign * closest->Format.nSamplesPerSec;
         if(closest->Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE)
@@ -1974,7 +2029,7 @@ exit:
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS get_mix_format(void *args)
+static NTSTATUS alsa_get_mix_format(void *args)
 {
     struct get_mix_format_params *params = args;
     WAVEFORMATEXTENSIBLE *fmt = params->fmt;
@@ -1984,7 +2039,7 @@ static NTSTATUS get_mix_format(void *args)
     unsigned int max_rate, max_channels;
     int err;
 
-    params->result = alsa_open_device(params->alsa_name, params->flow, &pcm_handle, &hw_params);
+    params->result = alsa_open_device(params->device, params->flow, &pcm_handle, &hw_params);
     if(FAILED(params->result))
         return STATUS_SUCCESS;
 
@@ -2091,19 +2146,33 @@ exit:
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS get_buffer_size(void *args)
+static NTSTATUS alsa_get_device_period(void *args)
+{
+    struct get_device_period_params *params = args;
+
+    if (params->def_period)
+        *params->def_period = def_period;
+    if (params->min_period)
+        *params->min_period = def_period;
+
+    params->result = S_OK;
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS alsa_get_buffer_size(void *args)
 {
     struct get_buffer_size_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
 
     alsa_lock(stream);
 
-    *params->size = stream->bufsize_frames;
+    *params->frames = stream->bufsize_frames;
 
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS get_latency(void *args)
+static NTSTATUS alsa_get_latency(void *args)
 {
     struct get_latency_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -2124,7 +2193,7 @@ static NTSTATUS get_latency(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS get_current_padding(void *args)
+static NTSTATUS alsa_get_current_padding(void *args)
 {
     struct get_current_padding_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -2137,7 +2206,7 @@ static NTSTATUS get_current_padding(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS get_next_packet_size(void *args)
+static NTSTATUS alsa_get_next_packet_size(void *args)
 {
     struct get_next_packet_size_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -2149,7 +2218,7 @@ static NTSTATUS get_next_packet_size(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS get_frequency(void *args)
+static NTSTATUS alsa_get_frequency(void *args)
 {
     struct get_frequency_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -2165,12 +2234,18 @@ static NTSTATUS get_frequency(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS get_position(void *args)
+static NTSTATUS alsa_get_position(void *args)
 {
     struct get_position_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
     UINT64 position;
     snd_pcm_state_t alsa_state;
+
+    if (params->device) {
+        FIXME("Device position reporting not implemented\n");
+        params->result = E_NOTIMPL;
+        return STATUS_SUCCESS;
+    }
 
     alsa_lock(stream);
 
@@ -2217,7 +2292,7 @@ static NTSTATUS get_position(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS set_volumes(void *args)
+static NTSTATUS alsa_set_volumes(void *args)
 {
     struct set_volumes_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -2229,7 +2304,7 @@ static NTSTATUS set_volumes(void *args)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS set_event_handle(void *args)
+static NTSTATUS alsa_set_event_handle(void *args)
 {
     struct set_event_handle_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -2249,7 +2324,7 @@ static NTSTATUS set_event_handle(void *args)
     return alsa_unlock_result(stream, &params->result, S_OK);
 }
 
-static NTSTATUS is_started(void *args)
+static NTSTATUS alsa_is_started(void *args)
 {
     struct is_started_params *params = args;
     struct alsa_stream *stream = handle_get_stream(params->stream);
@@ -2304,10 +2379,10 @@ enum AudioDeviceConnectionType {
     AudioDeviceConnectionType_USB
 };
 
-static NTSTATUS get_prop_value(void *args)
+static NTSTATUS alsa_get_prop_value(void *args)
 {
     struct get_prop_value_params *params = args;
-    const char *name = params->alsa_name;
+    const char *name = params->device;
     EDataFlow flow = params->flow;
     const GUID *guid = params->guid;
     const PROPERTYKEY *prop = params->prop;
@@ -2318,21 +2393,21 @@ static NTSTATUS get_prop_value(void *args)
 
     if(IsEqualPropertyKey(*prop, devicepath_key))
     {
+        enum AudioDeviceConnectionType connection = AudioDeviceConnectionType_Unknown;
+        USHORT vendor_id = 0, product_id = 0;
         char uevent[MAX_PATH];
-        FILE *fuevent;
+        FILE *fuevent = NULL;
         int card, device;
+        UINT serial_number;
+        char buf[128];
+        int len;
 
-        /* only implemented for identifiable devices, i.e. not "default" */
-        if(!sscanf(name, "plughw:%u,%u", &card, &device)){
-            params->result = E_NOTIMPL;
-            return STATUS_SUCCESS;
+        if(sscanf(name, "plughw:%u,%u", &card, &device)){
+            sprintf(uevent, "/sys/class/sound/card%u/device/uevent", card);
+            fuevent = fopen(uevent, "r");
         }
-        sprintf(uevent, "/sys/class/sound/card%u/device/uevent", card);
-        fuevent = fopen(uevent, "r");
 
         if(fuevent){
-            enum AudioDeviceConnectionType connection = AudioDeviceConnectionType_Unknown;
-            USHORT vendor_id = 0, product_id = 0;
             char line[256];
 
             while (fgets(line, sizeof(line), fuevent)) {
@@ -2365,41 +2440,33 @@ static NTSTATUS get_prop_value(void *args)
             }
 
             fclose(fuevent);
+        }
 
-            if(connection == AudioDeviceConnectionType_USB || connection == AudioDeviceConnectionType_PCI){
-                UINT serial_number;
-                char buf[128];
-                int len;
+        /* As hardly any audio devices have serial numbers, Windows instead
+        appears to use a persistent random number. We emulate this here
+        by instead using the last 8 hex digits of the GUID. */
+        serial_number = (guid->Data4[4] << 24) | (guid->Data4[5] << 16) | (guid->Data4[6] << 8) | guid->Data4[7];
 
-                /* As hardly any audio devices have serial numbers, Windows instead
-                appears to use a persistent random number. We emulate this here
-                by instead using the last 8 hex digits of the GUID. */
-                serial_number = (guid->Data4[4] << 24) | (guid->Data4[5] << 16) | (guid->Data4[6] << 8) | guid->Data4[7];
+        if(connection == AudioDeviceConnectionType_USB)
+            sprintf(buf, "{1}.USB\\VID_%04X&PID_%04X\\%u&%08X",
+                    vendor_id, product_id, device, serial_number);
+        else if (connection == AudioDeviceConnectionType_PCI)
+            sprintf(buf, "{1}.HDAUDIO\\FUNC_01&VEN_%04X&DEV_%04X\\%u&%08X",
+                    vendor_id, product_id, device, serial_number);
+        else
+            sprintf(buf, "{1}.ROOT\\MEDIA\\%04u", serial_number & 0x1FF);
 
-                if(connection == AudioDeviceConnectionType_USB)
-                    sprintf(buf, "{1}.USB\\VID_%04X&PID_%04X\\%u&%08X",
-                            vendor_id, product_id, device, serial_number);
-                else /* AudioDeviceConnectionType_PCI */
-                    sprintf(buf, "{1}.HDAUDIO\\FUNC_01&VEN_%04X&DEV_%04X\\%u&%08X",
-                            vendor_id, product_id, device, serial_number);
-
-                len = strlen(buf) + 1;
-                if(*params->buffer_size < len * sizeof(WCHAR)){
-                    params->result = E_NOT_SUFFICIENT_BUFFER;
-                    *params->buffer_size = len * sizeof(WCHAR);
-                    return STATUS_SUCCESS;
-                }
-                out->vt = VT_LPWSTR;
-                out->pwszVal = params->buffer;
-                ntdll_umbstowcs(buf, len, out->pwszVal, len);
-                params->result = S_OK;
-                return STATUS_SUCCESS;
-            }
-        }else{
-            WARN("Could not open %s for reading\n", uevent);
-            params->result = E_NOTIMPL;
+        len = strlen(buf) + 1;
+        if(*params->buffer_size < len * sizeof(WCHAR)){
+            params->result = E_NOT_SUFFICIENT_BUFFER;
+            *params->buffer_size = len * sizeof(WCHAR);
             return STATUS_SUCCESS;
         }
+        out->vt = VT_LPWSTR;
+        out->pwszVal = params->buffer;
+        ntdll_umbstowcs(buf, len, out->pwszVal, len);
+        params->result = S_OK;
+        return STATUS_SUCCESS;
     } else if (flow != eCapture && IsEqualPropertyKey(*prop, PKEY_AudioEndpoint_PhysicalSpeakers)) {
         unsigned int num_speakers, card, device;
         char hwname[255];
@@ -2431,48 +2498,70 @@ static NTSTATUS get_prop_value(void *args)
         return STATUS_SUCCESS;
     }
 
-    TRACE("Unimplemented property %s,%u\n", wine_dbgstr_guid(&prop->fmtid), prop->pid);
+    TRACE("Unimplemented property %s,%u\n", wine_dbgstr_guid(&prop->fmtid), (unsigned)prop->pid);
 
     params->result = E_NOTIMPL;
     return STATUS_SUCCESS;
 }
 
-unixlib_entry_t __wine_unix_call_funcs[] =
+const unixlib_entry_t __wine_unix_call_funcs[] =
 {
-    get_endpoint_ids,
-    create_stream,
-    release_stream,
-    start,
-    stop,
-    reset,
-    timer_loop,
-    get_render_buffer,
-    release_render_buffer,
-    get_capture_buffer,
-    release_capture_buffer,
-    is_format_supported,
-    get_mix_format,
-    get_buffer_size,
-    get_latency,
-    get_current_padding,
-    get_next_packet_size,
-    get_frequency,
-    get_position,
-    set_volumes,
-    set_event_handle,
-    is_started,
-    get_prop_value,
-    midi_release,
-    midi_out_message,
-    midi_in_message,
-    midi_notify_wait,
+    alsa_process_attach,
+    alsa_not_implemented,
+    alsa_main_loop,
+    alsa_get_endpoint_ids,
+    alsa_create_stream,
+    alsa_release_stream,
+    alsa_start,
+    alsa_stop,
+    alsa_reset,
+    alsa_timer_loop,
+    alsa_get_render_buffer,
+    alsa_release_render_buffer,
+    alsa_get_capture_buffer,
+    alsa_release_capture_buffer,
+    alsa_is_format_supported,
+    alsa_get_mix_format,
+    alsa_get_device_period,
+    alsa_get_buffer_size,
+    alsa_get_latency,
+    alsa_get_current_padding,
+    alsa_get_next_packet_size,
+    alsa_get_frequency,
+    alsa_get_position,
+    alsa_set_volumes,
+    alsa_set_event_handle,
+    alsa_not_implemented,
+    alsa_is_started,
+    alsa_get_prop_value,
+    alsa_not_implemented,
+    alsa_midi_release,
+    alsa_midi_out_message,
+    alsa_midi_in_message,
+    alsa_midi_notify_wait,
+    alsa_not_implemented,
 };
+
+C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == funcs_count);
 
 #ifdef _WIN64
 
 typedef UINT PTR32;
 
-static NTSTATUS wow64_get_endpoint_ids(void *args)
+static NTSTATUS alsa_wow64_main_loop(void *args)
+{
+    struct
+    {
+        PTR32 event;
+    } *params32 = args;
+    struct main_loop_params params =
+    {
+        .event = ULongToHandle(params32->event)
+    };
+    return alsa_main_loop(&params);
+}
+
+static NTSTATUS alsa_wow64_get_endpoint_ids(void *args)
 {
     struct
     {
@@ -2489,7 +2578,7 @@ static NTSTATUS wow64_get_endpoint_ids(void *args)
         .endpoints = ULongToPtr(params32->endpoints),
         .size = params32->size
     };
-    get_endpoint_ids(&params);
+    alsa_get_endpoint_ids(&params);
     params32->size = params.size;
     params32->result = params.result;
     params32->num = params.num;
@@ -2497,11 +2586,12 @@ static NTSTATUS wow64_get_endpoint_ids(void *args)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_create_stream(void *args)
+static NTSTATUS alsa_wow64_create_stream(void *args)
 {
     struct
     {
-        PTR32 alsa_name;
+        PTR32 name;
+        PTR32 device;
         EDataFlow flow;
         AUDCLNT_SHAREMODE share;
         DWORD flags;
@@ -2509,25 +2599,28 @@ static NTSTATUS wow64_create_stream(void *args)
         REFERENCE_TIME period;
         PTR32 fmt;
         HRESULT result;
+        PTR32 channel_count;
         PTR32 stream;
     } *params32 = args;
     struct create_stream_params params =
     {
-        .alsa_name = ULongToPtr(params32->alsa_name),
+        .name = ULongToPtr(params32->name),
+        .device = ULongToPtr(params32->device),
         .flow = params32->flow,
         .share = params32->share,
         .flags = params32->flags,
         .duration = params32->duration,
         .period = params32->period,
         .fmt = ULongToPtr(params32->fmt),
+        .channel_count = ULongToPtr(params32->channel_count),
         .stream = ULongToPtr(params32->stream)
     };
-    create_stream(&params);
+    alsa_create_stream(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_release_stream(void *args)
+static NTSTATUS alsa_wow64_release_stream(void *args)
 {
     struct
     {
@@ -2540,12 +2633,12 @@ static NTSTATUS wow64_release_stream(void *args)
         .stream = params32->stream,
         .timer_thread = ULongToHandle(params32->timer_thread)
     };
-    release_stream(&params);
+    alsa_release_stream(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_render_buffer(void *args)
+static NTSTATUS alsa_wow64_get_render_buffer(void *args)
 {
     struct
     {
@@ -2561,13 +2654,13 @@ static NTSTATUS wow64_get_render_buffer(void *args)
         .frames = params32->frames,
         .data = &data
     };
-    get_render_buffer(&params);
+    alsa_get_render_buffer(&params);
     params32->result = params.result;
     *(unsigned int *)ULongToPtr(params32->data) = PtrToUlong(data);
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_capture_buffer(void *args)
+static NTSTATUS alsa_wow64_get_capture_buffer(void *args)
 {
     struct
     {
@@ -2589,17 +2682,17 @@ static NTSTATUS wow64_get_capture_buffer(void *args)
         .devpos = ULongToPtr(params32->devpos),
         .qpcpos = ULongToPtr(params32->qpcpos)
     };
-    get_capture_buffer(&params);
+    alsa_get_capture_buffer(&params);
     params32->result = params.result;
     *(unsigned int *)ULongToPtr(params32->data) = PtrToUlong(data);
     return STATUS_SUCCESS;
 };
 
-static NTSTATUS wow64_is_format_supported(void *args)
+static NTSTATUS alsa_wow64_is_format_supported(void *args)
 {
     struct
     {
-        PTR32 alsa_name;
+        PTR32 device;
         EDataFlow flow;
         AUDCLNT_SHAREMODE share;
         PTR32 fmt_in;
@@ -2608,56 +2701,78 @@ static NTSTATUS wow64_is_format_supported(void *args)
     } *params32 = args;
     struct is_format_supported_params params =
     {
-        .alsa_name = ULongToPtr(params32->alsa_name),
+        .device = ULongToPtr(params32->device),
         .flow = params32->flow,
         .share = params32->share,
         .fmt_in = ULongToPtr(params32->fmt_in),
         .fmt_out = ULongToPtr(params32->fmt_out)
     };
-    is_format_supported(&params);
+    alsa_is_format_supported(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_mix_format(void *args)
+static NTSTATUS alsa_wow64_get_mix_format(void *args)
 {
     struct
     {
-        PTR32 alsa_name;
+        PTR32 device;
         EDataFlow flow;
         PTR32 fmt;
         HRESULT result;
     } *params32 = args;
     struct get_mix_format_params params =
     {
-        .alsa_name = ULongToPtr(params32->alsa_name),
+        .device = ULongToPtr(params32->device),
         .flow = params32->flow,
         .fmt = ULongToPtr(params32->fmt)
     };
-    get_mix_format(&params);
+    alsa_get_mix_format(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_buffer_size(void *args)
+static NTSTATUS alsa_wow64_get_device_period(void *args)
+{
+    struct
+    {
+        PTR32 device;
+        EDataFlow flow;
+        HRESULT result;
+        PTR32 def_period;
+        PTR32 min_period;
+    } *params32 = args;
+    struct get_device_period_params params =
+    {
+        .device = ULongToPtr(params32->device),
+        .flow = params32->flow,
+        .def_period = ULongToPtr(params32->def_period),
+        .min_period = ULongToPtr(params32->min_period),
+    };
+    alsa_get_device_period(&params);
+    params32->result = params.result;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS alsa_wow64_get_buffer_size(void *args)
 {
     struct
     {
         stream_handle stream;
         HRESULT result;
-        PTR32 size;
+        PTR32 frames;
     } *params32 = args;
     struct get_buffer_size_params params =
     {
         .stream = params32->stream,
-        .size = ULongToPtr(params32->size)
+        .frames = ULongToPtr(params32->frames)
     };
-    get_buffer_size(&params);
+    alsa_get_buffer_size(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_latency(void *args)
+static NTSTATUS alsa_wow64_get_latency(void *args)
 {
     struct
     {
@@ -2670,12 +2785,12 @@ static NTSTATUS wow64_get_latency(void *args)
         .stream = params32->stream,
         .latency = ULongToPtr(params32->latency)
     };
-    get_latency(&params);
+    alsa_get_latency(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_current_padding(void *args)
+static NTSTATUS alsa_wow64_get_current_padding(void *args)
 {
     struct
     {
@@ -2688,12 +2803,12 @@ static NTSTATUS wow64_get_current_padding(void *args)
         .stream = params32->stream,
         .padding = ULongToPtr(params32->padding)
     };
-    get_current_padding(&params);
+    alsa_get_current_padding(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_next_packet_size(void *args)
+static NTSTATUS alsa_wow64_get_next_packet_size(void *args)
 {
     struct
     {
@@ -2706,12 +2821,12 @@ static NTSTATUS wow64_get_next_packet_size(void *args)
         .stream = params32->stream,
         .frames = ULongToPtr(params32->frames)
     };
-    get_next_packet_size(&params);
+    alsa_get_next_packet_size(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_frequency(void *args)
+static NTSTATUS alsa_wow64_get_frequency(void *args)
 {
     struct
     {
@@ -2724,16 +2839,17 @@ static NTSTATUS wow64_get_frequency(void *args)
         .stream = params32->stream,
         .freq = ULongToPtr(params32->freq)
     };
-    get_frequency(&params);
+    alsa_get_frequency(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_position(void *args)
+static NTSTATUS alsa_wow64_get_position(void *args)
 {
     struct
     {
         stream_handle stream;
+        BOOL device;
         HRESULT result;
         PTR32 pos;
         PTR32 qpctime;
@@ -2741,15 +2857,16 @@ static NTSTATUS wow64_get_position(void *args)
     struct get_position_params params =
     {
         .stream = params32->stream,
+        .device = params32->device,
         .pos = ULongToPtr(params32->pos),
         .qpctime = ULongToPtr(params32->qpctime)
     };
-    get_position(&params);
+    alsa_get_position(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_set_volumes(void *args)
+static NTSTATUS alsa_wow64_set_volumes(void *args)
 {
     struct
     {
@@ -2763,12 +2880,12 @@ static NTSTATUS wow64_set_volumes(void *args)
         .stream = params32->stream,
         .master_volume = params32->master_volume,
         .volumes = ULongToPtr(params32->volumes),
-        .session_volumes = ULongToPtr(params32->session_volumes)
+        .session_volumes = ULongToPtr(params32->session_volumes),
     };
-    return set_volumes(&params);
+    return alsa_set_volumes(&params);
 }
 
-static NTSTATUS wow64_set_event_handle(void *args)
+static NTSTATUS alsa_wow64_set_event_handle(void *args)
 {
     struct
     {
@@ -2782,12 +2899,12 @@ static NTSTATUS wow64_set_event_handle(void *args)
         .event = ULongToHandle(params32->event)
     };
 
-    set_event_handle(&params);
+    alsa_set_event_handle(&params);
     params32->result = params.result;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wow64_get_prop_value(void *args)
+static NTSTATUS alsa_wow64_get_prop_value(void *args)
 {
     struct propvariant32
     {
@@ -2802,7 +2919,7 @@ static NTSTATUS wow64_get_prop_value(void *args)
     } *value32;
     struct
     {
-        PTR32 alsa_name;
+        PTR32 device;
         EDataFlow flow;
         PTR32 guid;
         PTR32 prop;
@@ -2814,7 +2931,7 @@ static NTSTATUS wow64_get_prop_value(void *args)
     PROPVARIANT value;
     struct get_prop_value_params params =
     {
-        .alsa_name = ULongToPtr(params32->alsa_name),
+        .device = ULongToPtr(params32->device),
         .flow = params32->flow,
         .guid = ULongToPtr(params32->guid),
         .prop = ULongToPtr(params32->prop),
@@ -2822,7 +2939,7 @@ static NTSTATUS wow64_get_prop_value(void *args)
         .buffer = ULongToPtr(params32->buffer),
         .buffer_size = ULongToPtr(params32->buffer_size)
     };
-    get_prop_value(&params);
+    alsa_get_prop_value(&params);
     params32->result = params.result;
     if (SUCCEEDED(params.result))
     {
@@ -2843,35 +2960,44 @@ static NTSTATUS wow64_get_prop_value(void *args)
     return STATUS_SUCCESS;
 }
 
-unixlib_entry_t __wine_unix_call_wow64_funcs[] =
+const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
 {
-    wow64_get_endpoint_ids,
-    wow64_create_stream,
-    wow64_release_stream,
-    start,
-    stop,
-    reset,
-    timer_loop,
-    wow64_get_render_buffer,
-    release_render_buffer,
-    wow64_get_capture_buffer,
-    release_capture_buffer,
-    wow64_is_format_supported,
-    wow64_get_mix_format,
-    wow64_get_buffer_size,
-    wow64_get_latency,
-    wow64_get_current_padding,
-    wow64_get_next_packet_size,
-    wow64_get_frequency,
-    wow64_get_position,
-    wow64_set_volumes,
-    wow64_set_event_handle,
-    is_started,
-    wow64_get_prop_value,
-    midi_release,
-    wow64_midi_out_message,
-    wow64_midi_in_message,
-    wow64_midi_notify_wait,
+    alsa_process_attach,
+    alsa_not_implemented,
+    alsa_wow64_main_loop,
+    alsa_wow64_get_endpoint_ids,
+    alsa_wow64_create_stream,
+    alsa_wow64_release_stream,
+    alsa_start,
+    alsa_stop,
+    alsa_reset,
+    alsa_timer_loop,
+    alsa_wow64_get_render_buffer,
+    alsa_release_render_buffer,
+    alsa_wow64_get_capture_buffer,
+    alsa_release_capture_buffer,
+    alsa_wow64_is_format_supported,
+    alsa_wow64_get_mix_format,
+    alsa_wow64_get_device_period,
+    alsa_wow64_get_buffer_size,
+    alsa_wow64_get_latency,
+    alsa_wow64_get_current_padding,
+    alsa_wow64_get_next_packet_size,
+    alsa_wow64_get_frequency,
+    alsa_wow64_get_position,
+    alsa_wow64_set_volumes,
+    alsa_wow64_set_event_handle,
+    alsa_not_implemented,
+    alsa_is_started,
+    alsa_wow64_get_prop_value,
+    alsa_not_implemented,
+    alsa_midi_release,
+    alsa_wow64_midi_out_message,
+    alsa_wow64_midi_in_message,
+    alsa_wow64_midi_notify_wait,
+    alsa_not_implemented,
 };
+
+C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == funcs_count);
 
 #endif /* _WIN64 */

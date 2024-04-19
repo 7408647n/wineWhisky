@@ -61,8 +61,8 @@ static void fullduplex_destroy(IDirectSoundFullDuplexImpl *This)
         while(IDirectSoundCapture_Release(dsc8) > 0);
         IUnknown_Release(This->dsc8_unk);
     }
-    HeapFree(GetProcessHeap(), 0, This);
     TRACE("(%p) released\n", This);
+    free(This);
 }
 
 /*******************************************************************************
@@ -281,7 +281,7 @@ HRESULT DSOUND_FullDuplexCreate(REFIID riid, void **ppv)
     TRACE("(%s, %p)\n", debugstr_guid(riid), ppv);
 
     *ppv = NULL;
-    obj = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*obj));
+    obj = calloc(1, sizeof(*obj));
     if (!obj) {
         WARN("out of memory\n");
         return DSERR_OUTOFMEMORY;

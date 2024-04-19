@@ -19,7 +19,6 @@
  */
 
 #import <AppKit/AppKit.h>
-#import "macdrv_cocoa.h"
 
 
 @class WineEventQueue;
@@ -30,6 +29,7 @@
     BOOL disabled;
     BOOL noForeground;
     BOOL preventsAppActivation;
+    BOOL needsDockIcon;
     BOOL floating;
     BOOL resizable;
     BOOL maximized;
@@ -42,10 +42,10 @@
     WineWindow* latentParentWindow;
     NSMutableArray* latentChildWindows;
 
-    void* WIN32PTR hwnd;
+    void* hwnd;
     WineEventQueue* queue;
 
-    void* WIN32PTR surface;
+    void* surface;
     pthread_mutex_t* surface_mutex;
 
     CGDirectDisplayID _lastDisplayID;
@@ -54,8 +54,6 @@
     NSRect wineFrame;
     NSRect roundedWineFrame;
 
-    NSBezierPath* shape;
-    NSData* shapeData;
     BOOL shapeChangedSinceLastDraw;
 
     BOOL colorKeyed;
@@ -68,7 +66,7 @@
     NSRect frameAtResizeStart;
     BOOL resizingFromLeft, resizingFromTop;
 
-    void* WIN32PTR imeData;
+    void* himc;
     BOOL commandDone;
 
     NSSize savedContentMinSize;
@@ -96,6 +94,7 @@
 @property (readonly, nonatomic) BOOL disabled;
 @property (readonly, nonatomic) BOOL noForeground;
 @property (readonly, nonatomic) BOOL preventsAppActivation;
+@property (readonly, nonatomic) BOOL needsDockIcon;
 @property (readonly, nonatomic) BOOL floating;
 @property (readonly, getter=isFullscreen, nonatomic) BOOL fullscreen;
 @property (readonly, getter=isFakingClose, nonatomic) BOOL fakingClose;

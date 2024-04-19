@@ -21,9 +21,6 @@
 #include <stdarg.h>
 #include <assert.h>
 
-#define NONAMELESSSTRUCT
-#define NONAMELESSUNION
-
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
@@ -929,13 +926,15 @@ static void test_EnumForms(LPSTR pName)
 
         SetLastError(0xdeadbeef);
         res = EnumFormsA(hprinter, level, buffer, cbBuf, NULL, &pcReturned);
-        ok( !res && (GetLastError() == RPC_X_NULL_REF_POINTER) ,
+        ok( !res && (GetLastError() == RPC_X_NULL_REF_POINTER ||
+                    GetLastError() == ERROR_INVALID_PARAMETER),
             "(%ld) returned %ld with %ld (expected '0' with "
             "RPC_X_NULL_REF_POINTER)\n", level, res, GetLastError());
 
         SetLastError(0xdeadbeef);
         res = EnumFormsA(hprinter, level, buffer, cbBuf, &pcbNeeded, NULL);
-        ok( !res && (GetLastError() == RPC_X_NULL_REF_POINTER) ,
+        ok( !res && (GetLastError() == RPC_X_NULL_REF_POINTER ||
+                    GetLastError() == ERROR_INVALID_PARAMETER),
             "(%ld) returned %ld with %ld (expected '0' with "
             "RPC_X_NULL_REF_POINTER)\n", level, res, GetLastError());
 
@@ -1043,7 +1042,8 @@ static void test_EnumMonitors(void)
         pcbNeeded = MAGIC_DEAD;
         pcReturned = MAGIC_DEAD;
         res = EnumMonitorsA(NULL, level, buffer, cbBuf, NULL, &pcReturned);
-        ok( res || GetLastError() == RPC_X_NULL_REF_POINTER,
+        ok( res || GetLastError() == RPC_X_NULL_REF_POINTER ||
+                GetLastError() == ERROR_INVALID_PARAMETER,
             "(%ld) returned %ld with %ld (expected '!=0' or '0' with "
             "RPC_X_NULL_REF_POINTER)\n", level, res, GetLastError());
 
@@ -1051,7 +1051,8 @@ static void test_EnumMonitors(void)
         pcReturned = MAGIC_DEAD;
         SetLastError(MAGIC_DEAD);
         res = EnumMonitorsA(NULL, level, buffer, cbBuf, &pcbNeeded, NULL);
-        ok( res || GetLastError() == RPC_X_NULL_REF_POINTER,
+        ok( res || GetLastError() == RPC_X_NULL_REF_POINTER ||
+                GetLastError() == ERROR_INVALID_PARAMETER,
             "(%ld) returned %ld with %ld (expected '!=0' or '0' with "
             "RPC_X_NULL_REF_POINTER)\n", level, res, GetLastError());
 
@@ -1137,7 +1138,8 @@ static void test_EnumPorts(void)
         SetLastError(0xdeadbeef);
         res = EnumPortsA(NULL, level, buffer, cbBuf, NULL, &pcReturned);
         /* NT: RPC_X_NULL_REF_POINTER (1780),  9x: success */
-        ok( (!res && (GetLastError() == RPC_X_NULL_REF_POINTER) ) ||
+        ok( (!res && (GetLastError() == RPC_X_NULL_REF_POINTER ||
+                        GetLastError() == ERROR_INVALID_PARAMETER)) ||
             ( res && (GetLastError() == ERROR_SUCCESS) ),
             "(%ld) returned %ld with %ld (expected '0' with "
             "RPC_X_NULL_REF_POINTER or '!=0' with NO_ERROR)\n",
@@ -1147,7 +1149,8 @@ static void test_EnumPorts(void)
         SetLastError(0xdeadbeef);
         res = EnumPortsA(NULL, level, buffer, cbBuf, &pcbNeeded, NULL);
         /* NT: RPC_X_NULL_REF_POINTER (1780),  9x: success */
-        ok( (!res && (GetLastError() == RPC_X_NULL_REF_POINTER) ) ||
+        ok( (!res && (GetLastError() == RPC_X_NULL_REF_POINTER ||
+                        GetLastError() == ERROR_INVALID_PARAMETER)) ||
             ( res && (GetLastError() == ERROR_SUCCESS) ),
             "(%ld) returned %ld with %ld (expected '0' with "
             "RPC_X_NULL_REF_POINTER or '!=0' with NO_ERROR)\n",
@@ -1261,7 +1264,8 @@ static void test_EnumPrinterDrivers(void)
         pcbNeeded = 0xdeadbeef;
         pcReturned = 0xdeadbeef;
         res = EnumPrinterDriversA(NULL, NULL, level, buffer, cbBuf, NULL, &pcReturned);
-        ok( res || GetLastError() == RPC_X_NULL_REF_POINTER,
+        ok( res || GetLastError() == RPC_X_NULL_REF_POINTER ||
+                GetLastError() == ERROR_INVALID_PARAMETER,
             "(%lu) got %lu with %lu (expected '!=0' or '0' with "
             "RPC_X_NULL_REF_POINTER)\n", level, res, GetLastError());
 
@@ -1269,7 +1273,8 @@ static void test_EnumPrinterDrivers(void)
         pcReturned = 0xdeadbeef;
         SetLastError(0xdeadbeef);
         res = EnumPrinterDriversA(NULL, NULL, level, buffer, cbBuf, &pcbNeeded, NULL);
-        ok( res || GetLastError() == RPC_X_NULL_REF_POINTER,
+        ok( res || GetLastError() == RPC_X_NULL_REF_POINTER ||
+                GetLastError() == ERROR_INVALID_PARAMETER,
             "(%lu) got %lu with %lu (expected '!=0' or '0' with "
             "RPC_X_NULL_REF_POINTER)\n", level, res, GetLastError());
 
@@ -1410,7 +1415,8 @@ static void test_EnumPrintProcessors(void)
     pcReturned = 0xdeadbeef;
     res = EnumPrintProcessorsA(NULL, NULL, 1, buffer, cbBuf, NULL, &pcReturned);
     /* the NULL is ignored on win9x */
-    ok( broken(res) || (!res && (GetLastError() == RPC_X_NULL_REF_POINTER)),
+    ok( broken(res) || (!res && (GetLastError() == RPC_X_NULL_REF_POINTER ||
+                    GetLastError() == ERROR_INVALID_PARAMETER)),
         "got %lu with %lu (expected '0' with RPC_X_NULL_REF_POINTER)\n",
         res, GetLastError());
 
@@ -1419,7 +1425,8 @@ static void test_EnumPrintProcessors(void)
     SetLastError(0xdeadbeef);
     res = EnumPrintProcessorsA(NULL, NULL, 1, buffer, cbBuf, &pcbNeeded, NULL);
     /* the NULL is ignored on win9x */
-    ok( broken(res) || (!res && (GetLastError() == RPC_X_NULL_REF_POINTER)),
+    ok( broken(res) || (!res && (GetLastError() == RPC_X_NULL_REF_POINTER ||
+                    GetLastError() == ERROR_INVALID_PARAMETER)),
         "got %lu with %lu (expected '0' with RPC_X_NULL_REF_POINTER)\n",
         res, GetLastError());
 
@@ -2679,6 +2686,7 @@ static void test_DocumentProperties(void)
     LONG dm_size, ret;
     DEVMODEA *dm;
     char empty_str[] = "";
+    char nonexistent_str[] = "nonexistent printer";
 
     if (!default_printer)
     {
@@ -2705,6 +2713,9 @@ static void test_DocumentProperties(void)
     ok(ret == IDOK, "DocumentPropertiesA ret value %ld != expected IDOK\n", ret);
 
     ret = DocumentPropertiesA(0, hprn, empty_str, dm, dm, DM_OUT_BUFFER);
+    ok(ret == IDOK, "DocumentPropertiesA ret value %ld != expected IDOK\n", ret);
+
+    ret = DocumentPropertiesA(0, hprn, nonexistent_str, dm, dm, DM_OUT_BUFFER);
     ok(ret == IDOK, "DocumentPropertiesA ret value %ld != expected IDOK\n", ret);
 
     test_DEVMODEA(dm, dm_size, default_printer);
@@ -2920,7 +2931,7 @@ static void test_OpenPrinter_defaults(void)
     pi = HeapAlloc( GetProcessHeap(), 0, needed );
     ret = GetPrinterA( printer, 2, (BYTE *)pi, needed, &needed );
     ok( ret, "GetPrinterA() failed le=%ld\n", GetLastError() );
-    default_size = pi->pDevMode->u1.s1.dmPaperSize;
+    default_size = pi->pDevMode->dmPaperSize;
     HeapFree( GetProcessHeap(), 0, pi );
 
     needed = 0;
@@ -2948,8 +2959,8 @@ static void test_OpenPrinter_defaults(void)
     todo_wine
     ok( job_info->pDevMode != NULL, "got NULL DEVMODEA\n");
     if (job_info->pDevMode)
-        ok( job_info->pDevMode->u1.s1.dmPaperSize == default_size, "got %d default %d\n",
-            job_info->pDevMode->u1.s1.dmPaperSize, default_size );
+        ok( job_info->pDevMode->dmPaperSize == default_size, "got %d default %d\n",
+            job_info->pDevMode->dmPaperSize, default_size );
 
     HeapFree( GetProcessHeap(), 0, job_info );
     ScheduleJob( printer, add_job->JobId ); /* remove the empty job */
@@ -2961,7 +2972,7 @@ static void test_OpenPrinter_defaults(void)
     memset( &my_dm, 0, sizeof(my_dm) );
     my_dm.dmSize = sizeof(my_dm);
     my_dm.dmFields = DM_PAPERSIZE;
-    my_dm.u1.s1.dmPaperSize = (default_size == DMPAPER_A4) ? DMPAPER_LETTER : DMPAPER_A4;
+    my_dm.dmPaperSize = (default_size == DMPAPER_A4) ? DMPAPER_LETTER : DMPAPER_A4;
 
     prn_def.pDatatype = NULL;
     prn_def.pDevMode = &my_dm;
@@ -2976,8 +2987,8 @@ static void test_OpenPrinter_defaults(void)
     pi = HeapAlloc( GetProcessHeap(), 0, needed );
     ret = GetPrinterA( printer, 2, (BYTE *)pi, needed, &needed );
     ok( ret, "GetPrinterA() failed le=%ld\n", GetLastError() );
-    ok( pi->pDevMode->u1.s1.dmPaperSize == default_size, "got %d default %d\n",
-        pi->pDevMode->u1.s1.dmPaperSize, default_size );
+    ok( pi->pDevMode->dmPaperSize == default_size, "got %d default %d\n",
+        pi->pDevMode->dmPaperSize, default_size );
 
     HeapFree( GetProcessHeap(), 0, pi );
 
@@ -2996,9 +3007,9 @@ static void test_OpenPrinter_defaults(void)
 
     ok( job_info->pDevMode->dmFields == DM_PAPERSIZE, "got %08lx\n",
         job_info->pDevMode->dmFields );
-    ok( job_info->pDevMode->u1.s1.dmPaperSize == my_dm.u1.s1.dmPaperSize,
+    ok( job_info->pDevMode->dmPaperSize == my_dm.dmPaperSize,
         "got %d new size %d\n",
-        job_info->pDevMode->u1.s1.dmPaperSize, my_dm.u1.s1.dmPaperSize );
+        job_info->pDevMode->dmPaperSize, my_dm.dmPaperSize );
 
     HeapFree( GetProcessHeap(), 0, job_info );
     ScheduleJob( printer, add_job->JobId ); /* remove the empty job */
@@ -3021,16 +3032,36 @@ static void test_IsValidDevmodeW(void)
         { 0, FIELD_OFFSET(DEVMODEW, dmFields) + 3, FALSE },
         { 0, FIELD_OFFSET(DEVMODEW, dmFields) + 4, TRUE },
 
-        { DM_ORIENTATION, FIELD_OFFSET(DEVMODEW, u1.s1.dmOrientation) + 0, FALSE },
-        { DM_ORIENTATION, FIELD_OFFSET(DEVMODEW, u1.s1.dmOrientation) + 1, FALSE },
-        { DM_ORIENTATION, FIELD_OFFSET(DEVMODEW, u1.s1.dmOrientation) + 2, TRUE },
+        { DM_ORIENTATION, FIELD_OFFSET(DEVMODEW, dmOrientation) + 0, FALSE },
+        { DM_ORIENTATION, FIELD_OFFSET(DEVMODEW, dmOrientation) + 1, FALSE },
+        { DM_ORIENTATION, FIELD_OFFSET(DEVMODEW, dmOrientation) + 2, TRUE },
 
-        { DM_NUP, FIELD_OFFSET(DEVMODEW, u2.dmNup) + 0, FALSE },
-        { DM_NUP, FIELD_OFFSET(DEVMODEW, u2.dmNup) + 1, FALSE },
-        { DM_NUP, FIELD_OFFSET(DEVMODEW, u2.dmNup) + 2, FALSE },
-        { DM_NUP, FIELD_OFFSET(DEVMODEW, u2.dmNup) + 3, FALSE },
-        { DM_NUP, FIELD_OFFSET(DEVMODEW, u2.dmNup) + 4, TRUE },
+        { DM_NUP, FIELD_OFFSET(DEVMODEW, dmNup) + 0, FALSE },
+        { DM_NUP, FIELD_OFFSET(DEVMODEW, dmNup) + 1, FALSE },
+        { DM_NUP, FIELD_OFFSET(DEVMODEW, dmNup) + 2, FALSE },
+        { DM_NUP, FIELD_OFFSET(DEVMODEW, dmNup) + 3, FALSE },
+        { DM_NUP, FIELD_OFFSET(DEVMODEW, dmNup) + 4, TRUE },
 
+    };
+    static const struct
+    {
+        DWORD dmSize;
+        DWORD dmDriverExtra;
+        DWORD bufSize;
+        BOOL ret;
+    } size_test[] =
+    {
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 3, 1, FIELD_OFFSET(DEVMODEW, dmFields) + 4, FALSE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 4, 1, FIELD_OFFSET(DEVMODEW, dmFields) + 8, TRUE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 4, 2, FIELD_OFFSET(DEVMODEW, dmFields) + 8, TRUE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 4, 3, FIELD_OFFSET(DEVMODEW, dmFields) + 8, TRUE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 4, 4, FIELD_OFFSET(DEVMODEW, dmFields) + 8, TRUE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 4, 5, FIELD_OFFSET(DEVMODEW, dmFields) + 8, FALSE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 12, 1, FIELD_OFFSET(DEVMODEW, dmFields) + 16, TRUE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 12, 2, FIELD_OFFSET(DEVMODEW, dmFields) + 16, TRUE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 12, 3, FIELD_OFFSET(DEVMODEW, dmFields) + 16, TRUE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 12, 4, FIELD_OFFSET(DEVMODEW, dmFields) + 16, TRUE },
+        { FIELD_OFFSET(DEVMODEW, dmFields) + 12, 5, FIELD_OFFSET(DEVMODEW, dmFields) + 16, FALSE },
     };
     DEVMODEW dm;
     int i;
@@ -3050,6 +3081,17 @@ static void test_IsValidDevmodeW(void)
         dm.dmFields = test[i].dmFields;
         ret = IsValidDevmodeW(&dm, dm.dmSize);
         ok(ret == test[i].ret, "%d: got %d\n", i, ret);
+        ret = IsValidDevmodeW(&dm, dm.dmSize + 4);
+        ok(ret == test[i].ret, "%d: got %d\n", i, ret);
+    }
+
+    dm.dmFields = 0;
+    for (i = 0; i < ARRAY_SIZE(size_test); i++)
+    {
+        dm.dmSize = size_test[i].dmSize;
+        dm.dmDriverExtra = size_test[i].dmDriverExtra;
+        ret = IsValidDevmodeW(&dm, size_test[i].bufSize);
+        ok(ret == size_test[i].ret, "%d: got %d\n", i, ret);
     }
 }
 

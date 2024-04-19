@@ -264,7 +264,7 @@ static HRESULT WINAPI WshExec_get_StdErr(IWshExec *iface, ITextStream **stream)
     return S_OK;
 }
 
-static HRESULT WINAPI WshExec_get_ProcessID(IWshExec *iface, DWORD *pid)
+static HRESULT WINAPI WshExec_get_ProcessID(IWshExec *iface, int *pid)
 {
     WshExecImpl *This = impl_from_IWshExec(iface);
 
@@ -277,7 +277,7 @@ static HRESULT WINAPI WshExec_get_ProcessID(IWshExec *iface, DWORD *pid)
     return S_OK;
 }
 
-static HRESULT WINAPI WshExec_get_ExitCode(IWshExec *iface, DWORD *code)
+static HRESULT WINAPI WshExec_get_ExitCode(IWshExec *iface, int *code)
 {
     WshExecImpl *This = impl_from_IWshExec(iface);
 
@@ -538,15 +538,9 @@ static HRESULT WINAPI WshEnvironment_Invoke(IWshEnvironment *iface, DISPID dispI
     return hr;
 }
 
-static HRESULT WINAPI WshEnvironment_get_Item(IWshEnvironment *iface, BSTR name, BSTR *value)
+HRESULT get_env_var(const WCHAR *name, BSTR *value)
 {
-    WshEnvironment *This = impl_from_IWshEnvironment(iface);
     DWORD len;
-
-    TRACE("(%p)->(%s %p)\n", This, debugstr_w(name), value);
-
-    if (!value)
-        return E_POINTER;
 
     len = GetEnvironmentVariableW(name, NULL, 0);
     if (len)
@@ -559,6 +553,18 @@ static HRESULT WINAPI WshEnvironment_get_Item(IWshEnvironment *iface, BSTR name,
         *value = SysAllocStringLen(NULL, 0);
 
     return *value ? S_OK : E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI WshEnvironment_get_Item(IWshEnvironment *iface, BSTR name, BSTR *value)
+{
+    WshEnvironment *This = impl_from_IWshEnvironment(iface);
+
+    TRACE("(%p)->(%s %p)\n", This, debugstr_w(name), value);
+
+    if (!value)
+        return E_POINTER;
+
+    return get_env_var(name, value);
 }
 
 static HRESULT WINAPI WshEnvironment_put_Item(IWshEnvironment *iface, BSTR name, BSTR value)
@@ -1311,8 +1317,7 @@ static WCHAR *split_command( BSTR cmd, WCHAR **params )
     WCHAR *ret, *ptr;
     BOOL in_quotes = FALSE;
 
-    if (!(ret = malloc((lstrlenW(cmd) + 1) * sizeof(WCHAR)))) return NULL;
-    lstrcpyW( ret, cmd );
+    if (!(ret = wcsdup(cmd))) return NULL;
 
     *params = NULL;
     for (ptr = ret; *ptr; ptr++)
@@ -1329,12 +1334,12 @@ static WCHAR *split_command( BSTR cmd, WCHAR **params )
     return ret;
 }
 
-static HRESULT WINAPI WshShell3_Run(IWshShell3 *iface, BSTR cmd, VARIANT *style, VARIANT *wait, DWORD *exit_code)
+static HRESULT WINAPI WshShell3_Run(IWshShell3 *iface, BSTR cmd, VARIANT *style, VARIANT *wait, int *exit_code)
 {
     SHELLEXECUTEINFOW info;
-    int waitforprocess;
+    int waitforprocess, show;
     WCHAR *file, *params;
-    VARIANT s;
+    VARIANT v;
     HRESULT hr;
     BOOL ret;
 
@@ -1343,56 +1348,60 @@ static HRESULT WINAPI WshShell3_Run(IWshShell3 *iface, BSTR cmd, VARIANT *style,
     if (!style || !wait || !exit_code)
         return E_POINTER;
 
-    VariantInit(&s);
-    hr = VariantChangeType(&s, style, 0, VT_I4);
-    if (FAILED(hr))
-    {
-        ERR("failed to convert style argument, %#lx\n", hr);
-        return hr;
+    if (is_optional_argument(style))
+        show = SW_SHOWNORMAL;
+    else {
+        VariantInit(&v);
+        hr = VariantChangeType(&v, style, 0, VT_I4);
+        if (FAILED(hr))
+            return hr;
+
+        show = V_I4(&v);
     }
 
     if (is_optional_argument(wait))
         waitforprocess = 0;
     else {
-        VARIANT w;
-
-        VariantInit(&w);
-        hr = VariantChangeType(&w, wait, 0, VT_I4);
+        VariantInit(&v);
+        hr = VariantChangeType(&v, wait, 0, VT_I4);
         if (FAILED(hr))
             return hr;
 
-        waitforprocess = V_I4(&w);
+        waitforprocess = V_I4(&v);
     }
 
     if (!(file = split_command(cmd, &params))) return E_OUTOFMEMORY;
 
     memset(&info, 0, sizeof(info));
     info.cbSize = sizeof(info);
-    info.fMask = waitforprocess ? SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS : SEE_MASK_DEFAULT;
+    info.fMask = SEE_MASK_FLAG_NO_UI;
+    info.fMask |= waitforprocess ? SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS : SEE_MASK_DEFAULT;
     info.lpFile = file;
     info.lpParameters = params;
-    info.nShow = V_I4(&s);
+    info.nShow = show;
 
     ret = ShellExecuteExW(&info);
     free(file);
     if (!ret)
     {
         TRACE("ShellExecute failed, %ld\n", GetLastError());
-        return HRESULT_FROM_WIN32(GetLastError());
+        *exit_code = GetLastError();
     }
     else
     {
         if (waitforprocess)
         {
+            DWORD code;
             WaitForSingleObject(info.hProcess, INFINITE);
-            GetExitCodeProcess(info.hProcess, exit_code);
+            GetExitCodeProcess(info.hProcess, &code);
             CloseHandle(info.hProcess);
+            *exit_code = code;
         }
         else
             *exit_code = 0;
 
-        return S_OK;
     }
+    return S_OK;
 }
 
 struct popup_thread_param

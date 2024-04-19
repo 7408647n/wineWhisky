@@ -25,6 +25,7 @@
 #include "windef.h"
 #include "winnt.h"
 #include "winternl.h"
+#include "rtlsupportapi.h"
 #include "wine/asm.h"
 #include "wine/debug.h"
 
@@ -33,20 +34,23 @@ WINE_DEFAULT_DEBUG_CHANNEL(wow);
 #include "pshpack1.h"
 struct thunk_32to64
 {
-    BYTE  lcall;   /* call far, absolute indirect */
-    BYTE  modrm;  /* address=disp32, opcode=3 */
+    BYTE  ljmp;   /* jump far, absolute indirect */
+    BYTE  modrm;  /* address=disp32, opcode=5 */
     DWORD op;
-    DWORD lcall_addr;
+    DWORD addr;
     WORD  cs;
-
-    BYTE add;
-    BYTE add_modrm;
-    BYTE add_op;
-
-    BYTE jmp;
-    BYTE jmp_modrm;
-    DWORD jmp_op;
-    DWORD jmp_addr;
+};
+struct thunk_opcodes
+{
+    struct thunk_32to64 syscall_thunk;
+    struct
+    {
+        BYTE pushl;  /* pushl $dispatcher_high */
+        DWORD dispatcher_high;
+        BYTE pushl2;  /* pushl $dispatcher_low */
+        DWORD dispatcher_low;
+        struct thunk_32to64 t;
+    } unix_thunk;
 };
 #include "poppack.h"
 
@@ -168,21 +172,15 @@ static void copy_context_64to32( I386_CONTEXT *ctx32, DWORD flags, AMD64_CONTEXT
  *
  * Execute a 64-bit syscall from 32-bit code, then return to 32-bit.
  */
-extern void WINAPI syscall_32to64(void) DECLSPEC_HIDDEN;
+extern void WINAPI syscall_32to64(void);
 __ASM_GLOBAL_FUNC( syscall_32to64,
                    /* cf. BTCpuSimulate prolog */
-                   __ASM_SEH(".seh_stackalloc 0x28\n\t")
-                   __ASM_SEH(".seh_endprologue\n\t")
-                   __ASM_CFI(".cfi_adjust_cfa_offset 0x28\n\t")
-                   "pushq %r12\n\t"
-                   "movq %gs:0x30,%r12\n\t"
-                   "movq %r13,0x14a0(%r12)\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R13_32BIT] */
-                   "movq %r14,0x14b0(%r12)\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R14_32BIT] */
-                   "movq 0x1488(%r12),%r13\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED] */
-                   "leaq 4(%r13),%r13\n"        /* cpu->Context */
-                   "movq 0x1490(%r12),%r14\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R14] */
-                   "popq %r12\n\t"
-
+                   ".seh_pushreg %rbp\n\t"
+                   ".seh_pushreg %rbx\n\t"
+                   ".seh_pushreg %rsi\n\t"
+                   ".seh_pushreg %rdi\n\t"
+                   ".seh_stackalloc 0x28\n\t"
+                   ".seh_endprologue\n\t"
                    "xchgq %r14,%rsp\n\t"
                    "movl %edi,0x9c(%r13)\n\t"   /* context->Edi */
                    "movl %esi,0xa0(%r13)\n\t"   /* context->Esi */
@@ -198,6 +196,7 @@ __ASM_GLOBAL_FUNC( syscall_32to64,
                    "movq %rax,%rcx\n\t"         /* syscall number */
                    "leaq 8(%r14),%rdx\n\t"      /* parameters */
                    "call " __ASM_NAME("Wow64SystemServiceEx") "\n\t"
+                   "movl %eax,0xb0(%r13)\n\t"   /* context->Eax */
 
                    "syscall_32to64_return:\n\t"
                    "movl 0x9c(%r13),%edi\n\t"   /* context->Edi */
@@ -205,24 +204,16 @@ __ASM_GLOBAL_FUNC( syscall_32to64,
                    "movl 0xa4(%r13),%ebx\n\t"   /* context->Ebx */
                    "movl 0xb4(%r13),%ebp\n\t"   /* context->Ebp */
                    "btrl $0,-4(%r13)\n\t"       /* cpu->Flags & WOW64_CPURESERVED_FLAG_RESET_STATE */
-                   "jc 1f\n\t"
+                   "jc .Lsyscall_32to64_return\n\t"
                    "movl 0xb8(%r13),%edx\n\t"   /* context->Eip */
                    "movl %edx,(%rsp)\n\t"
                    "movl 0xbc(%r13),%edx\n\t"   /* context->SegCs */
                    "movl %edx,4(%rsp)\n\t"
                    "movl 0xc4(%r13),%r14d\n\t"  /* context->Esp */
                    "xchgq %r14,%rsp\n\t"
-
-                   "pushq 0(%r14)\n\t"
-                   "pushq %r12\n\t"
-                   "movq %gs:0x30,%r12\n\t"
-                   "movq 0x14a0(%r12),%r13\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R13_32BIT] */
-                   "movq %r14,0x1490(%r12)\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R14] */
-                   "movq 0x14b0(%r12),%r14\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R14_32BIT] */
-                   "popq %r12\n\t"
-
-                   "lret\n"
-                   "1:\tmovq %rsp,%r14\n\t"
+                   "ljmp *(%r14)\n"
+                   ".Lsyscall_32to64_return:\n\t"
+                   "movq %rsp,%r14\n\t"
                    "movl 0xa8(%r13),%edx\n\t"   /* context->Edx */
                    "movl 0xac(%r13),%ecx\n\t"   /* context->Ecx */
                    "movl 0xc8(%r13),%eax\n\t"   /* context->SegSs */
@@ -239,29 +230,66 @@ __ASM_GLOBAL_FUNC( syscall_32to64,
                    "movl 0xb8(%r13),%eax\n\t"   /* context->Eip */
                    "movq %rax,(%rsp)\n\t"
                    "movl 0xb0(%r13),%eax\n\t"   /* context->Eax */
-
-                   "pushq %r12\n\t"
-                   "movq %gs:0x30,%r12\n\t"
-                   "movq 0x14a0(%r12),%r13\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R13_32BIT] */
-                   "movq %r14,0x1490(%r12)\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R14] */
-                   "movq 0x14b0(%r12),%r14\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_WINEHYBRID_RESERVED_R14_32BIT] */
-                   "popq %r12\n\t"
-
                    "iretq" )
+
+
+/**********************************************************************
+ *           unix_call_32to64
+ *
+ * Execute a 64-bit Unix call from 32-bit code, then return to 32-bit.
+ */
+extern void WINAPI unix_call_32to64(void);
+__ASM_GLOBAL_FUNC( unix_call_32to64,
+                   /* cf. BTCpuSimulate prolog */
+                   ".seh_pushreg %rbp\n\t"
+                   ".seh_pushreg %rbx\n\t"
+                   ".seh_pushreg %rsi\n\t"
+                   ".seh_pushreg %rdi\n\t"
+                   ".seh_stackalloc 0x28\n\t"
+                   ".seh_endprologue\n\t"
+                   "xchgq %r14,%rsp\n\t"
+                   "movl %edi,0x9c(%r13)\n\t"   /* context->Edi */
+                   "movl %esi,0xa0(%r13)\n\t"   /* context->Esi */
+                   "movl %ebx,0xa4(%r13)\n\t"   /* context->Ebx */
+                   "movl %ebp,0xb4(%r13)\n\t"   /* context->Ebp */
+                   "movl 8(%r14),%edx\n\t"
+                   "movl %edx,0xb8(%r13)\n\t"   /* context->Eip */
+                   "leaq 28(%r14),%rdx\n\t"
+                   "movl %edx,0xc4(%r13)\n\t"   /* context->Esp */
+                   "movq 12(%r14),%rcx\n\t"     /* handle */
+                   "movl 20(%r14),%edx\n\t"     /* code */
+                   "movl 24(%r14),%r8d\n\t"     /* args */
+                   "callq *(%r14)\n\t"
+                   "btrl $0,-4(%r13)\n\t"       /* cpu->Flags & WOW64_CPURESERVED_FLAG_RESET_STATE */
+                   "jc .Lsyscall_32to64_return\n\t"
+                   "movl 0xb8(%r13),%edx\n\t"   /* context->Eip */
+                   "movl %edx,(%rsp)\n\t"
+                   "movl 0xbc(%r13),%edx\n\t"   /* context->SegCs */
+                   "movl %edx,4(%rsp)\n\t"
+                   "movl 0xc4(%r13),%r14d\n\t"  /* context->Esp */
+                   "xchgq %r14,%rsp\n\t"
+                   "ljmp *(%r14)" )
 
 
 /**********************************************************************
  *           BTCpuSimulate  (wow64cpu.@)
  */
-__ASM_STDCALL_FUNC( BTCpuSimulate, 0,
-                    "subq $0x28,%rsp\n"
-                   __ASM_SEH(".seh_stackalloc 0x28\n\t")
-                   __ASM_SEH(".seh_endprologue\n\t")
-                   __ASM_CFI(".cfi_adjust_cfa_offset 0x28\n\t")
-                    "movq %gs:0x30,%r12\n\t"
-                    "movq 0x1488(%r12),%rcx\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED] */
-                    "leaq 4(%rcx),%r13\n"        /* cpu->Context */
-                    "jmp syscall_32to64_return\n" )
+__ASM_GLOBAL_FUNC( BTCpuSimulate,
+                   "pushq %rbp\n\t"
+                   ".seh_pushreg %rbp\n\t"
+                   "pushq %rbx\n\t"
+                   ".seh_pushreg %rbx\n\t"
+                   "pushq %rsi\n\t"
+                   ".seh_pushreg %rsi\n\t"
+                   "pushq %rdi\n\t"
+                   ".seh_pushreg %rdi\n\t"
+                   "subq $0x28,%rsp\n"
+                   ".seh_stackalloc 0x28\n\t"
+                   ".seh_endprologue\n\t"
+                   "movq %gs:0x30,%r12\n\t"
+                   "movq 0x1488(%r12),%rcx\n\t" /* NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED] */
+                   "leaq 4(%rcx),%r13\n"        /* cpu->Context */
+                   "jmp syscall_32to64_return\n" )
 
 
 /**********************************************************************
@@ -269,10 +297,14 @@ __ASM_STDCALL_FUNC( BTCpuSimulate, 0,
  */
 NTSTATUS WINAPI BTCpuProcessInit(void)
 {
-    struct thunk_32to64 *thunk = (struct thunk_32to64 *)code_buffer;
+    struct thunk_opcodes *thunk = (struct thunk_opcodes *)code_buffer;
     SIZE_T size = sizeof(*thunk);
     ULONG old_prot;
     CONTEXT context;
+    HMODULE module;
+    UNICODE_STRING str = RTL_CONSTANT_STRING( L"ntdll.dll" );
+    void **p__wine_unix_call_dispatcher;
+    WOW64INFO *wow64info = NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO];
 
     if ((ULONG_PTR)syscall_32to64 >> 32)
     {
@@ -280,31 +312,31 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
         return STATUS_INVALID_ADDRESS;
     }
 
+    wow64info->CpuFlags |= WOW64_CPUFLAGS_MSFT64;
+
+    LdrGetDllHandle( NULL, 0, &str, &module );
+    p__wine_unix_call_dispatcher = RtlFindExportedRoutineByName( module, "__wine_unix_call_dispatcher" );
+
     RtlCaptureContext( &context );
     cs64_sel = context.SegCs;
     ds64_sel = context.SegDs;
     fs32_sel = context.SegFs;
 
-    /* CW HACK 20760:
-     * Use lcall rather than ljmp to work around a Rosetta SIGUSR1 race condition.
-     */
-    thunk->lcall = 0xff;
-    thunk->modrm = 0x1d;
-    thunk->op   = PtrToUlong( &thunk->lcall_addr );
-    thunk->lcall_addr = PtrToUlong( &thunk->add );
-    thunk->cs   = cs64_sel;
+    thunk->syscall_thunk.ljmp  = 0xff;
+    thunk->syscall_thunk.modrm = 0x2d;
+    thunk->syscall_thunk.op    = PtrToUlong( &thunk->syscall_thunk.addr );
+    thunk->syscall_thunk.addr  = PtrToUlong( syscall_32to64 );
+    thunk->syscall_thunk.cs    = cs64_sel;
 
-    /* We are now in 64-bit. */
-    /* add $0x08,%esp to remove the addr/segment pushed on the stack by the lcall */
-    thunk->add = 0x83;
-    thunk->add_modrm = 0xc4;
-    thunk->add_op = 0x08;
-
-    /* jmp to syscall_32to64 */
-    thunk->jmp = 0xff;
-    thunk->jmp_modrm = 0x25;
-    thunk->jmp_op = 0x00;
-    thunk->jmp_addr = PtrToUlong( syscall_32to64 );
+    thunk->unix_thunk.pushl   = 0x68;
+    thunk->unix_thunk.dispatcher_high = (ULONG_PTR)*p__wine_unix_call_dispatcher >> 32;
+    thunk->unix_thunk.pushl2  = 0x68;
+    thunk->unix_thunk.dispatcher_low = (ULONG_PTR)*p__wine_unix_call_dispatcher;
+    thunk->unix_thunk.t.ljmp  = 0xff;
+    thunk->unix_thunk.t.modrm = 0x2d;
+    thunk->unix_thunk.t.op    = PtrToUlong( &thunk->unix_thunk.t.addr );
+    thunk->unix_thunk.t.addr  = PtrToUlong( unix_call_32to64 );
+    thunk->unix_thunk.t.cs    = cs64_sel;
 
     NtProtectVirtualMemory( GetCurrentProcess(), (void **)&thunk, &size, PAGE_EXECUTE_READ, &old_prot );
     return STATUS_SUCCESS;
@@ -316,7 +348,30 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
  */
 void * WINAPI BTCpuGetBopCode(void)
 {
-    return code_buffer;
+    struct thunk_opcodes *thunk = (struct thunk_opcodes *)code_buffer;
+
+    return &thunk->syscall_thunk;
+}
+
+
+/**********************************************************************
+ *           __wine_get_unix_opcode  (wow64cpu.@)
+ */
+void * WINAPI __wine_get_unix_opcode(void)
+{
+    struct thunk_opcodes *thunk = (struct thunk_opcodes *)code_buffer;
+
+    return &thunk->unix_thunk;
+}
+
+
+/**********************************************************************
+ *           BTCpuIsProcessorFeaturePresent  (wow64cpu.@)
+ */
+BOOLEAN WINAPI BTCpuIsProcessorFeaturePresent( UINT feature )
+{
+    /* assume CPU features are the same for 32- and 64-bit */
+    return RtlIsProcessorFeaturePresent( feature );
 }
 
 
@@ -325,7 +380,7 @@ void * WINAPI BTCpuGetBopCode(void)
  */
 NTSTATUS WINAPI BTCpuGetContext( HANDLE thread, HANDLE process, void *unknown, I386_CONTEXT *ctx )
 {
-    return NtQueryInformationThread( thread, ThreadWow64Context, ctx, sizeof(*ctx), NULL );
+    return RtlWow64GetThreadContext( thread, ctx );
 }
 
 
@@ -334,7 +389,7 @@ NTSTATUS WINAPI BTCpuGetContext( HANDLE thread, HANDLE process, void *unknown, I
  */
 NTSTATUS WINAPI BTCpuSetContext( HANDLE thread, HANDLE process, void *unknown, I386_CONTEXT *ctx )
 {
-    return NtSetInformationThread( thread, ThreadWow64Context, ctx, sizeof(*ctx) );
+    return RtlWow64SetThreadContext( thread, ctx );
 }
 
 
@@ -345,6 +400,16 @@ NTSTATUS WINAPI BTCpuResetToConsistentState( EXCEPTION_POINTERS *ptrs )
 {
     CONTEXT *context = ptrs->ContextRecord;
     I386_CONTEXT wow_context;
+    struct machine_frame
+    {
+        ULONG64 rip;
+        ULONG64 cs;
+        ULONG64 eflags;
+        ULONG64 rsp;
+        ULONG64 ss;
+    } *machine_frame;
+
+    if (context->SegCs == cs64_sel) return STATUS_SUCCESS;  /* exception in 64-bit code, nothing to do */
 
     copy_context_64to32( &wow_context, CONTEXT_I386_ALL, context );
     wow_context.EFlags &= ~(0x100|0x40000);
@@ -353,7 +418,11 @@ NTSTATUS WINAPI BTCpuResetToConsistentState( EXCEPTION_POINTERS *ptrs )
     /* fixup context to pretend that we jumped to 64-bit mode */
     context->Rip = (ULONG64)syscall_32to64;
     context->SegCs = cs64_sel;
-    context->Rsp = NtCurrentTeb()->TlsSlots[2]; /* WOW64_TLS_WINEHYBRID_RESERVED_R14 */
+    context->Rsp = context->R14;
+    /* fixup machine frame */
+    machine_frame = (struct machine_frame *)(((ULONG_PTR)(ptrs->ExceptionRecord + 1) + 15) & ~15);
+    machine_frame->rip = context->Rip;
+    machine_frame->rsp = context->Rsp;
     return STATUS_SUCCESS;
 }
 

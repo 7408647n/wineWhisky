@@ -96,7 +96,7 @@ static ULONG WINAPI ImagingFactory_Release(IWICImagingFactory2 *iface)
     TRACE("(%p) refcount=%lu\n", iface, ref);
 
     if (ref == 0)
-        HeapFree(GetProcessHeap(), 0, This);
+        free(This);
 
     return ref;
 }
@@ -901,16 +901,14 @@ static HRESULT WINAPI ImagingFactory_CreateBitmapFromHICON(IWICImagingFactory2 *
         if (bm.bmBitsPixel == 32)
         {
             /* If any pixel has a non-zero alpha, ignore hbmMask */
-            bits = (DWORD *)buffer;
-            for (x = 0; x < width && !has_alpha; x++, bits++)
+            DWORD *ptr = (DWORD *)buffer;
+            DWORD *end = ptr + width * height;
+            while (ptr != end)
             {
-                for (y = 0; y < height; y++)
+                if (*ptr++ & 0xff000000)
                 {
-                    if (*bits & 0xff000000)
-                    {
-                        has_alpha = TRUE;
-                        break;
-                    }
+                    has_alpha = TRUE;
+                    break;
                 }
             }
         }
@@ -926,7 +924,7 @@ static HRESULT WINAPI ImagingFactory_CreateBitmapFromHICON(IWICImagingFactory2 *
         {
             BYTE *mask;
 
-            mask = HeapAlloc(GetProcessHeap(), 0, size);
+            mask = malloc(size);
             if (!mask)
             {
                 IWICBitmapLock_Release(lock);
@@ -953,7 +951,7 @@ static HRESULT WINAPI ImagingFactory_CreateBitmapFromHICON(IWICImagingFactory2 *
                 }
             }
 
-            HeapFree(GetProcessHeap(), 0, mask);
+            free(mask);
         }
         else
         {
@@ -1472,7 +1470,7 @@ HRESULT ImagingFactory_CreateInstance(REFIID iid, void** ppv)
 
     *ppv = NULL;
 
-    This = HeapAlloc(GetProcessHeap(), 0, sizeof(*This));
+    This = malloc(sizeof(*This));
     if (!This) return E_OUTOFMEMORY;
 
     This->IWICImagingFactory2_iface.lpVtbl = &ImagingFactory_Vtbl;

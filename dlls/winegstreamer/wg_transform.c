@@ -32,243 +32,266 @@
 #include <gst/video/video.h>
 #include <gst/audio/audio.h>
 
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
 #include "winternl.h"
-#include "dshow.h"
 #include "mferror.h"
 
 #include "unix_private.h"
 
-#include "wine/list.h"
-
-GST_DEBUG_CATEGORY_EXTERN(wine);
-#define GST_CAT_DEFAULT wine
-
-struct wg_transform_sample
-{
-    struct list entry;
-    GstSample *sample;
-};
+#define GST_SAMPLE_FLAG_WG_CAPS_CHANGED (GST_MINI_OBJECT_FLAG_LAST << 0)
 
 struct wg_transform
 {
+    struct wg_transform_attrs attrs;
+
     GstElement *container;
+    GstAllocator *allocator;
     GstPad *my_src, *my_sink;
-    GstPad *their_sink, *their_src;
-    pthread_mutex_t mutex;
-    struct list samples;
-    GstCaps *sink_caps;
+    GstSegment segment;
+    GstQuery *drain_query;
+
+    GstAtomicQueue *input_queue;
+
+    bool input_is_flipped;
+    GstElement *video_flip;
+
+    struct wg_format output_format;
+    GstAtomicQueue *output_queue;
+    GstSample *output_sample;
+    bool output_caps_changed;
+    GstCaps *output_caps;
 };
 
-static GstCaps *wg_format_to_caps_xwma(const struct wg_encoded_format *format)
+static struct wg_transform *get_transform(wg_transform_t trans)
 {
-    GstBuffer *buffer;
-    GstCaps *caps;
-
-    if (format->encoded_type == WG_ENCODED_TYPE_WMA)
-    {
-        caps = gst_caps_new_empty_simple("audio/x-wma");
-        if (format->u.xwma.version)
-            gst_caps_set_simple(caps, "wmaversion", G_TYPE_INT, format->u.xwma.version, NULL);
-    }
-    else
-    {
-        caps = gst_caps_new_empty_simple("audio/x-xma");
-        if (format->u.xwma.version)
-            gst_caps_set_simple(caps, "xmaversion", G_TYPE_INT, format->u.xwma.version, NULL);
-    }
-
-    if (format->u.xwma.bitrate)
-        gst_caps_set_simple(caps, "bitrate", G_TYPE_INT, format->u.xwma.bitrate, NULL);
-    if (format->u.xwma.rate)
-        gst_caps_set_simple(caps, "rate", G_TYPE_INT, format->u.xwma.rate, NULL);
-    if (format->u.xwma.depth)
-        gst_caps_set_simple(caps, "depth", G_TYPE_INT, format->u.xwma.depth, NULL);
-    if (format->u.xwma.channels)
-        gst_caps_set_simple(caps, "channels", G_TYPE_INT, format->u.xwma.channels, NULL);
-    if (format->u.xwma.block_align)
-        gst_caps_set_simple(caps, "block_align", G_TYPE_INT, format->u.xwma.block_align, NULL);
-
-    if (format->u.xwma.codec_data_len)
-    {
-        buffer = gst_buffer_new_and_alloc(format->u.xwma.codec_data_len);
-        gst_buffer_fill(buffer, 0, format->u.xwma.codec_data, format->u.xwma.codec_data_len);
-        gst_caps_set_simple(caps, "codec_data", GST_TYPE_BUFFER, buffer, NULL);
-        gst_buffer_unref(buffer);
-    }
-
-    return caps;
+    return (struct wg_transform *)(ULONG_PTR)trans;
 }
 
-static GstCaps *wg_format_to_caps_aac(const struct wg_encoded_format *format)
+static void align_video_info_planes(gsize plane_align, GstVideoInfo *info, GstVideoAlignment *align)
 {
-    const char *profile, *level, *stream_format;
-    GstBuffer *buffer;
-    GstCaps *caps;
+    gst_video_alignment_reset(align);
 
-    caps = gst_caps_new_empty_simple("audio/mpeg");
-    gst_caps_set_simple(caps, "mpegversion", G_TYPE_INT, 4, NULL);
+    align->padding_right = ((plane_align + 1) - (info->width & plane_align)) & plane_align;
+    align->padding_bottom = ((plane_align + 1) - (info->height & plane_align)) & plane_align;
+    align->stride_align[0] = plane_align;
+    align->stride_align[1] = plane_align;
+    align->stride_align[2] = plane_align;
+    align->stride_align[3] = plane_align;
 
-    switch (format->u.aac.payload_type)
-    {
-        case 0: stream_format = "raw"; break;
-        case 1: stream_format = "adts"; break;
-        case 2: stream_format = "adif"; break;
-        case 3: stream_format = "loas"; break;
-        default: stream_format = "raw"; break;
-    }
-    if (stream_format)
-        gst_caps_set_simple(caps, "stream-format", G_TYPE_STRING, stream_format, NULL);
-
-    switch (format->u.aac.profile_level_indication)
-    {
-        case 0x29: profile = "lc"; level = "2";  break;
-        case 0x2A: profile = "lc"; level = "4"; break;
-        case 0x2B: profile = "lc"; level = "5"; break;
-        default:
-            GST_FIXME("Unrecognized profile-level-indication %u\n", format->u.aac.profile_level_indication);
-            /* fallthrough */
-        case 0x00: case 0xFE: profile = level = NULL; break; /* unspecified */
-    }
-    if (profile)
-        gst_caps_set_simple(caps, "profile", G_TYPE_STRING, profile, NULL);
-    if (level)
-        gst_caps_set_simple(caps, "level", G_TYPE_STRING, level, NULL);
-
-    if (format->u.aac.codec_data_len)
-    {
-        buffer = gst_buffer_new_and_alloc(format->u.aac.codec_data_len);
-        gst_buffer_fill(buffer, 0, format->u.aac.codec_data, format->u.aac.codec_data_len);
-        gst_caps_set_simple(caps, "codec_data", GST_TYPE_BUFFER, buffer, NULL);
-        gst_buffer_unref(buffer);
-    }
-
-    return caps;
-}
-
-static GstCaps *wg_format_to_caps_h264(const struct wg_encoded_format *format)
-{
-    const char *profile, *level;
-    GstCaps *caps;
-
-    caps = gst_caps_new_empty_simple("video/x-h264");
-    gst_caps_set_simple(caps, "stream-format", G_TYPE_STRING, "byte-stream", NULL);
-    gst_caps_set_simple(caps, "alignment", G_TYPE_STRING, "au", NULL);
-
-    if (format->u.h264.width)
-        gst_caps_set_simple(caps, "width", G_TYPE_INT, format->u.h264.width, NULL);
-    if (format->u.h264.height)
-        gst_caps_set_simple(caps, "height", G_TYPE_INT, format->u.h264.height, NULL);
-    if (format->u.h264.fps_n || format->u.h264.fps_d)
-        gst_caps_set_simple(caps, "framerate", GST_TYPE_FRACTION, format->u.h264.fps_n, format->u.h264.fps_d, NULL);
-
-    switch (format->u.h264.profile)
-    {
-        case /* eAVEncH264VProfile_Main */ 77:  profile = "main"; break;
-        case /* eAVEncH264VProfile_High */ 100: profile = "high"; break;
-        case /* eAVEncH264VProfile_444 */  244: profile = "high-4:4:4"; break;
-        default:
-            GST_ERROR("Unrecognized H.264 profile attribute %u.", format->u.h264.profile);
-            /* fallthrough */
-        case 0: profile = NULL;
-    }
-    if (profile)
-        gst_caps_set_simple(caps, "profile", G_TYPE_STRING, profile, NULL);
-
-    switch (format->u.h264.level)
-    {
-        case /* eAVEncH264VLevel1 */   10: level = "1";   break;
-        case /* eAVEncH264VLevel1_1 */ 11: level = "1.1"; break;
-        case /* eAVEncH264VLevel1_2 */ 12: level = "1.2"; break;
-        case /* eAVEncH264VLevel1_3 */ 13: level = "1.3"; break;
-        case /* eAVEncH264VLevel2 */   20: level = "2";   break;
-        case /* eAVEncH264VLevel2_1 */ 21: level = "2.1"; break;
-        case /* eAVEncH264VLevel2_2 */ 22: level = "2.2"; break;
-        case /* eAVEncH264VLevel3 */   30: level = "3";   break;
-        case /* eAVEncH264VLevel3_1 */ 31: level = "3.1"; break;
-        case /* eAVEncH264VLevel3_2 */ 32: level = "3.2"; break;
-        case /* eAVEncH264VLevel4 */   40: level = "4";   break;
-        case /* eAVEncH264VLevel4_1 */ 41: level = "4.1"; break;
-        case /* eAVEncH264VLevel4_2 */ 42: level = "4.2"; break;
-        case /* eAVEncH264VLevel5 */   50: level = "5";   break;
-        case /* eAVEncH264VLevel5_1 */ 51: level = "5.1"; break;
-        case /* eAVEncH264VLevel5_2 */ 52: level = "5.2"; break;
-        default:
-            GST_ERROR("Unrecognized H.264 level attribute %u.", format->u.h264.level);
-            /* fallthrough */
-        case 0: level = NULL;
-    }
-    if (level)
-        gst_caps_set_simple(caps, "level", G_TYPE_STRING, level, NULL);
-
-    return caps;
-}
-
-static GstCaps *wg_encoded_format_to_caps(const struct wg_encoded_format *format)
-{
-    switch (format->encoded_type)
-    {
-        case WG_ENCODED_TYPE_UNKNOWN:
-            return NULL;
-        case WG_ENCODED_TYPE_WMA:
-        case WG_ENCODED_TYPE_XMA:
-            return wg_format_to_caps_xwma(format);
-        case WG_ENCODED_TYPE_AAC:
-            return wg_format_to_caps_aac(format);
-        case WG_ENCODED_TYPE_H264:
-            return wg_format_to_caps_h264(format);
-    }
-    assert(0);
-    return NULL;
+    gst_video_info_align(info, align);
 }
 
 static GstFlowReturn transform_sink_chain_cb(GstPad *pad, GstObject *parent, GstBuffer *buffer)
 {
     struct wg_transform *transform = gst_pad_get_element_private(pad);
-    struct wg_transform_sample *sample;
+    GstSample *sample;
 
-    GST_INFO("transform %p, buffer %p.", transform, buffer);
+    GST_LOG("transform %p, %"GST_PTR_FORMAT, transform, buffer);
 
-    if (!(sample = malloc(sizeof(*sample))))
-        GST_ERROR("Failed to allocate transform sample entry");
-    else
+    if (!(sample = gst_sample_new(buffer, transform->output_caps, NULL, NULL)))
     {
-        pthread_mutex_lock(&transform->mutex);
-        if (!(sample->sample = gst_sample_new(buffer, transform->sink_caps, NULL, NULL)))
-            GST_ERROR("Failed to allocate transform sample");
-        list_add_tail(&transform->samples, &sample->entry);
-        pthread_mutex_unlock(&transform->mutex);
+        GST_ERROR("Failed to allocate transform %p output sample.", transform);
+        gst_buffer_unref(buffer);
+        return GST_FLOW_ERROR;
     }
 
+    if (transform->output_caps_changed)
+        GST_MINI_OBJECT_FLAG_SET(sample, GST_SAMPLE_FLAG_WG_CAPS_CHANGED);
+    transform->output_caps_changed = false;
+
+    gst_atomic_queue_push(transform->output_queue, sample);
     gst_buffer_unref(buffer);
     return GST_FLOW_OK;
+}
+
+static gboolean transform_src_query_latency(struct wg_transform *transform, GstQuery *query)
+{
+    GST_LOG("transform %p, %"GST_PTR_FORMAT, transform, query);
+    gst_query_set_latency(query, transform->attrs.low_latency, 0, 0);
+    return true;
+}
+
+static gboolean transform_src_query_cb(GstPad *pad, GstObject *parent, GstQuery *query)
+{
+    struct wg_transform *transform = gst_pad_get_element_private(pad);
+
+    switch (query->type)
+    {
+    case GST_QUERY_LATENCY:
+        return transform_src_query_latency(transform, query);
+    default:
+        GST_TRACE("transform %p, ignoring %"GST_PTR_FORMAT, transform, query);
+        return gst_pad_query_default(pad, parent, query);
+    }
+}
+
+static gboolean transform_sink_query_allocation(struct wg_transform *transform, GstQuery *query)
+{
+    gsize plane_align = transform->attrs.output_plane_align;
+    GstStructure *config, *params;
+    GstVideoAlignment align;
+    gboolean needs_pool;
+    GstBufferPool *pool;
+    GstVideoInfo info;
+    GstCaps *caps;
+
+    GST_LOG("transform %p, %"GST_PTR_FORMAT, transform, query);
+
+    gst_query_parse_allocation(query, &caps, &needs_pool);
+    if (stream_type_from_caps(caps) != GST_STREAM_TYPE_VIDEO || !needs_pool)
+        return false;
+
+    if (!gst_video_info_from_caps(&info, caps)
+            || !(pool = gst_video_buffer_pool_new()))
+        return false;
+
+    align_video_info_planes(plane_align, &info, &align);
+
+    if ((params = gst_structure_new("video-meta",
+            "padding-top", G_TYPE_UINT, align.padding_top,
+            "padding-bottom", G_TYPE_UINT, align.padding_bottom,
+            "padding-left", G_TYPE_UINT, align.padding_left,
+            "padding-right", G_TYPE_UINT, align.padding_right,
+            NULL)))
+    {
+        gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, params);
+        gst_structure_free(params);
+    }
+
+    if (!(config = gst_buffer_pool_get_config(pool)))
+        GST_ERROR("Failed to get %"GST_PTR_FORMAT" config.", pool);
+    else
+    {
+        gst_buffer_pool_config_add_option(config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+        gst_buffer_pool_config_add_option(config, GST_BUFFER_POOL_OPTION_VIDEO_ALIGNMENT);
+        gst_buffer_pool_config_set_video_alignment(config, &align);
+
+        gst_buffer_pool_config_set_params(config, caps,
+                info.size, 0, 0);
+        gst_buffer_pool_config_set_allocator(config, transform->allocator, NULL);
+        if (!gst_buffer_pool_set_config(pool, config))
+            GST_ERROR("Failed to set %"GST_PTR_FORMAT" config.", pool);
+    }
+
+    /* Prevent pool reconfiguration, we don't want another alignment. */
+    if (!gst_buffer_pool_set_active(pool, true))
+        GST_ERROR("%"GST_PTR_FORMAT" failed to activate.", pool);
+
+    gst_query_add_allocation_pool(query, pool, info.size, 0, 0);
+    gst_query_add_allocation_param(query, transform->allocator, NULL);
+
+    GST_INFO("Proposing %"GST_PTR_FORMAT", buffer size %#zx, %"GST_PTR_FORMAT", for %"GST_PTR_FORMAT,
+            pool, info.size, transform->allocator, query);
+
+    g_object_unref(pool);
+    return true;
+}
+
+static GstCaps *transform_format_to_caps(struct wg_transform *transform, const struct wg_format *format)
+{
+    struct wg_format copy = *format;
+
+    if (format->major_type == WG_MAJOR_TYPE_VIDEO)
+    {
+        if (transform->attrs.allow_size_change)
+            copy.u.video.width = copy.u.video.height = 0;
+        copy.u.video.fps_n = copy.u.video.fps_d = 0;
+    }
+
+    return wg_format_to_caps(&copy);
+}
+
+static gboolean transform_sink_query_caps(struct wg_transform *transform, GstQuery *query)
+{
+    GstCaps *caps, *filter, *temp;
+
+    GST_LOG("transform %p, %"GST_PTR_FORMAT, transform, query);
+
+    gst_query_parse_caps(query, &filter);
+    if (!(caps = transform_format_to_caps(transform, &transform->output_format)))
+        return false;
+
+    if (filter)
+    {
+        temp = gst_caps_intersect(caps, filter);
+        gst_caps_unref(caps);
+        caps = temp;
+    }
+
+    GST_INFO("Returning caps %" GST_PTR_FORMAT, caps);
+
+    gst_query_set_caps_result(query, caps);
+    gst_caps_unref(caps);
+    return true;
+}
+
+static gboolean transform_sink_query_cb(GstPad *pad, GstObject *parent, GstQuery *query)
+{
+    struct wg_transform *transform = gst_pad_get_element_private(pad);
+
+    switch (query->type)
+    {
+    case GST_QUERY_ALLOCATION:
+        if (transform_sink_query_allocation(transform, query))
+            return true;
+        break;
+    case GST_QUERY_CAPS:
+        if (transform_sink_query_caps(transform, query))
+            return true;
+        break;
+    default:
+        break;
+    }
+
+    GST_TRACE("transform %p, ignoring %"GST_PTR_FORMAT, transform, query);
+    return gst_pad_query_default(pad, parent, query);
+}
+
+static gboolean transform_output_caps_is_compatible(struct wg_transform *transform, GstCaps *caps)
+{
+    GstCaps *copy = gst_caps_copy(caps);
+    gboolean ret;
+    gsize i;
+
+    for (i = 0; i < gst_caps_get_size(copy); ++i)
+    {
+        GstStructure *structure = gst_caps_get_structure(copy, i);
+        gst_structure_remove_fields(structure, "framerate", NULL);
+    }
+
+    ret = gst_caps_is_always_compatible(transform->output_caps, copy);
+    gst_caps_unref(copy);
+    return ret;
+}
+
+static void transform_sink_event_caps(struct wg_transform *transform, GstEvent *event)
+{
+    GstCaps *caps;
+
+    GST_LOG("transform %p, %"GST_PTR_FORMAT, transform, event);
+
+    gst_event_parse_caps(event, &caps);
+
+    transform->output_caps_changed = transform->output_caps_changed
+            || !transform_output_caps_is_compatible(transform, caps);
+
+    gst_caps_unref(transform->output_caps);
+    transform->output_caps = gst_caps_ref(caps);
 }
 
 static gboolean transform_sink_event_cb(GstPad *pad, GstObject *parent, GstEvent *event)
 {
     struct wg_transform *transform = gst_pad_get_element_private(pad);
 
-    GST_INFO("transform %p, type \"%s\".", transform, GST_EVENT_TYPE_NAME(event));
-
     switch (event->type)
     {
     case GST_EVENT_CAPS:
-    {
-        GstCaps *caps;
-        gchar *str;
-
-        gst_event_parse_caps(event, &caps);
-        str = gst_caps_to_string(caps);
-        GST_WARNING("Got caps \"%s\".", str);
-        g_free(str);
-
-        pthread_mutex_lock(&transform->mutex);
-        gst_caps_unref(transform->sink_caps);
-        transform->sink_caps = gst_caps_ref(caps);
-        pthread_mutex_unlock(&transform->mutex);
+        transform_sink_event_caps(transform, event);
         break;
-    }
     default:
-        GST_WARNING("Ignoring \"%s\" event.", GST_EVENT_TYPE_NAME(event));
+        GST_TRACE("transform %p, ignoring %"GST_PTR_FORMAT, transform, event);
+        break;
     }
 
     gst_event_unref(event);
@@ -277,354 +300,815 @@ static gboolean transform_sink_event_cb(GstPad *pad, GstObject *parent, GstEvent
 
 NTSTATUS wg_transform_destroy(void *args)
 {
-    struct wg_transform *transform = args;
-    struct wg_transform_sample *sample, *next;
+    struct wg_transform *transform = get_transform(*(wg_transform_t *)args);
+    GstSample *sample;
+    GstBuffer *buffer;
 
-    if (transform->container)
-        gst_element_set_state(transform->container, GST_STATE_NULL);
+    while ((buffer = gst_atomic_queue_pop(transform->input_queue)))
+        gst_buffer_unref(buffer);
+    gst_atomic_queue_unref(transform->input_queue);
 
-    if (transform->their_src && transform->my_sink)
-        gst_pad_unlink(transform->their_src, transform->my_sink);
-    if (transform->their_sink && transform->my_src)
-        gst_pad_unlink(transform->my_src, transform->their_sink);
+    gst_element_set_state(transform->container, GST_STATE_NULL);
 
-    if (transform->their_sink)
-        g_object_unref(transform->their_sink);
-    if (transform->their_src)
-        g_object_unref(transform->their_src);
+    if (transform->output_sample)
+        gst_sample_unref(transform->output_sample);
+    while ((sample = gst_atomic_queue_pop(transform->output_queue)))
+        gst_sample_unref(sample);
 
-    if (transform->container)
-        g_object_unref(transform->container);
-
-    if (transform->my_sink)
-        g_object_unref(transform->my_sink);
-    if (transform->my_src)
-        g_object_unref(transform->my_src);
-
-    LIST_FOR_EACH_ENTRY_SAFE(sample, next, &transform->samples, struct wg_transform_sample, entry)
-    {
-        gst_sample_unref(sample->sample);
-        list_remove(&sample->entry);
-        free(sample);
-    }
-
+    wg_allocator_destroy(transform->allocator);
+    g_object_unref(transform->container);
+    g_object_unref(transform->my_sink);
+    g_object_unref(transform->my_src);
+    gst_query_unref(transform->drain_query);
+    gst_caps_unref(transform->output_caps);
+    gst_atomic_queue_unref(transform->output_queue);
     free(transform);
-    return S_OK;
+
+    return STATUS_SUCCESS;
 }
 
-static GstElement *try_create_transform(GstCaps *src_caps, GstCaps *sink_caps)
+static bool wg_format_video_is_flipped(const struct wg_format *format)
 {
-    GstElement *element = NULL;
-    GList *tmp, *transforms;
-    gchar *type;
-
-    transforms = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_ANY,
-            GST_RANK_MARGINAL);
-
-    tmp = gst_element_factory_list_filter(transforms, src_caps, GST_PAD_SINK, FALSE);
-    gst_plugin_feature_list_free(transforms);
-    transforms = tmp;
-
-    tmp = gst_element_factory_list_filter(transforms, sink_caps, GST_PAD_SRC, FALSE);
-    gst_plugin_feature_list_free(transforms);
-    transforms = tmp;
-
-    transforms = g_list_sort(transforms, gst_plugin_feature_rank_compare_func);
-    for (tmp = transforms; tmp != NULL && element == NULL; tmp = tmp->next)
-    {
-        type = gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(tmp->data));
-        element = gst_element_factory_create(GST_ELEMENT_FACTORY(tmp->data), NULL);
-        if (!element)
-            GST_WARNING("Failed to create %s element.", type);
-    }
-    gst_plugin_feature_list_free(transforms);
-
-    if (element)
-        GST_INFO("Created %s element %p.", type, element);
-    else
-    {
-        gchar *src_str = gst_caps_to_string(src_caps), *sink_str = gst_caps_to_string(sink_caps);
-        GST_WARNING("Failed to create transform matching caps %s / %s.", src_str, sink_str);
-        g_free(sink_str);
-        g_free(src_str);
-    }
-
-    return element;
+    return format->major_type == WG_MAJOR_TYPE_VIDEO && (format->u.video.height < 0);
 }
 
-static bool transform_append_element(struct wg_transform *transform, GstElement *element,
-        GstElement **first, GstElement **last)
+static GstCaps *transform_get_parsed_caps(struct wg_format *format, const char *media_type)
 {
-    gchar *name = gst_element_get_name(element);
+    GstCaps *parsed_caps;
 
-    if (!gst_bin_add(GST_BIN(transform->container), element))
+    if (!(parsed_caps = gst_caps_new_empty_simple(media_type)))
+        return NULL;
+
+    switch (format->major_type)
     {
-        GST_ERROR("Failed to add %s element to bin.", name);
-        g_free(name);
-        return false;
+        case WG_MAJOR_TYPE_AUDIO_MPEG1:
+            gst_caps_set_simple(parsed_caps, "parsed", G_TYPE_BOOLEAN, true, "mpegversion", G_TYPE_INT, 1,
+                    "layer", G_TYPE_INT, format->u.audio.layer, NULL);
+            break;
+        case WG_MAJOR_TYPE_AUDIO_MPEG4:
+            gst_caps_set_simple(parsed_caps, "framed", G_TYPE_BOOLEAN, true, "mpegversion", G_TYPE_INT, 4, NULL);
+            break;
+        case WG_MAJOR_TYPE_AUDIO_WMA:
+            gst_caps_set_simple(parsed_caps, "wmaversion", G_TYPE_INT, format->u.audio.version, NULL);
+            break;
+        case WG_MAJOR_TYPE_VIDEO_H264:
+            gst_caps_set_simple(parsed_caps, "parsed", G_TYPE_BOOLEAN, true, NULL);
+            break;
+        case WG_MAJOR_TYPE_VIDEO_MPEG1:
+            gst_caps_set_simple(parsed_caps, "parsed", G_TYPE_BOOLEAN, true, "mpegversion", G_TYPE_INT, 1, NULL);
+            break;
+        case WG_MAJOR_TYPE_VIDEO_WMV:
+            switch (format->u.video_wmv.format)
+            {
+                case WG_WMV_VIDEO_FORMAT_WMV1:
+                    gst_caps_set_simple(parsed_caps, "wmvversion", G_TYPE_INT, 1, NULL);
+                    break;
+                case WG_WMV_VIDEO_FORMAT_WMV2:
+                    gst_caps_set_simple(parsed_caps, "wmvversion", G_TYPE_INT, 2, NULL);
+                    break;
+                case WG_WMV_VIDEO_FORMAT_WMV3:
+                case WG_WMV_VIDEO_FORMAT_WMVA:
+                case WG_WMV_VIDEO_FORMAT_WVC1:
+                    gst_caps_set_simple(parsed_caps, "wmvversion", G_TYPE_INT, 3, NULL);
+                    break;
+                default:
+                    GST_WARNING("Unknown WMV format %u.", format->u.video_wmv.format);
+                    break;
+            }
+            break;
+        case WG_MAJOR_TYPE_AUDIO:
+        case WG_MAJOR_TYPE_VIDEO:
+        case WG_MAJOR_TYPE_UNKNOWN:
+            break;
     }
 
-    if (*last && !gst_element_link(*last, element))
-    {
-        GST_ERROR("Failed to link %s element.", name);
-        g_free(name);
-        return false;
-    }
-
-    GST_INFO("Created %s element %p.", name, element);
-    g_free(name);
-
-    if (!*first)
-        *first = element;
-
-    *last = element;
-    return true;
+    return parsed_caps;
 }
 
 NTSTATUS wg_transform_create(void *args)
 {
     struct wg_transform_create_params *params = args;
-    struct wg_encoded_format input_format = *params->input_format;
     struct wg_format output_format = *params->output_format;
+    struct wg_format input_format = *params->input_format;
     GstElement *first = NULL, *last = NULL, *element;
-    GstCaps *raw_caps, *src_caps, *sink_caps;
+    GstCaps *sink_caps = NULL, *src_caps = NULL, *parsed_caps = NULL;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    GstPadTemplate *template = NULL;
     struct wg_transform *transform;
-    GstPadTemplate *template;
     const gchar *media_type;
-    GstSegment *segment;
-    int i, ret;
-
-    if (!init_gstreamer())
-        return E_FAIL;
+    GstEvent *event;
 
     if (!(transform = calloc(1, sizeof(*transform))))
-        return E_OUTOFMEMORY;
+        return STATUS_NO_MEMORY;
+    if (!(transform->container = gst_bin_new("wg_transform")))
+        goto out;
+    if (!(transform->input_queue = gst_atomic_queue_new(8)))
+        goto out;
+    if (!(transform->output_queue = gst_atomic_queue_new(8)))
+        goto out;
+    if (!(transform->drain_query = gst_query_new_drain()))
+        goto out;
+    if (!(transform->allocator = wg_allocator_create()))
+        goto out;
+    transform->attrs = *params->attrs;
+    transform->output_format = output_format;
 
-    list_init(&transform->samples);
-
-    src_caps = wg_encoded_format_to_caps(&input_format);
-    assert(src_caps);
-    sink_caps = wg_format_to_caps(&output_format);
-    assert(sink_caps);
-    media_type = gst_structure_get_name(gst_caps_get_structure(sink_caps, 0));
-    raw_caps = gst_caps_new_empty_simple(media_type);
-    assert(raw_caps);
-
-    transform->sink_caps = gst_caps_copy(sink_caps);
-    transform->container = gst_bin_new("wg_transform");
-    assert(transform->container);
-
-    if (!(element = try_create_transform(src_caps, raw_caps)) ||
-            !transform_append_element(transform, element, &first, &last))
-        goto failed;
-
-    switch (output_format.major_type)
-    {
-    case WG_MAJOR_TYPE_AUDIO:
-        if (!(element = create_element("audioconvert", "base")) ||
-                !transform_append_element(transform, element, &first, &last))
-            goto failed;
-        if (!(element = create_element("audioresample", "base")) ||
-                !transform_append_element(transform, element, &first, &last))
-            goto failed;
-        break;
-    case WG_MAJOR_TYPE_VIDEO:
-        if (!(element = create_element("videoconvert", "base")) ||
-                !transform_append_element(transform, element, &first, &last))
-            goto failed;
-        for (i = 0; i < gst_caps_get_size(sink_caps); ++i)
-            gst_structure_remove_fields(gst_caps_get_structure(sink_caps, i),
-                    "width", "height", NULL);
-        break;
-    default:
-        assert(0);
-        break;
-    }
-
-    if (!(transform->their_sink = gst_element_get_static_pad(first, "sink")))
-    {
-        GST_ERROR("Failed to find target sink pad.");
-        goto failed;
-    }
-    if (!(transform->their_src = gst_element_get_static_pad(last, "src")))
-    {
-        GST_ERROR("Failed to find target src pad.");
-        goto failed;
-    }
-
-    template = gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS, src_caps);
-    assert(template);
+    if (!(src_caps = transform_format_to_caps(transform, &input_format)))
+        goto out;
+    if (!(template = gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS, src_caps)))
+        goto out;
     transform->my_src = gst_pad_new_from_template(template, "src");
     g_object_unref(template);
-    assert(transform->my_src);
+    if (!transform->my_src)
+        goto out;
 
-    template = gst_pad_template_new("sink", GST_PAD_SINK, GST_PAD_ALWAYS, sink_caps);
-    assert(template);
+    GST_INFO("transform %p input caps %"GST_PTR_FORMAT, transform, src_caps);
+
+    gst_pad_set_element_private(transform->my_src, transform);
+    gst_pad_set_query_function(transform->my_src, transform_src_query_cb);
+
+    if (!(transform->output_caps = transform_format_to_caps(transform, &output_format)))
+        goto out;
+    if (!(template = gst_pad_template_new("sink", GST_PAD_SINK, GST_PAD_ALWAYS, transform->output_caps)))
+        goto out;
     transform->my_sink = gst_pad_new_from_template(template, "sink");
     g_object_unref(template);
-    assert(transform->my_sink);
+    if (!transform->my_sink)
+        goto out;
+
+    GST_INFO("transform %p output caps %"GST_PTR_FORMAT, transform, transform->output_caps);
 
     gst_pad_set_element_private(transform->my_sink, transform);
     gst_pad_set_event_function(transform->my_sink, transform_sink_event_cb);
+    gst_pad_set_query_function(transform->my_sink, transform_sink_query_cb);
     gst_pad_set_chain_function(transform->my_sink, transform_sink_chain_cb);
 
-    if ((ret = gst_pad_link(transform->my_src, transform->their_sink)) < 0)
+    media_type = gst_structure_get_name(gst_caps_get_structure(src_caps, 0));
+    if (!(parsed_caps = transform_get_parsed_caps(&input_format, media_type)))
+        goto out;
+
+    /* Since we append conversion elements, we don't want to filter decoders
+     * based on the actual output caps now. Matching decoders with the
+     * raw output media type should be enough.
+     */
+    media_type = gst_structure_get_name(gst_caps_get_structure(transform->output_caps, 0));
+    if (!(sink_caps = gst_caps_new_empty_simple(media_type)))
+        goto out;
+
+    switch (input_format.major_type)
     {
-        GST_ERROR("Failed to link sink pads, error %d.", ret);
-        goto failed;
-    }
-    if ((ret = gst_pad_link(transform->their_src, transform->my_sink)) < 0)
-    {
-        GST_ERROR("Failed to link source pads, error %d.", ret);
-        goto failed;
+        case WG_MAJOR_TYPE_VIDEO_H264:
+        case WG_MAJOR_TYPE_AUDIO_MPEG1:
+        case WG_MAJOR_TYPE_AUDIO_MPEG4:
+        case WG_MAJOR_TYPE_AUDIO_WMA:
+        case WG_MAJOR_TYPE_VIDEO_CINEPAK:
+        case WG_MAJOR_TYPE_VIDEO_INDEO:
+        case WG_MAJOR_TYPE_VIDEO_WMV:
+        case WG_MAJOR_TYPE_VIDEO_MPEG1:
+            if ((element = find_element(GST_ELEMENT_FACTORY_TYPE_PARSER, src_caps, parsed_caps))
+                    && !append_element(transform->container, element, &first, &last))
+                goto out;
+            else if (!element)
+            {
+                gst_caps_unref(parsed_caps);
+                parsed_caps = gst_caps_ref(src_caps);
+            }
+
+            if (!(element = find_element(GST_ELEMENT_FACTORY_TYPE_DECODER, parsed_caps, sink_caps))
+                    || !append_element(transform->container, element, &first, &last))
+                goto out;
+            break;
+
+        case WG_MAJOR_TYPE_AUDIO:
+        case WG_MAJOR_TYPE_VIDEO:
+            break;
+        case WG_MAJOR_TYPE_UNKNOWN:
+            GST_FIXME("Format %u not implemented!", input_format.major_type);
+            goto out;
     }
 
-    if (!(ret = gst_pad_set_active(transform->my_sink, 1)))
-        GST_WARNING("Failed to activate my_sink.");
-    if (!(ret = gst_pad_set_active(transform->my_src, 1)))
-        GST_WARNING("Failed to activate my_src.");
+    switch (output_format.major_type)
+    {
+        case WG_MAJOR_TYPE_AUDIO:
+            /* The MF audio decoder transforms allow decoding to various formats
+             * as well as resampling the audio at the same time, whereas
+             * GStreamer decoder plugins usually only support decoding to a
+             * single format and at the original rate.
+             *
+             * The WMA decoder transform also has output samples interleaved on
+             * Windows, whereas GStreamer avdec_wmav2 output uses
+             * non-interleaved format.
+             */
+            if (!(element = create_element("audioconvert", "base"))
+                    || !append_element(transform->container, element, &first, &last))
+                goto out;
+            if (!(element = create_element("audioresample", "base"))
+                    || !append_element(transform->container, element, &first, &last))
+                goto out;
+            break;
+
+        case WG_MAJOR_TYPE_VIDEO:
+            if (!(element = create_element("videoconvert", "base"))
+                    || !append_element(transform->container, element, &first, &last))
+                goto out;
+            if (!(transform->video_flip = create_element("videoflip", "base"))
+                    || !append_element(transform->container, transform->video_flip, &first, &last))
+                goto out;
+            transform->input_is_flipped = wg_format_video_is_flipped(&input_format);
+            if (transform->input_is_flipped != wg_format_video_is_flipped(&output_format))
+                gst_util_set_object_arg(G_OBJECT(transform->video_flip), "method", "vertical-flip");
+            if (!(element = create_element("videoconvert", "base"))
+                    || !append_element(transform->container, element, &first, &last))
+                goto out;
+            /* Let GStreamer choose a default number of threads. */
+            gst_util_set_object_arg(G_OBJECT(element), "n-threads", "0");
+            break;
+
+        case WG_MAJOR_TYPE_UNKNOWN:
+        case WG_MAJOR_TYPE_AUDIO_MPEG1:
+        case WG_MAJOR_TYPE_AUDIO_MPEG4:
+        case WG_MAJOR_TYPE_AUDIO_WMA:
+        case WG_MAJOR_TYPE_VIDEO_CINEPAK:
+        case WG_MAJOR_TYPE_VIDEO_H264:
+        case WG_MAJOR_TYPE_VIDEO_INDEO:
+        case WG_MAJOR_TYPE_VIDEO_WMV:
+        case WG_MAJOR_TYPE_VIDEO_MPEG1:
+            GST_FIXME("Format %u not implemented!", output_format.major_type);
+            goto out;
+    }
+
+    if (!link_src_to_element(transform->my_src, first))
+        goto out;
+    if (!link_element_to_sink(last, transform->my_sink))
+        goto out;
+    if (!gst_pad_set_active(transform->my_sink, 1))
+        goto out;
+    if (!gst_pad_set_active(transform->my_src, 1))
+        goto out;
 
     gst_element_set_state(transform->container, GST_STATE_PAUSED);
-    ret = gst_element_get_state(transform->container, NULL, NULL, -1);
-    if (ret == GST_STATE_CHANGE_FAILURE)
-    {
-        GST_ERROR("Failed to play stream.\n");
-        goto failed;
-    }
+    if (!gst_element_get_state(transform->container, NULL, NULL, -1))
+        goto out;
 
-    if (!gst_pad_push_event(transform->my_src, gst_event_new_stream_start("stream")))
-    {
-        GST_ERROR("Failed to send stream-start.");
-        goto failed;
-    }
+    if (!(event = gst_event_new_stream_start("stream"))
+            || !push_event(transform->my_src, event))
+        goto out;
+    if (!(event = gst_event_new_caps(src_caps))
+            || !push_event(transform->my_src, event))
+        goto out;
 
-    if (!gst_pad_push_event(transform->my_src, gst_event_new_caps(src_caps)) ||
-        !gst_pad_has_current_caps(transform->their_sink))
-    {
-        GST_ERROR("Failed to set stream caps.");
-        goto failed;
-    }
+    /* We need to use GST_FORMAT_TIME here because it's the only format
+     * some elements such avdec_wmav2 correctly support. */
+    gst_segment_init(&transform->segment, GST_FORMAT_TIME);
+    transform->segment.start = 0;
+    transform->segment.stop = -1;
+    if (!(event = gst_event_new_segment(&transform->segment))
+            || !push_event(transform->my_src, event))
+        goto out;
 
-    segment = gst_segment_new();
-    gst_segment_init(segment, GST_FORMAT_TIME);
-    segment->start = 0;
-    segment->stop = -1;
-    ret = gst_pad_push_event(transform->my_src, gst_event_new_segment(segment));
-    gst_segment_free(segment);
-    if (!ret)
-    {
-        GST_ERROR("Failed to start new segment.");
-        goto failed;
-    }
-
-    GST_INFO("Created winegstreamer transform %p.", transform);
-    params->transform = transform;
-
-failed:
-    gst_caps_unref(raw_caps);
+    gst_caps_unref(parsed_caps);
     gst_caps_unref(src_caps);
     gst_caps_unref(sink_caps);
 
-    if (params->transform)
-        return S_OK;
+    GST_INFO("Created winegstreamer transform %p.", transform);
+    params->transform = (wg_transform_t)(ULONG_PTR)transform;
+    return STATUS_SUCCESS;
 
-    wg_transform_destroy(transform);
-    return E_FAIL;
+out:
+    if (transform->my_sink)
+        gst_object_unref(transform->my_sink);
+    if (transform->output_caps)
+        gst_caps_unref(transform->output_caps);
+    if (transform->my_src)
+        gst_object_unref(transform->my_src);
+    if (src_caps)
+        gst_caps_unref(src_caps);
+    if (parsed_caps)
+        gst_caps_unref(parsed_caps);
+    if (sink_caps)
+        gst_caps_unref(sink_caps);
+    if (transform->allocator)
+        wg_allocator_destroy(transform->allocator);
+    if (transform->drain_query)
+        gst_query_unref(transform->drain_query);
+    if (transform->output_queue)
+        gst_atomic_queue_unref(transform->output_queue);
+    if (transform->input_queue)
+        gst_atomic_queue_unref(transform->input_queue);
+    if (transform->container)
+    {
+        gst_element_set_state(transform->container, GST_STATE_NULL);
+        gst_object_unref(transform->container);
+    }
+    free(transform);
+    GST_ERROR("Failed to create winegstreamer transform.");
+    return status;
+}
+
+NTSTATUS wg_transform_set_output_format(void *args)
+{
+    struct wg_transform_set_output_format_params *params = args;
+    struct wg_transform *transform = get_transform(params->transform);
+    const struct wg_format *format = params->format;
+    GstSample *sample;
+    GstCaps *caps;
+
+    if (!(caps = transform_format_to_caps(transform, format)))
+    {
+        GST_ERROR("Failed to convert format %p to caps.", format);
+        return STATUS_UNSUCCESSFUL;
+    }
+    transform->output_format = *format;
+
+    GST_INFO("transform %p output caps %"GST_PTR_FORMAT, transform, caps);
+
+    if (transform_output_caps_is_compatible(transform, caps))
+    {
+        gst_caps_unref(caps);
+        return STATUS_SUCCESS;
+    }
+
+    if (!gst_pad_peer_query(transform->my_src, transform->drain_query))
+    {
+        GST_ERROR("Failed to drain transform %p.", transform);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    gst_caps_unref(transform->output_caps);
+    transform->output_caps = caps;
+
+    if (transform->video_flip)
+    {
+        const char *value;
+        if (transform->input_is_flipped != wg_format_video_is_flipped(format))
+            value = "vertical-flip";
+        else
+            value = "none";
+        gst_util_set_object_arg(G_OBJECT(transform->video_flip), "method", value);
+    }
+    if (!push_event(transform->my_sink, gst_event_new_reconfigure()))
+    {
+        GST_ERROR("Failed to reconfigure transform %p.", transform);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    GST_INFO("Configured new caps %" GST_PTR_FORMAT ".", caps);
+
+    /* Ideally and to be fully compatible with native transform, the queued
+     * output buffers will need to be converted to the new output format and
+     * kept queued.
+     */
+    if (transform->output_sample)
+        gst_sample_unref(transform->output_sample);
+    while ((sample = gst_atomic_queue_pop(transform->output_queue)))
+        gst_sample_unref(sample);
+    transform->output_sample = NULL;
+
+    return STATUS_SUCCESS;
+}
+
+static void wg_sample_free_notify(void *arg)
+{
+    struct wg_sample *sample = arg;
+    GST_DEBUG("Releasing wg_sample %p", sample);
+    InterlockedDecrement(&sample->refcount);
 }
 
 NTSTATUS wg_transform_push_data(void *args)
 {
     struct wg_transform_push_data_params *params = args;
-    struct wg_transform *transform = params->transform;
+    struct wg_transform *transform = get_transform(params->transform);
+    struct wg_sample *sample = params->sample;
     GstBuffer *buffer;
-    GstFlowReturn ret;
+    guint length;
 
-    buffer = gst_buffer_new_and_alloc(params->size);
-    gst_buffer_fill(buffer, 0, params->data, params->size);
-
-    ret = gst_pad_push(transform->my_src, buffer);
-    if (ret)
+    length = gst_atomic_queue_length(transform->input_queue);
+    if (length >= transform->attrs.input_queue_length + 1)
     {
-        GST_ERROR("Failed to push buffer %d", ret);
-        return MF_E_NOTACCEPTING;
+        GST_INFO("Refusing %u bytes, %u buffers already queued", sample->size, length);
+        params->result = MF_E_NOTACCEPTING;
+        return STATUS_SUCCESS;
     }
 
-    GST_INFO("Pushed %u bytes", params->size);
-    return S_OK;
+    if (!(buffer = gst_buffer_new_wrapped_full(GST_MEMORY_FLAG_READONLY, wg_sample_data(sample), sample->max_size,
+            0, sample->size, sample, wg_sample_free_notify)))
+    {
+        GST_ERROR("Failed to allocate input buffer");
+        return STATUS_NO_MEMORY;
+    }
+    else
+    {
+        InterlockedIncrement(&sample->refcount);
+        GST_INFO("Wrapped %u/%u bytes from sample %p to %"GST_PTR_FORMAT, sample->size, sample->max_size, sample, buffer);
+    }
+
+    if (sample->flags & WG_SAMPLE_FLAG_HAS_PTS)
+        GST_BUFFER_PTS(buffer) = sample->pts * 100;
+    if (sample->flags & WG_SAMPLE_FLAG_HAS_DURATION)
+        GST_BUFFER_DURATION(buffer) = sample->duration * 100;
+    if (!(sample->flags & WG_SAMPLE_FLAG_SYNC_POINT))
+        GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+    if (sample->flags & WG_SAMPLE_FLAG_DISCONTINUITY)
+        GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_DISCONT);
+    gst_atomic_queue_push(transform->input_queue, buffer);
+
+    params->result = S_OK;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS copy_video_buffer(GstBuffer *buffer, const GstVideoInfo *src_video_info,
+        const GstVideoInfo *dst_video_info, struct wg_sample *sample, gsize *total_size)
+{
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    GstVideoFrame src_frame, dst_frame;
+    GstBuffer *dst_buffer;
+
+    if (sample->max_size < dst_video_info->size)
+    {
+        GST_ERROR("Output buffer is too small.");
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (!(dst_buffer = gst_buffer_new_wrapped_full(0, wg_sample_data(sample), sample->max_size,
+            0, sample->max_size, 0, NULL)))
+    {
+        GST_ERROR("Failed to wrap wg_sample into GstBuffer");
+        return STATUS_UNSUCCESSFUL;
+    }
+    gst_buffer_set_size(dst_buffer, dst_video_info->size);
+    *total_size = sample->size = dst_video_info->size;
+
+    if (!gst_video_frame_map(&src_frame, src_video_info, buffer, GST_MAP_READ))
+        GST_ERROR("Failed to map source frame.");
+    else
+    {
+        if (!gst_video_frame_map(&dst_frame, dst_video_info, dst_buffer, GST_MAP_WRITE))
+            GST_ERROR("Failed to map destination frame.");
+        else
+        {
+            if (gst_video_frame_copy(&dst_frame, &src_frame))
+                status = STATUS_SUCCESS;
+            else
+                GST_ERROR("Failed to copy video frame.");
+            gst_video_frame_unmap(&dst_frame);
+        }
+        gst_video_frame_unmap(&src_frame);
+    }
+
+    gst_buffer_unref(dst_buffer);
+    return status;
+}
+
+static NTSTATUS copy_buffer(GstBuffer *buffer, struct wg_sample *sample, gsize *total_size)
+{
+    GstMapInfo info;
+
+    if (!gst_buffer_map(buffer, &info, GST_MAP_READ))
+        return STATUS_UNSUCCESSFUL;
+
+    if (sample->max_size >= info.size)
+        sample->size = info.size;
+    else
+    {
+        sample->flags |= WG_SAMPLE_FLAG_INCOMPLETE;
+        sample->size = sample->max_size;
+    }
+
+    memcpy(wg_sample_data(sample), info.data, sample->size);
+    gst_buffer_unmap(buffer, &info);
+
+    if (sample->flags & WG_SAMPLE_FLAG_INCOMPLETE)
+        gst_buffer_resize(buffer, sample->size, -1);
+
+    *total_size = info.size;
+    return STATUS_SUCCESS;
+}
+
+static void set_sample_flags_from_buffer(struct wg_sample *sample, GstBuffer *buffer, gsize total_size)
+{
+    if (GST_BUFFER_PTS_IS_VALID(buffer))
+    {
+        sample->flags |= WG_SAMPLE_FLAG_HAS_PTS;
+        sample->pts = GST_BUFFER_PTS(buffer) / 100;
+    }
+    if (GST_BUFFER_DURATION_IS_VALID(buffer))
+    {
+        GstClockTime duration = GST_BUFFER_DURATION(buffer) / 100;
+
+        duration = (duration * sample->size) / total_size;
+        GST_BUFFER_DURATION(buffer) -= duration * 100;
+        if (GST_BUFFER_PTS_IS_VALID(buffer))
+            GST_BUFFER_PTS(buffer) += duration * 100;
+
+        sample->flags |= WG_SAMPLE_FLAG_HAS_DURATION;
+        sample->duration = duration;
+    }
+    if (!GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
+        sample->flags |= WG_SAMPLE_FLAG_SYNC_POINT;
+    if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DISCONT))
+        sample->flags |= WG_SAMPLE_FLAG_DISCONTINUITY;
+}
+
+static bool sample_needs_buffer_copy(struct wg_sample *sample, GstBuffer *buffer, gsize *total_size)
+{
+    GstMapInfo info;
+    bool needs_copy;
+
+    if (!gst_buffer_map(buffer, &info, GST_MAP_READ))
+    {
+        GST_ERROR("Failed to map buffer %"GST_PTR_FORMAT, buffer);
+        sample->size = 0;
+        return STATUS_UNSUCCESSFUL;
+    }
+    needs_copy = info.data != wg_sample_data(sample);
+    *total_size = sample->size = info.size;
+    gst_buffer_unmap(buffer, &info);
+
+    return needs_copy;
+}
+
+static NTSTATUS read_transform_output_video(struct wg_sample *sample, GstBuffer *buffer,
+        const GstVideoInfo *src_video_info, const GstVideoInfo *dst_video_info)
+{
+    gsize total_size;
+    NTSTATUS status;
+    bool needs_copy;
+
+    if (!(needs_copy = sample_needs_buffer_copy(sample, buffer, &total_size)))
+        status = STATUS_SUCCESS;
+    else
+        status = copy_video_buffer(buffer, src_video_info, dst_video_info, sample, &total_size);
+
+    if (status)
+    {
+        GST_ERROR("Failed to copy buffer %"GST_PTR_FORMAT, buffer);
+        sample->size = 0;
+        return status;
+    }
+
+    set_sample_flags_from_buffer(sample, buffer, total_size);
+
+    if (needs_copy)
+        GST_WARNING("Copied %u bytes, sample %p, flags %#x", sample->size, sample, sample->flags);
+    else if (sample->flags & WG_SAMPLE_FLAG_INCOMPLETE)
+        GST_ERROR("Partial read %u bytes, sample %p, flags %#x", sample->size, sample, sample->flags);
+    else
+        GST_INFO("Read %u bytes, sample %p, flags %#x", sample->size, sample, sample->flags);
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS read_transform_output(struct wg_sample *sample, GstBuffer *buffer)
+{
+    gsize total_size;
+    NTSTATUS status;
+    bool needs_copy;
+
+    if (!(needs_copy = sample_needs_buffer_copy(sample, buffer, &total_size)))
+        status = STATUS_SUCCESS;
+    else
+        status = copy_buffer(buffer, sample, &total_size);
+
+    if (status)
+    {
+        GST_ERROR("Failed to copy buffer %"GST_PTR_FORMAT, buffer);
+        sample->size = 0;
+        return status;
+    }
+
+    set_sample_flags_from_buffer(sample, buffer, total_size);
+
+    if (needs_copy)
+        GST_INFO("Copied %u bytes, sample %p, flags %#x", sample->size, sample, sample->flags);
+    else if (sample->flags & WG_SAMPLE_FLAG_INCOMPLETE)
+        GST_ERROR("Partial read %u bytes, sample %p, flags %#x", sample->size, sample, sample->flags);
+    else
+        GST_INFO("Read %u bytes, sample %p, flags %#x", sample->size, sample, sample->flags);
+
+    return STATUS_SUCCESS;
+}
+
+static bool get_transform_output(struct wg_transform *transform, struct wg_sample *sample)
+{
+    GstBuffer *input_buffer;
+    GstFlowReturn ret;
+
+    wg_allocator_provide_sample(transform->allocator, sample);
+
+    while (!(transform->output_sample = gst_atomic_queue_pop(transform->output_queue))
+            && (input_buffer = gst_atomic_queue_pop(transform->input_queue)))
+    {
+        if ((ret = gst_pad_push(transform->my_src, input_buffer)))
+            GST_WARNING("Failed to push transform input, error %d", ret);
+    }
+
+    /* Remove the sample so the allocator cannot use it */
+    wg_allocator_provide_sample(transform->allocator, NULL);
+
+    return !!transform->output_sample;
 }
 
 NTSTATUS wg_transform_read_data(void *args)
 {
     struct wg_transform_read_data_params *params = args;
-    struct wg_transform *transform = params->transform;
-    struct wg_sample *read_sample = params->sample;
-    struct wg_transform_sample *transform_sample;
-    struct wg_format buffer_format;
-    bool broken_timestamp = false;
-    GstBuffer *buffer;
-    struct list *head;
-    GstMapInfo info;
-    GstCaps *caps;
+    struct wg_transform *transform = get_transform(params->transform);
+    GstVideoInfo src_video_info, dst_video_info;
+    struct wg_sample *sample = params->sample;
+    struct wg_format *format = params->format;
+    GstVideoAlignment align = {0};
+    GstBuffer *output_buffer;
+    GstCaps *output_caps;
+    bool discard_data;
+    NTSTATUS status;
 
-    pthread_mutex_lock(&transform->mutex);
-    if (!(head = list_head(&transform->samples)))
+    if (!transform->output_sample && !get_transform_output(transform, sample))
     {
-        pthread_mutex_unlock(&transform->mutex);
-        return MF_E_TRANSFORM_NEED_MORE_INPUT;
+        sample->size = 0;
+        params->result = MF_E_TRANSFORM_NEED_MORE_INPUT;
+        GST_INFO("Cannot read %u bytes, no output available", sample->max_size);
+        wg_allocator_release_sample(transform->allocator, sample, false);
+        return STATUS_SUCCESS;
     }
 
-    transform_sample = LIST_ENTRY(head, struct wg_transform_sample, entry);
-    buffer = gst_sample_get_buffer(transform_sample->sample);
+    output_buffer = gst_sample_get_buffer(transform->output_sample);
+    output_caps = gst_sample_get_caps(transform->output_sample);
 
-    if (read_sample->format)
+    if (stream_type_from_caps(output_caps) == GST_STREAM_TYPE_VIDEO)
     {
-        if (!(caps = gst_sample_get_caps(transform_sample->sample)))
-            caps = transform->sink_caps;
-        wg_format_from_caps(&buffer_format, caps);
-        if (!wg_format_compare(read_sample->format, &buffer_format))
+        gsize plane_align = transform->attrs.output_plane_align;
+
+        if (!gst_video_info_from_caps(&src_video_info, output_caps))
+            GST_ERROR("Failed to get video info from %"GST_PTR_FORMAT, output_caps);
+        dst_video_info = src_video_info;
+
+        /* set the desired output buffer alignment on the dest video info */
+        align_video_info_planes(plane_align, &dst_video_info, &align);
+    }
+
+    if (GST_MINI_OBJECT_FLAG_IS_SET(transform->output_sample, GST_SAMPLE_FLAG_WG_CAPS_CHANGED))
+    {
+        GST_MINI_OBJECT_FLAG_UNSET(transform->output_sample, GST_SAMPLE_FLAG_WG_CAPS_CHANGED);
+
+        GST_INFO("transform %p output caps %"GST_PTR_FORMAT, transform, output_caps);
+
+        if (format)
         {
-            *read_sample->format = buffer_format;
-            read_sample->size = gst_buffer_get_size(buffer);
-            pthread_mutex_unlock(&transform->mutex);
-            return MF_E_TRANSFORM_STREAM_CHANGE;
+            wg_format_from_caps(format, output_caps);
+
+            if (format->major_type == WG_MAJOR_TYPE_VIDEO)
+            {
+                GST_INFO("Returning video alignment left %u, top %u, right %u, bottom %u.", align.padding_left,
+                        align.padding_top, align.padding_right, align.padding_bottom);
+
+                format->u.video.padding.left = align.padding_left;
+                format->u.video.width += format->u.video.padding.left;
+                format->u.video.padding.right = align.padding_right;
+                format->u.video.width += format->u.video.padding.right;
+                format->u.video.padding.top = align.padding_top;
+                format->u.video.height += format->u.video.padding.top;
+                format->u.video.padding.bottom = align.padding_bottom;
+                format->u.video.height += format->u.video.padding.bottom;
+            }
         }
 
-        if (buffer_format.major_type == WG_MAJOR_TYPE_VIDEO
-                && buffer_format.u.video.fps_n <= 1
-                && buffer_format.u.video.fps_d <= 1)
-            broken_timestamp = true;
+        params->result = MF_E_TRANSFORM_STREAM_CHANGE;
+        GST_INFO("Format changed detected, returning no output");
+        wg_allocator_release_sample(transform->allocator, sample, false);
+        return STATUS_SUCCESS;
     }
 
-    gst_buffer_map(buffer, &info, GST_MAP_READ);
-    if (read_sample->size > info.size)
-        read_sample->size = info.size;
-    memcpy(read_sample->data, info.data, read_sample->size);
-    gst_buffer_unmap(buffer, &info);
+    if (stream_type_from_caps(output_caps) == GST_STREAM_TYPE_VIDEO)
+        status = read_transform_output_video(sample, output_buffer,
+                &src_video_info, &dst_video_info);
+    else
+        status = read_transform_output(sample, output_buffer);
 
-    if (buffer->pts != GST_CLOCK_TIME_NONE && !broken_timestamp)
+    if (status)
     {
-        read_sample->flags |= WG_SAMPLE_FLAG_HAS_PTS;
-        read_sample->pts = buffer->pts / 100;
-    }
-    if (buffer->duration != GST_CLOCK_TIME_NONE && !broken_timestamp)
-    {
-        read_sample->flags |= WG_SAMPLE_FLAG_HAS_DURATION;
-        read_sample->duration = buffer->duration / 100;
+        wg_allocator_release_sample(transform->allocator, sample, false);
+        return status;
     }
 
-    if (info.size > read_sample->size)
-    {
-        read_sample->flags |= WG_SAMPLE_FLAG_INCOMPLETE;
-        gst_buffer_resize(buffer, read_sample->size, -1);
-    }
+    if (sample->flags & WG_SAMPLE_FLAG_INCOMPLETE)
+        discard_data = false;
     else
     {
-        gst_sample_unref(transform_sample->sample);
-        list_remove(&transform_sample->entry);
-        free(transform_sample);
-    }
-    pthread_mutex_unlock(&transform->mutex);
+        /* Taint the buffer memory to make sure it cannot be reused by the buffer pool,
+         * for the pool to always requests new memory from the allocator, and so we can
+         * then always provide output sample memory to achieve zero-copy.
+         *
+         * However, some decoder keep a reference on the buffer they passed downstream,
+         * to re-use it later. In this case, it will not be possible to do zero-copy,
+         * and we should copy the data back to the buffer and leave it unchanged.
+         *
+         * Some other plugins make assumptions that the returned buffer will always have
+         * at least one memory attached, we cannot just remove it and need to replace the
+         * memory instead.
+         */
+        if ((discard_data = gst_buffer_is_writable(output_buffer)))
+            gst_buffer_replace_all_memory(output_buffer, gst_allocator_alloc(NULL, 0, NULL));
 
-    GST_INFO("Read %u bytes, flags %#x", read_sample->size, read_sample->flags);
+        gst_sample_unref(transform->output_sample);
+        transform->output_sample = NULL;
+    }
+
+    params->result = S_OK;
+    wg_allocator_release_sample(transform->allocator, sample, discard_data);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS wg_transform_get_status(void *args)
+{
+    struct wg_transform_get_status_params *params = args;
+    struct wg_transform *transform = get_transform(params->transform);
+
+    params->accepts_input = gst_atomic_queue_length(transform->input_queue) < transform->attrs.input_queue_length + 1;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS wg_transform_drain(void *args)
+{
+    struct wg_transform *transform = get_transform(*(wg_transform_t *)args);
+    GstBuffer *input_buffer;
+    GstFlowReturn ret;
+    GstEvent *event;
+
+    GST_LOG("transform %p", transform);
+
+    while ((input_buffer = gst_atomic_queue_pop(transform->input_queue)))
+    {
+        if ((ret = gst_pad_push(transform->my_src, input_buffer)))
+            GST_WARNING("Failed to push transform input, error %d", ret);
+    }
+
+    if (!(event = gst_event_new_segment_done(GST_FORMAT_TIME, -1))
+            || !push_event(transform->my_src, event))
+        goto error;
+    if (!(event = gst_event_new_eos())
+            || !push_event(transform->my_src, event))
+        goto error;
+    if (!(event = gst_event_new_stream_start("stream"))
+            || !push_event(transform->my_src, event))
+        goto error;
+    if (!(event = gst_event_new_segment(&transform->segment))
+            || !push_event(transform->my_src, event))
+        goto error;
+
+    return STATUS_SUCCESS;
+
+error:
+    GST_ERROR("Failed to drain transform %p.", transform);
+    return STATUS_UNSUCCESSFUL;
+}
+
+NTSTATUS wg_transform_flush(void *args)
+{
+    struct wg_transform *transform = get_transform(*(wg_transform_t *)args);
+    GstBuffer *input_buffer;
+    GstSample *sample;
+    NTSTATUS status;
+
+    GST_LOG("transform %p", transform);
+
+    while ((input_buffer = gst_atomic_queue_pop(transform->input_queue)))
+        gst_buffer_unref(input_buffer);
+
+    if ((status = wg_transform_drain(args)))
+        return status;
+
+    while ((sample = gst_atomic_queue_pop(transform->output_queue)))
+        gst_sample_unref(sample);
+    if ((sample = transform->output_sample))
+        gst_sample_unref(sample);
+    transform->output_sample = NULL;
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS wg_transform_notify_qos(void *args)
+{
+    const struct wg_transform_notify_qos_params *params = args;
+    struct wg_transform *transform = get_transform(params->transform);
+    GstClockTimeDiff diff = params->diff * 100;
+    GstClockTime stream_time;
+    GstEvent *event;
+
+    /* We return timestamps in stream time, i.e. relative to the start of the
+     * file (or other medium), but gst_event_new_qos() expects the timestamp in
+     * running time. */
+    stream_time = gst_segment_to_running_time(&transform->segment, GST_FORMAT_TIME, params->timestamp * 100);
+    if (diff < (GstClockTimeDiff)-stream_time)
+        diff = -stream_time;
+    if (stream_time == -1)
+    {
+        /* This can happen legitimately if the sample falls outside of the
+         * segment bounds. GStreamer elements shouldn't present the sample in
+         * that case, but DirectShow doesn't care. */
+        GST_LOG("Ignoring QoS event.");
+        return S_OK;
+    }
+    event = gst_event_new_qos(params->underflow ? GST_QOS_TYPE_UNDERFLOW : GST_QOS_TYPE_OVERFLOW, params->proportion, diff, stream_time);
+    push_event(transform->my_sink, event);
+
     return S_OK;
 }

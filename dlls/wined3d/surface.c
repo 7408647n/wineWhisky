@@ -27,6 +27,7 @@
  */
 
 #include "wined3d_private.h"
+#include "wined3d_gl.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
@@ -40,7 +41,7 @@ static void get_color_masks(const struct wined3d_format *format, uint32_t *masks
 }
 
 static void convert_r32_float_r16_float(const BYTE *src, BYTE *dst,
-        DWORD pitch_in, DWORD pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
 {
     unsigned short *dst_s;
     const float *src_f;
@@ -60,7 +61,7 @@ static void convert_r32_float_r16_float(const BYTE *src, BYTE *dst,
 }
 
 static void convert_r5g6b5_x8r8g8b8(const BYTE *src, BYTE *dst,
-        DWORD pitch_in, DWORD pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
 {
     static const unsigned char convert_5to8[] =
     {
@@ -102,7 +103,7 @@ static void convert_r5g6b5_x8r8g8b8(const BYTE *src, BYTE *dst,
 /* We use this for both B8G8R8A8 -> B8G8R8X8 and B8G8R8X8 -> B8G8R8A8, since
  * in both cases we're just setting the X / Alpha channel to 0xff. */
 static void convert_a8r8g8b8_x8r8g8b8(const BYTE *src, BYTE *dst,
-        DWORD pitch_in, DWORD pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
 {
     unsigned int x, y;
 
@@ -126,7 +127,7 @@ static inline BYTE cliptobyte(int x)
 }
 
 static void convert_yuy2_x8r8g8b8(const BYTE *src, BYTE *dst,
-        DWORD pitch_in, DWORD pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
 {
     int c2, d, e, r2 = 0, g2 = 0, b2 = 0;
     unsigned int x, y;
@@ -168,7 +169,7 @@ static void convert_yuy2_x8r8g8b8(const BYTE *src, BYTE *dst,
 }
 
 static void convert_yuy2_r5g6b5(const BYTE *src, BYTE *dst,
-        DWORD pitch_in, DWORD pitch_out, unsigned int w, unsigned int h)
+        unsigned int pitch_in, unsigned int pitch_out, unsigned int w, unsigned int h)
 {
     unsigned int x, y;
     int c2, d, e, r2 = 0, g2 = 0, b2 = 0;
@@ -211,7 +212,9 @@ static void convert_yuy2_r5g6b5(const BYTE *src, BYTE *dst,
 struct d3dfmt_converter_desc
 {
     enum wined3d_format_id from, to;
-    void (*convert)(const BYTE *src, BYTE *dst, DWORD pitch_in, DWORD pitch_out, unsigned int w, unsigned int h);
+    void (*convert)(const BYTE *src, BYTE *dst,
+                    unsigned int pitch_in, unsigned int pitch_out,
+                    unsigned int w, unsigned int h);
 };
 
 static const struct d3dfmt_converter_desc converters[] =
@@ -356,35 +359,35 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
     uint8_t *offset;
     unsigned int i;
 
+    TRACE("texture %p, sub_resource_idx %u, context %p, src_location %s, dst_location %s.\n",
+            texture, sub_resource_idx, context, wined3d_debug_location(src_location), wined3d_debug_location(dst_location));
+
     /* dst_location was already prepared by the caller. */
     wined3d_texture_get_bo_address(texture, sub_resource_idx, &data, dst_location);
     offset = data.addr;
 
     restore_texture = context->current_rt.texture;
     restore_idx = context->current_rt.sub_resource_idx;
-    if (restore_texture != texture || restore_idx != sub_resource_idx)
+    if (!wined3d_resource_is_offscreen(resource) && (restore_texture != texture || restore_idx != sub_resource_idx))
         context = context_acquire(device, texture, sub_resource_idx);
     else
         restore_texture = NULL;
     context_gl = wined3d_context_gl(context);
     gl_info = context_gl->gl_info;
 
-    if (src_location != resource->draw_binding)
+    if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
     {
-        wined3d_context_gl_apply_fbo_state_blit(context_gl, GL_READ_FRAMEBUFFER,
-                resource, sub_resource_idx, NULL, 0, src_location);
-        wined3d_context_gl_check_fbo_status(context_gl, GL_READ_FRAMEBUFFER);
-        context_invalidate_state(context, STATE_FRAMEBUFFER);
-    }
-    else
-    {
-        wined3d_context_gl_apply_blit_state(context_gl, device);
+        if (resource->format->depth_size || resource->format->stencil_size)
+            wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_READ_FRAMEBUFFER,
+                    NULL, 0, resource, sub_resource_idx, src_location);
+        else
+            wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_READ_FRAMEBUFFER,
+                    resource, sub_resource_idx, NULL, 0, src_location);
     }
 
-    /* Select the correct read buffer, and give some debug output.
-     * There is no need to keep track of the current read buffer or reset it,
-     * every part of the code that reads sets the read buffer as desired.
-     */
+    /* Select the correct read buffer, and give some debug output. There is no
+     * need to keep track of the current read buffer or reset it, every part
+     * of the code that reads pixels sets the read buffer as desired. */
     if (src_location != WINED3D_LOCATION_DRAWABLE || wined3d_resource_is_offscreen(resource))
     {
         /* Mapping the primary render target which is not on a swapchain.
@@ -402,6 +405,8 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
         src_is_upside_down = FALSE;
     }
     checkGLcall("glReadBuffer");
+    if (wined3d_settings.offscreen_rendering_mode == ORM_FBO)
+        wined3d_context_gl_check_fbo_status(context_gl, GL_READ_FRAMEBUFFER);
 
     if (data.buffer_object)
     {
@@ -438,7 +443,7 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
         /* glReadPixels returns the image upside down, and there is no way to
          * prevent this. Flip the lines in software. */
 
-        if (!(row = heap_alloc(row_pitch)))
+        if (!(row = malloc(row_pitch)))
             goto error;
 
         if (data.buffer_object)
@@ -458,7 +463,7 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
             top += row_pitch;
             bottom -= row_pitch;
         }
-        heap_free(row);
+        free(row);
 
         if (data.buffer_object)
             GL_EXTCALL(glUnmapBuffer(GL_PIXEL_PACK_BUFFER));
@@ -536,12 +541,12 @@ static void cpu_blitter_destroy(struct wined3d_blitter *blitter, struct wined3d_
     if ((next = blitter->next))
         next->ops->blitter_destroy(next, context);
 
-    heap_free(blitter);
+    free(blitter);
 }
 
 static HRESULT surface_cpu_blt_compressed(const BYTE *src_data, BYTE *dst_data,
         UINT src_pitch, UINT dst_pitch, UINT update_w, UINT update_h,
-        const struct wined3d_format *format, DWORD flags, const struct wined3d_blt_fx *fx)
+        const struct wined3d_format *format, uint32_t flags, const struct wined3d_blt_fx *fx)
 {
     UINT row_block_count;
     const BYTE *src_row;
@@ -644,7 +649,7 @@ static HRESULT surface_cpu_blt_compressed(const BYTE *src_data, BYTE *dst_data,
 
 static HRESULT surface_cpu_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
         const struct wined3d_box *dst_box, struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx,
-        const struct wined3d_box *src_box, DWORD flags, const struct wined3d_blt_fx *fx,
+        const struct wined3d_box *src_box, uint32_t flags, const struct wined3d_blt_fx *fx,
         enum wined3d_texture_filter_type filter)
 {
     unsigned int bpp, src_height, src_width, dst_height, dst_width, row_byte_count;
@@ -743,7 +748,7 @@ static HRESULT surface_cpu_blt(struct wined3d_texture *dst_texture, unsigned int
         {
             wined3d_format_calculate_pitch(dst_format, 1, dst_box->right, dst_box->bottom,
                     &dst_map.row_pitch, &dst_map.slice_pitch);
-            dst_map.data = heap_alloc(dst_map.slice_pitch);
+            dst_map.data = malloc(dst_map.slice_pitch);
         }
         else
         {
@@ -967,7 +972,7 @@ do { \
             }
             else
             {
-                DWORD masks[3];
+                uint32_t masks[3];
                 get_color_masks(src_format, masks);
                 keymask = masks[0] | masks[1] | masks[2];
             }
@@ -1152,7 +1157,7 @@ release:
 
     if (upload)
     {
-        heap_free(dst_map.data);
+        free(dst_map.data);
     }
     else
     {
@@ -1241,7 +1246,7 @@ static bool wined3d_box_intersect(struct wined3d_box *ret, const struct wined3d_
 
 static void cpu_blitter_clear(struct wined3d_blitter *blitter, struct wined3d_device *device,
         unsigned int rt_count, const struct wined3d_fb_state *fb, unsigned int rect_count, const RECT *clear_rects,
-        const RECT *draw_rect, DWORD flags, const struct wined3d_color *colour, float depth, DWORD stencil)
+        const RECT *draw_rect, uint32_t flags, const struct wined3d_color *colour, float depth, unsigned int stencil)
 {
     struct wined3d_color c = {depth, 0.0f, 0.0f, 0.0f};
     struct wined3d_box box, box_clip, box_view;
@@ -1345,7 +1350,7 @@ struct wined3d_blitter *wined3d_cpu_blitter_create(void)
 {
     struct wined3d_blitter *blitter;
 
-    if (!(blitter = heap_alloc(sizeof(*blitter))))
+    if (!(blitter = malloc(sizeof(*blitter))))
         return NULL;
 
     TRACE("Created blitter %p.\n", blitter);
@@ -1385,7 +1390,7 @@ static bool sub_resource_is_on_cpu(const struct wined3d_texture *texture, unsign
 
 HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
         const struct wined3d_box *dst_box, struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx,
-        const struct wined3d_box *src_box, DWORD flags, const struct wined3d_blt_fx *fx,
+        const struct wined3d_box *src_box, uint32_t flags, const struct wined3d_blt_fx *fx,
         enum wined3d_texture_filter_type filter)
 {
     struct wined3d_texture_sub_resource *src_sub_resource, *dst_sub_resource;

@@ -25,8 +25,6 @@
 
 #include "d3dcompiler_private.h"
 
-#include <vkd3d_shader.h>
-
 WINE_DEFAULT_DEBUG_CHANNEL(d3dcompiler);
 
 static HRESULT hresult_from_vkd3d_result(int vkd3d_result)
@@ -100,7 +98,7 @@ static HRESULT WINAPI d3dcompiler_include_from_file_open(ID3DInclude *iface, D3D
         len++;
         initial_dir = current_dir;
     }
-    fullpath = heap_alloc(len + strlen(filename) + 1);
+    fullpath = malloc(len + strlen(filename) + 1);
     if (!fullpath)
         return E_OUTOFMEMORY;
     memcpy(fullpath, initial_dir, len);
@@ -115,7 +113,7 @@ static HRESULT WINAPI d3dcompiler_include_from_file_open(ID3DInclude *iface, D3D
     size = GetFileSize(file, NULL);
     if (size == INVALID_FILE_SIZE)
         goto error;
-    buffer = heap_alloc(size);
+    buffer = malloc(size);
     if (!buffer)
         goto error;
     if (!ReadFile(file, buffer, size, &read, NULL) || read != size)
@@ -124,13 +122,13 @@ static HRESULT WINAPI d3dcompiler_include_from_file_open(ID3DInclude *iface, D3D
     *bytes = size;
     *data = buffer;
 
-    heap_free(fullpath);
+    free(fullpath);
     CloseHandle(file);
     return S_OK;
 
 error:
-    heap_free(fullpath);
-    heap_free(buffer);
+    free(fullpath);
+    free(buffer);
     CloseHandle(file);
     WARN("Returning E_FAIL.\n");
     return E_FAIL;
@@ -138,7 +136,7 @@ error:
 
 static HRESULT WINAPI d3dcompiler_include_from_file_close(ID3DInclude *iface, const void *data)
 {
-    heap_free((void *)data);
+    free((void *)data);
     return S_OK;
 }
 
@@ -171,6 +169,23 @@ static void close_include(const struct vkd3d_shader_code *code, void *context)
     ID3DInclude *iface = context;
 
     ID3DInclude_Close(iface, code->code);
+}
+
+static const char *get_line(const char **ptr)
+{
+    const char *p, *q;
+
+    p = *ptr;
+    if (!(q = strstr(p, "\n")))
+    {
+        if (!*p)
+            return NULL;
+        *ptr += strlen(p);
+        return p;
+    }
+    *ptr = q + 1;
+
+    return p;
 }
 
 static HRESULT preprocess_shader(const void *data, SIZE_T data_size, const char *filename,
@@ -218,8 +233,25 @@ static HRESULT preprocess_shader(const void *data, SIZE_T data_size, const char 
     preprocess_info.include_context = include;
 
     ret = vkd3d_shader_preprocess(&compile_info, &byte_code, &messages);
+
+    if (ret)
+        ERR("Failed to preprocess shader, vkd3d result %d.\n", ret);
+
     if (messages)
     {
+        if (*messages && ERR_ON(d3dcompiler))
+        {
+            const char *ptr = messages;
+            const char *line;
+
+            ERR("Shader log:\n");
+            while ((line = get_line(&ptr)))
+            {
+                ERR("    %.*s", (int)(ptr - line), line);
+            }
+            ERR("\n");
+        }
+
         if (messages_blob)
         {
             size_t size = strlen(messages);
@@ -277,7 +309,7 @@ static HRESULT assemble_shader(const char *preproc_shader, ID3DBlob **shader_blo
             hr = D3DCreateBlob(size, &buffer);
             if (FAILED(hr))
             {
-                HeapFree(GetProcessHeap(), 0, messages);
+                free(messages);
                 if (shader) SlDeleteShader(shader);
                 return hr;
             }
@@ -292,7 +324,7 @@ static HRESULT assemble_shader(const char *preproc_shader, ID3DBlob **shader_blo
             if (*error_messages) ID3D10Blob_Release(*error_messages);
             *error_messages = buffer;
         }
-        HeapFree(GetProcessHeap(), 0, messages);
+        free(messages);
     }
 
     if (shader == NULL)
@@ -314,14 +346,14 @@ static HRESULT assemble_shader(const char *preproc_shader, ID3DBlob **shader_blo
         hr = D3DCreateBlob(size, &buffer);
         if (FAILED(hr))
         {
-            HeapFree(GetProcessHeap(), 0, res);
+            free(res);
             return hr;
         }
         CopyMemory(ID3D10Blob_GetBufferPointer(buffer), res, size);
         *shader_blob = buffer;
     }
 
-    HeapFree(GetProcessHeap(), 0, res);
+    free(res);
 
     return S_OK;
 }
@@ -365,29 +397,12 @@ HRESULT WINAPI D3DAssemble(const void *data, SIZE_T datasize, const char *filena
     return hr;
 }
 
-HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filename,
-        const D3D_SHADER_MACRO *macros, ID3DInclude *include, const char *entry_point,
-        const char *profile, UINT flags, UINT effect_flags, UINT secondary_flags,
-        const void *secondary_data, SIZE_T secondary_data_size, ID3DBlob **shader_blob,
-        ID3DBlob **messages_blob)
+static enum vkd3d_shader_target_type get_target_for_profile(const char *profile)
 {
-    struct d3dcompiler_include_from_file include_from_file;
-    struct vkd3d_shader_preprocess_info preprocess_info;
-    struct vkd3d_shader_hlsl_source_info hlsl_info;
-    struct vkd3d_shader_compile_option options[2];
-    struct vkd3d_shader_compile_info compile_info;
-    struct vkd3d_shader_compile_option *option;
-    struct vkd3d_shader_code byte_code;
-    const D3D_SHADER_MACRO *macro;
     size_t profile_len, i;
-    char *messages;
-    HRESULT hr;
-    int ret;
 
     static const char * const d3dbc_profiles[] =
     {
-        "fx_2_",
-
         "ps.1.",
         "ps.2.",
         "ps.3.",
@@ -407,6 +422,50 @@ HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filen
         "tx_1_",
     };
 
+    static const char * const fx_profiles[] =
+    {
+        "fx_2_0",
+        "fx_4_0",
+        "fx_4_1",
+        "fx_5_0",
+    };
+
+    profile_len = strlen(profile);
+    for (i = 0; i < ARRAY_SIZE(d3dbc_profiles); ++i)
+    {
+        size_t len = strlen(d3dbc_profiles[i]);
+
+        if (len <= profile_len && !memcmp(profile, d3dbc_profiles[i], len))
+            return VKD3D_SHADER_TARGET_D3D_BYTECODE;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(fx_profiles); ++i)
+    {
+        if (!strcmp(profile, fx_profiles[i]))
+            return VKD3D_SHADER_TARGET_FX;
+    }
+
+    return VKD3D_SHADER_TARGET_DXBC_TPF;
+}
+
+HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filename,
+        const D3D_SHADER_MACRO *macros, ID3DInclude *include, const char *entry_point,
+        const char *profile, UINT flags, UINT effect_flags, UINT secondary_flags,
+        const void *secondary_data, SIZE_T secondary_data_size, ID3DBlob **shader_blob,
+        ID3DBlob **messages_blob)
+{
+    struct d3dcompiler_include_from_file include_from_file;
+    struct vkd3d_shader_preprocess_info preprocess_info;
+    struct vkd3d_shader_hlsl_source_info hlsl_info;
+    struct vkd3d_shader_compile_option options[4];
+    struct vkd3d_shader_compile_info compile_info;
+    struct vkd3d_shader_compile_option *option;
+    struct vkd3d_shader_code byte_code;
+    const D3D_SHADER_MACRO *macro;
+    char *messages;
+    HRESULT hr;
+    int ret;
+
     TRACE("data %p, data_size %Iu, filename %s, macros %p, include %p, entry_point %s, "
             "profile %s, flags %#x, effect_flags %#x, secondary_flags %#x, secondary_data %p, "
             "secondary_data_size %Iu, shader_blob %p, messages_blob %p.\n",
@@ -421,13 +480,18 @@ HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filen
         include = &include_from_file.ID3DInclude_iface;
     }
 
-    if (flags & ~D3DCOMPILE_DEBUG)
+    if (flags & ~(D3DCOMPILE_DEBUG | D3DCOMPILE_PACK_MATRIX_ROW_MAJOR | D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR
+            | D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY))
+    {
         FIXME("Ignoring flags %#x.\n", flags);
+    }
     if (effect_flags)
         FIXME("Ignoring effect flags %#x.\n", effect_flags);
     if (secondary_flags)
         FIXME("Ignoring secondary flags %#x.\n", secondary_flags);
 
+    if (shader_blob)
+        *shader_blob = NULL;
     if (messages_blob)
         *messages_blob = NULL;
 
@@ -440,23 +504,11 @@ HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filen
     compile_info.source.code = data;
     compile_info.source.size = data_size;
     compile_info.source_type = VKD3D_SHADER_SOURCE_HLSL;
-    compile_info.target_type = VKD3D_SHADER_TARGET_DXBC_TPF;
+    compile_info.target_type = get_target_for_profile(profile);
     compile_info.options = options;
     compile_info.option_count = 1;
     compile_info.log_level = VKD3D_SHADER_LOG_INFO;
     compile_info.source_name = filename;
-
-    profile_len = strlen(profile);
-    for (i = 0; i < ARRAY_SIZE(d3dbc_profiles); ++i)
-    {
-        size_t len = strlen(d3dbc_profiles[i]);
-
-        if (len <= profile_len && !memcmp(profile, d3dbc_profiles[i], len))
-        {
-            compile_info.target_type = VKD3D_SHADER_TARGET_D3D_BYTECODE;
-            break;
-        }
-    }
 
     preprocess_info.type = VKD3D_SHADER_STRUCTURE_TYPE_PREPROCESS_INFO;
     preprocess_info.next = &hlsl_info;
@@ -485,9 +537,46 @@ HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filen
         option->value = true;
     }
 
+    if (flags & D3DCOMPILE_PACK_MATRIX_ROW_MAJOR)
+    {
+        option = &options[compile_info.option_count++];
+        option->name = VKD3D_SHADER_COMPILE_OPTION_PACK_MATRIX_ORDER;
+        option->value = VKD3D_SHADER_COMPILE_OPTION_PACK_MATRIX_ROW_MAJOR;
+    }
+    else if (flags & D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR)
+    {
+        option = &options[compile_info.option_count++];
+        option->name = VKD3D_SHADER_COMPILE_OPTION_PACK_MATRIX_ORDER;
+        option->value = VKD3D_SHADER_COMPILE_OPTION_PACK_MATRIX_COLUMN_MAJOR;
+    }
+
+    if (flags & D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY)
+    {
+        option = &options[compile_info.option_count++];
+        option->name = VKD3D_SHADER_COMPILE_OPTION_BACKWARD_COMPATIBILITY;
+        option->value = VKD3D_SHADER_COMPILE_OPTION_BACKCOMPAT_MAP_SEMANTIC_NAMES;
+    }
+
     ret = vkd3d_shader_compile(&compile_info, &byte_code, &messages);
+
+    if (ret)
+        ERR("Failed to compile shader, vkd3d result %d.\n", ret);
+
     if (messages)
     {
+        if (*messages && ERR_ON(d3dcompiler))
+        {
+            const char *ptr = messages;
+            const char *line;
+
+            ERR("Shader log:\n");
+            while ((line = get_line(&ptr)))
+            {
+                ERR("    %.*s", (int)(ptr - line), line);
+            }
+            ERR("\n");
+        }
+
         if (messages_blob)
         {
             size_t size = strlen(messages);
@@ -499,21 +588,39 @@ HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filen
             }
             memcpy(ID3D10Blob_GetBufferPointer(*messages_blob), messages, size);
         }
-        else
-            vkd3d_shader_free_messages(messages);
+
+        vkd3d_shader_free_messages(messages);
     }
 
-    if (!ret)
+    if (ret)
+        return hresult_from_vkd3d_result(ret);
+
+    if (!shader_blob)
     {
-        if (FAILED(hr = D3DCreateBlob(byte_code.size, shader_blob)))
-        {
-            vkd3d_shader_free_shader_code(&byte_code);
-            return hr;
-        }
-        memcpy(ID3D10Blob_GetBufferPointer(*shader_blob), byte_code.code, byte_code.size);
+        vkd3d_shader_free_shader_code(&byte_code);
+        return S_OK;
     }
 
-    return hresult_from_vkd3d_result(ret);
+    /* Unlike other effect profiles fx_4_x is using DXBC container. */
+    if (!strcmp(profile, "fx_4_0") || !strcmp(profile, "fx_4_1"))
+    {
+        struct vkd3d_shader_dxbc_section_desc section = { .tag = TAG_FX10, .data = byte_code };
+        struct vkd3d_shader_code dxbc;
+
+        ret = vkd3d_shader_serialize_dxbc(1, &section, &dxbc, NULL);
+        vkd3d_shader_free_shader_code(&byte_code);
+        if (ret)
+            return hresult_from_vkd3d_result(ret);
+
+        byte_code = dxbc;
+    }
+
+    if (SUCCEEDED(hr = D3DCreateBlob(byte_code.size, shader_blob)))
+        memcpy(ID3D10Blob_GetBufferPointer(*shader_blob), byte_code.code, byte_code.size);
+
+    vkd3d_shader_free_shader_code(&byte_code);
+
+    return hr;
 }
 
 HRESULT WINAPI D3DCompile(const void *data, SIZE_T data_size, const char *filename,
@@ -545,11 +652,79 @@ HRESULT WINAPI D3DPreprocess(const void *data, SIZE_T size, const char *filename
     return preprocess_shader(data, size, filename, defines, include, shader, error_messages);
 }
 
-HRESULT WINAPI D3DDisassemble(const void *data, SIZE_T size, UINT flags, const char *comments, ID3DBlob **disassembly)
+HRESULT WINAPI D3DDisassemble(const void *data, SIZE_T size, UINT flags, const char *comments,
+        ID3DBlob **disassembly)
 {
-    FIXME("data %p, size %Iu, flags %#x, comments %p, disassembly %p stub!\n",
+    struct vkd3d_shader_compile_info compile_info;
+    enum vkd3d_shader_source_type source_type;
+    struct vkd3d_shader_code asm_code;
+    const char *ptr = data;
+    char *messages;
+    HRESULT hr;
+    int ret;
+
+    TRACE("data %p, size %Iu, flags %#x, comments %p, disassembly %p.\n",
             data, size, flags, comments, disassembly);
-    return E_NOTIMPL;
+
+    if (flags)
+        FIXME("Ignoring flags %#x.\n", flags);
+
+    if (comments)
+        FIXME("Ignoring comments %s.\n", debugstr_a(comments));
+
+#if D3D_COMPILER_VERSION >= 46
+    if (!size)
+        return E_INVALIDARG;
+#endif
+
+    if (size >= 4 && read_u32(&ptr) == TAG_DXBC)
+        source_type = VKD3D_SHADER_SOURCE_DXBC_TPF;
+    else
+        source_type = VKD3D_SHADER_SOURCE_D3D_BYTECODE;
+
+    compile_info.type = VKD3D_SHADER_STRUCTURE_TYPE_COMPILE_INFO;
+    compile_info.next = NULL;
+    compile_info.source.code = data;
+    compile_info.source.size = size;
+    compile_info.source_type = source_type;
+    compile_info.target_type = VKD3D_SHADER_TARGET_D3D_ASM;
+    compile_info.options = NULL;
+    compile_info.option_count = 0;
+    compile_info.log_level = VKD3D_SHADER_LOG_INFO;
+    compile_info.source_name = NULL;
+
+    ret = vkd3d_shader_compile(&compile_info, &asm_code, &messages);
+
+    if (ret)
+        ERR("Failed to disassemble shader, vkd3d result %d.\n", ret);
+
+    if (messages)
+    {
+        if (*messages && ERR_ON(d3dcompiler))
+        {
+            const char *ptr = messages;
+            const char *line;
+
+            ERR("Shader log:\n");
+            while ((line = get_line(&ptr)))
+            {
+                ERR("    %.*s", (int)(ptr - line), line);
+            }
+            ERR("\n");
+        }
+
+        vkd3d_shader_free_messages(messages);
+    }
+
+    if (ret)
+        return hresult_from_vkd3d_result(ret);
+
+    if (SUCCEEDED(hr = D3DCreateBlob(asm_code.size, disassembly)))
+        memcpy(ID3D10Blob_GetBufferPointer(*disassembly), asm_code.code, asm_code.size);
+
+    vkd3d_shader_free_shader_code(&asm_code);
+
+    return hr;
 }
 
 HRESULT WINAPI D3DCompileFromFile(const WCHAR *filename, const D3D_SHADER_MACRO *defines, ID3DInclude *include,
@@ -575,7 +750,7 @@ HRESULT WINAPI D3DCompileFromFile(const WCHAR *filename, const D3D_SHADER_MACRO 
         goto end;
     }
 
-    if (!(source = heap_alloc(source_size)))
+    if (!(source = malloc(source_size)))
     {
         hr = E_OUTOFMEMORY;
         goto end;
@@ -594,9 +769,15 @@ HRESULT WINAPI D3DCompileFromFile(const WCHAR *filename, const D3D_SHADER_MACRO 
             flags1, flags2, code, errors);
 
 end:
-    heap_free(source);
+    free(source);
     CloseHandle(file);
     return hr;
+}
+
+HRESULT WINAPI D3DCreateLinker(ID3D11Linker **linker)
+{
+    FIXME("linker %p stub!\n", linker);
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI D3DLoadModule(const void *data, SIZE_T size, ID3D11Module **module)

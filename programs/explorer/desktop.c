@@ -22,13 +22,12 @@
 #include <stdio.h>
 
 #define COBJMACROS
-#define NONAMELESSUNION
-#define NONAMELESSSTRUCT
 #define OEMRESOURCE
 #include <windows.h>
 #include <rpc.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <ntuser.h>
 #include "exdisp.h"
 
 #include "wine/debug.h"
@@ -41,7 +40,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(explorer);
 
 static const WCHAR default_driver[] = {'m','a','c',',','x','1','1',0};
 
-static BOOL using_root;
+static BOOL using_root = TRUE;
 
 struct launcher
 {
@@ -97,10 +96,11 @@ static HRESULT get_typeinfo(tid_t tid, ITypeInfo **typeinfo)
 {
     HRESULT hres;
 
-    if (!typelib)
+    if (!typelib) {
         hres = load_typelib();
-    if (!typelib)
-        return hres;
+        if (!typelib)
+            return hres;
+    }
 
     if (!typeinfos[tid]) {
         ITypeInfo *ti;
@@ -271,15 +271,10 @@ static void draw_launchers( HDC hdc, RECT update_rect )
                        DT_CENTER|DT_WORDBREAK|DT_EDITCONTROL|DT_END_ELLIPSIS );
     }
 
-    SelectObject( hdc, font );
+    font = SelectObject( hdc, font );
+    DeleteObject( font );
     SetTextColor( hdc, color );
     SetBkMode( hdc, mode );
-}
-
-static void do_launch( const struct launcher *launcher )
-{
-    static const WCHAR openW[] = {'o','p','e','n',0};
-    ShellExecuteW( NULL, openW, launcher->path, NULL, NULL, 0 );
 }
 
 static WCHAR *append_path( const WCHAR *path, const WCHAR *filename, int len_filename )
@@ -288,8 +283,7 @@ static WCHAR *append_path( const WCHAR *path, const WCHAR *filename, int len_fil
     WCHAR *ret;
 
     if (len_filename == -1) len_filename = lstrlenW( filename );
-    if (!(ret = HeapAlloc( GetProcessHeap(), 0, (len_path + len_filename + 2) * sizeof(WCHAR) )))
-        return NULL;
+    if (!(ret = malloc( (len_path + len_filename + 2) * sizeof(WCHAR) ))) return NULL;
     memcpy( ret, path, len_path * sizeof(WCHAR) );
     ret[len_path] = '\\';
     memcpy( ret + len_path + 1, filename, len_filename * sizeof(WCHAR) );
@@ -358,7 +352,7 @@ static WCHAR *build_title( const WCHAR *filename, int len )
             break;
         }
     }
-    if (!(ret = HeapAlloc( GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR) ))) return NULL;
+    if (!(ret = malloc( (len + 1) * sizeof(WCHAR) ))) return NULL;
     memcpy( ret, filename, len * sizeof(WCHAR) );
     ret[len] = 0;
     return ret;
@@ -372,13 +366,13 @@ static BOOL add_launcher( const WCHAR *folder, const WCHAR *filename, int len_fi
     if (nb_launchers == nb_allocated)
     {
         unsigned int count = nb_allocated * 2;
-        struct launcher **tmp = HeapReAlloc( GetProcessHeap(), 0, launchers, count * sizeof(*tmp) );
+        struct launcher **tmp = realloc( launchers, count * sizeof(*tmp) );
         if (!tmp) return FALSE;
         launchers = tmp;
         nb_allocated = count;
     }
 
-    if (!(launcher = HeapAlloc( GetProcessHeap(), 0, sizeof(*launcher) ))) return FALSE;
+    if (!(launcher = malloc( sizeof(*launcher) ))) return FALSE;
     if (!(launcher->path = append_path( folder, filename, len_filename ))) goto error;
     if (!(link = load_shelllink( launcher->path ))) goto error;
 
@@ -390,21 +384,21 @@ static BOOL add_launcher( const WCHAR *folder, const WCHAR *filename, int len_fi
         launchers[nb_launchers++] = launcher;
         return TRUE;
     }
-    HeapFree( GetProcessHeap(), 0, launcher->title );
+    free( launcher->title );
     DestroyIcon( launcher->icon );
 
 error:
-    HeapFree( GetProcessHeap(), 0, launcher->path );
-    HeapFree( GetProcessHeap(), 0, launcher );
+    free( launcher->path );
+    free( launcher );
     return FALSE;
 }
 
 static void free_launcher( struct launcher *launcher )
 {
     DestroyIcon( launcher->icon );
-    HeapFree( GetProcessHeap(), 0, launcher->path );
-    HeapFree( GetProcessHeap(), 0, launcher->title );
-    HeapFree( GetProcessHeap(), 0, launcher );
+    free( launcher->path );
+    free( launcher->title );
+    free( launcher );
 }
 
 static BOOL remove_launcher( const WCHAR *folder, const WCHAR *filename, int len_filename )
@@ -425,7 +419,7 @@ static BOOL remove_launcher( const WCHAR *folder, const WCHAR *filename, int len
             break;
         }
     }
-    HeapFree( GetProcessHeap(), 0, path );
+    free( path );
     return ret;
 }
 
@@ -440,7 +434,8 @@ static BOOL get_icon_text_metrics( HWND hwnd, TEXTMETRICW *tm )
     SystemParametersInfoW( SPI_GETICONTITLELOGFONT, sizeof(lf), &lf, 0 );
     hfont = SelectObject( hdc, CreateFontIndirectW( &lf ) );
     ret = GetTextMetricsW( hdc, tm );
-    SelectObject( hdc, hfont );
+    hfont = SelectObject( hdc, hfont );
+    DeleteObject( hfont );
     ReleaseDC( hwnd, hdc );
     return ret;
 }
@@ -498,8 +493,8 @@ static DWORD CALLBACK watch_desktop_folders( LPVOID param )
     }
     if (!(ovl0.hEvent = events[0] = CreateEventW( NULL, FALSE, FALSE, NULL ))) goto error;
     if (!(ovl1.hEvent = events[1] = CreateEventW( NULL, FALSE, FALSE, NULL ))) goto error;
-    if (!(buf0 = HeapAlloc( GetProcessHeap(), 0, size ))) goto error;
-    if (!(buf1 = HeapAlloc( GetProcessHeap(), 0, size ))) goto error;
+    if (!(buf0 = malloc( size ))) goto error;
+    if (!(buf1 = malloc( size ))) goto error;
 
     for (;;)
     {
@@ -540,21 +535,21 @@ error:
     CloseHandle( dir1 );
     CloseHandle( events[0] );
     CloseHandle( events[1] );
-    HeapFree( GetProcessHeap(), 0, buf0 );
-    HeapFree( GetProcessHeap(), 0, buf1 );
+    free( buf0 );
+    free( buf1 );
     if (SUCCEEDED( init )) CoUninitialize();
     return error;
 }
 
 static void add_folder( const WCHAR *folder )
 {
-    static const WCHAR lnkW[] = {'\\','*','.','l','n','k',0};
+    static const WCHAR lnkW[] = L"\\*.lnk";
     int len = lstrlenW( folder ) + lstrlenW( lnkW );
     WIN32_FIND_DATAW data;
     HANDLE handle;
     WCHAR *glob;
 
-    if (!(glob = HeapAlloc( GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR) ))) return;
+    if (!(glob = malloc( (len + 1) * sizeof(WCHAR) ))) return;
     lstrcpyW( glob, folder );
     lstrcatW( glob, lnkW );
 
@@ -563,7 +558,7 @@ static void add_folder( const WCHAR *folder )
         do { add_launcher( folder, data.cFileName, -1 ); } while (FindNextFileW( handle, &data ));
         FindClose( handle );
     }
-    HeapFree( GetProcessHeap(), 0, glob );
+    free( glob );
 }
 
 #define BORDER_SIZE  4
@@ -595,17 +590,17 @@ static void initialize_launchers( HWND hwnd )
     hr = SHGetKnownFolderPath( &FOLDERID_Desktop, KF_FLAG_CREATE, NULL, &desktop_folder );
     if (FAILED( hr ))
     {
-        WINE_ERR("Could not get user desktop folder\n");
+        ERR( "Could not get user desktop folder\n" );
         return;
     }
     hr = SHGetKnownFolderPath( &FOLDERID_PublicDesktop, KF_FLAG_CREATE, NULL, &desktop_folder_public );
     if (FAILED( hr ))
     {
-        WINE_ERR("Could not get public desktop folder\n");
+        ERR( "Could not get public desktop folder\n" );
         CoTaskMemFree( desktop_folder );
         return;
     }
-    if ((launchers = HeapAlloc( GetProcessHeap(), 0, 2 * sizeof(launchers[0]) )))
+    if ((launchers = malloc( 2 * sizeof(launchers[0]) )))
     {
         nb_allocated = 2;
 
@@ -618,12 +613,97 @@ static void initialize_launchers( HWND hwnd )
     }
 }
 
+/**************************************************************************
+ *		wait_clipboard_mutex
+ *
+ * Make sure that there's only one clipboard thread per window station.
+ */
+static BOOL wait_clipboard_mutex(void)
+{
+    static const WCHAR prefix[] = L"__wine_clipboard_";
+    WCHAR buffer[MAX_PATH + ARRAY_SIZE( prefix )];
+    HANDLE mutex;
+
+    memcpy( buffer, prefix, sizeof(prefix) );
+    if (!GetUserObjectInformationW( GetProcessWindowStation(), UOI_NAME,
+                                    buffer + ARRAY_SIZE( prefix ) - 1,
+                                    sizeof(buffer) - sizeof(prefix), NULL ))
+    {
+        ERR( "failed to get winstation name\n" );
+        return FALSE;
+    }
+    mutex = CreateMutexW( NULL, TRUE, buffer );
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        TRACE( "waiting for mutex %s\n", debugstr_w( buffer ));
+        WaitForSingleObject( mutex, INFINITE );
+    }
+    return TRUE;
+}
+
+
+/**************************************************************************
+ *		clipboard_wndproc
+ *
+ * Window procedure for the clipboard manager.
+ */
+static LRESULT CALLBACK clipboard_wndproc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp )
+{
+    switch (msg)
+    {
+    case WM_NCCREATE:
+    case WM_CLIPBOARDUPDATE:
+    case WM_RENDERFORMAT:
+    case WM_TIMER:
+    case WM_DESTROYCLIPBOARD:
+    case WM_USER:
+        return NtUserMessageCall( hwnd, msg, wp, lp, 0, NtUserClipboardWindowProc, FALSE );
+    }
+
+    return DefWindowProcW( hwnd, msg, wp, lp );
+}
+
+
+/**************************************************************************
+ *		clipboard_thread
+ *
+ * Thread running inside the desktop process to manage the clipboard
+ */
+static DWORD WINAPI clipboard_thread( void *arg )
+{
+    static const WCHAR clipboard_classname[] = L"__wine_clipboard_manager";
+    WNDCLASSW class;
+    ATOM atom;
+    MSG msg;
+
+    if (!wait_clipboard_mutex()) return 0;
+
+    memset( &class, 0, sizeof(class) );
+    class.lpfnWndProc   = clipboard_wndproc;
+    class.lpszClassName = clipboard_classname;
+
+    if (!(atom = RegisterClassW( &class )) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    {
+        ERR( "could not register clipboard window class err %lu\n", GetLastError() );
+        return 0;
+    }
+    if (!CreateWindowW( clipboard_classname, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL ))
+    {
+        TRACE( "failed to create clipboard window err %lu\n", GetLastError() );
+        UnregisterClassW( MAKEINTRESOURCEW(atom), NULL );
+        return 0;
+    }
+
+    while (GetMessageW( &msg, 0, 0, 0 )) DispatchMessageW( &msg );
+    return 0;
+}
+
 static WNDPROC desktop_orig_wndproc;
 
 /* window procedure for the desktop window */
 static LRESULT WINAPI desktop_wnd_proc( HWND hwnd, UINT message, WPARAM wp, LPARAM lp )
 {
-    WINE_TRACE( "got msg %04x wp %Ix lp %Ix\n", message, wp, lp );
+    TRACE( "got msg %04x wp %Ix lp %Ix\n", message, wp, lp );
 
     switch(message)
     {
@@ -663,7 +743,7 @@ static LRESULT WINAPI desktop_wnd_proc( HWND hwnd, UINT message, WPARAM wp, LPAR
         if (!using_root)
         {
             const struct launcher *launcher = launcher_from_point( (short)LOWORD(lp), (short)HIWORD(lp) );
-            if (launcher) do_launch( launcher );
+            if (launcher) ShellExecuteW( NULL, L"open", launcher->path, NULL, NULL, 0 );
         }
         return 0;
 
@@ -684,20 +764,6 @@ static LRESULT WINAPI desktop_wnd_proc( HWND hwnd, UINT message, WPARAM wp, LPAR
     return desktop_orig_wndproc( hwnd, message, wp, lp );
 }
 
-/* create the desktop and the associated driver window, and make it the current desktop */
-static BOOL create_desktop( HMODULE driver, const WCHAR *name, unsigned int width, unsigned int height )
-{
-    BOOL ret = FALSE;
-    BOOL (CDECL *create_desktop_func)(unsigned int, unsigned int);
-
-    if (driver)
-    {
-        create_desktop_func = (void *)GetProcAddress( driver, "wine_create_desktop" );
-        if (create_desktop_func) ret = create_desktop_func( width, height );
-    }
-    return ret;
-}
-
 /* parse the desktop size specification */
 static BOOL parse_size( const WCHAR *size, unsigned int *width, unsigned int *height )
 {
@@ -714,10 +780,6 @@ static BOOL parse_size( const WCHAR *size, unsigned int *width, unsigned int *he
 /* retrieve the desktop name to use if not specified on the command line */
 static const WCHAR *get_default_desktop_name(void)
 {
-    static const WCHAR desktopW[] = {'D','e','s','k','t','o','p',0};
-    static const WCHAR defaultW[] = {'D','e','f','a','u','l','t',0};
-    static const WCHAR explorer_keyW[] = {'S','o','f','t','w','a','r','e','\\','W','i','n','e','\\',
-                                          'E','x','p','l','o','r','e','r',0};
     static WCHAR buffer[MAX_PATH];
     DWORD size = sizeof(buffer);
     HDESK desk = GetThreadDesktop( GetCurrentThreadId() );
@@ -726,13 +788,13 @@ static const WCHAR *get_default_desktop_name(void)
 
     if (desk && GetUserObjectInformationW( desk, UOI_NAME, buffer, ARRAY_SIZE( buffer ), NULL ))
     {
-        if (wcsicmp( buffer, defaultW )) return buffer;
+        if (wcsicmp( buffer, L"Default" )) return buffer;
     }
 
     /* @@ Wine registry key: HKCU\Software\Wine\Explorer */
-    if (!RegOpenKeyW( HKEY_CURRENT_USER, explorer_keyW, &hkey ))
+    if (!RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\Explorer", &hkey ))
     {
-        if (!RegQueryValueExW( hkey, desktopW, 0, NULL, (LPBYTE)buffer, &size ) && *buffer) ret = buffer;
+        if (!RegQueryValueExW( hkey, L"Desktop", 0, NULL, (LPBYTE)buffer, &size ) && *buffer) ret = buffer;
         RegCloseKey( hkey );
     }
     return ret;
@@ -741,9 +803,6 @@ static const WCHAR *get_default_desktop_name(void)
 /* retrieve the default desktop size from the registry */
 static BOOL get_default_desktop_size( const WCHAR *name, unsigned int *width, unsigned int *height )
 {
-    static const WCHAR desktop_keyW[] = {'S','o','f','t','w','a','r','e','\\','W','i','n','e','\\',
-                                         'E','x','p','l','o','r','e','r','\\',
-                                         'D','e','s','k','t','o','p','s',0};
     HKEY hkey;
     WCHAR buffer[64];
     DWORD size = sizeof(buffer);
@@ -753,7 +812,7 @@ static BOOL get_default_desktop_size( const WCHAR *name, unsigned int *width, un
     *height = 600;
 
     /* @@ Wine registry key: HKCU\Software\Wine\Explorer\Desktops */
-    if (!RegOpenKeyW( HKEY_CURRENT_USER, desktop_keyW, &hkey ))
+    if (!RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\Explorer\\Desktops", &hkey ))
     {
         if (!RegQueryValueExW( hkey, name, 0, NULL, (LPBYTE)buffer, &size ))
         {
@@ -767,44 +826,55 @@ static BOOL get_default_desktop_size( const WCHAR *name, unsigned int *width, un
 
 static BOOL get_default_enable_shell( const WCHAR *name )
 {
-    static const WCHAR desktop_keyW[] = {'S','o','f','t','w','a','r','e','\\','W','i','n','e','\\',
-                                         'E','x','p','l','o','r','e','r','\\',
-                                         'D','e','s','k','t','o','p','s',0};
-    static const WCHAR enable_shellW[] = {'E','n','a','b','l','e','S','h','e','l','l',0};
-    static const WCHAR shellW[] = {'s','h','e','l','l',0};
     HKEY hkey;
     BOOL found = FALSE;
     BOOL result;
     DWORD size = sizeof(result);
 
     /* @@ Wine registry key: HKCU\Software\Wine\Explorer\Desktops */
-    if (!RegOpenKeyW( HKEY_CURRENT_USER, desktop_keyW, &hkey ))
+    if (!RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\Explorer\\Desktops", &hkey ))
     {
-        if (!RegGetValueW( hkey, name, enable_shellW, RRF_RT_REG_DWORD, NULL, &result, &size ))
+        if (!RegGetValueW( hkey, name, L"EnableShell", RRF_RT_REG_DWORD, NULL, &result, &size ))
             found = TRUE;
         RegCloseKey( hkey );
     }
     /* Default off, except for the magic desktop name "shell" */
-    if (!found)
-        result = (lstrcmpiW( name, shellW ) == 0);
+    if (!found) result = (lstrcmpiW( name, L"shell" ) == 0);
     return result;
 }
 
-static HMODULE load_graphics_driver( const WCHAR *driver, const GUID *guid )
+static BOOL get_default_show_systray( const WCHAR *name )
 {
-    static const WCHAR device_keyW[] = {
-        'S','y','s','t','e','m','\\',
-        'C','u','r','r','e','n','t','C','o','n','t','r','o','l','S','e','t','\\',
-        'C','o','n','t','r','o','l','\\',
-        'V','i','d','e','o','\\',
-        '{','%','0','8','x','-','%','0','4','x','-','%','0','4','x','-',
-        '%','0','2','x','%','0','2','x','-','%','0','2','x','%','0','2','x','%','0','2','x',
-        '%','0','2','x','%','0','2','x','%','0','2','x','}','\\','0','0','0','0',0};
-    static const WCHAR graphics_driverW[] = {'G','r','a','p','h','i','c','s','D','r','i','v','e','r',0};
-    static const WCHAR driversW[] = {'S','o','f','t','w','a','r','e','\\',
-                                     'W','i','n','e','\\','D','r','i','v','e','r','s',0};
-    static const WCHAR graphicsW[] = {'G','r','a','p','h','i','c','s',0};
-    static const WCHAR drv_formatW[] = {'w','i','n','e','%','s','.','d','r','v',0};
+    HKEY hkey;
+    BOOL found = FALSE;
+    BOOL result;
+    DWORD size = sizeof(result);
+
+    /* @@ Wine registry key: HKCU\Software\Wine\Explorer\Desktops */
+    if (name && !RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\Explorer\\Desktops", &hkey ))
+    {
+        if (!RegGetValueW( hkey, name, L"ShowSystray", RRF_RT_REG_DWORD, NULL, &result, &size ))
+            found = TRUE;
+        RegCloseKey( hkey );
+    }
+
+    /* Try again with a global Explorer setting */
+    /* @@ Wine registry key: HKCU\Software\Wine\Explorer */
+    if (!found && !RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\Explorer", &hkey ))
+    {
+        if (!RegGetValueW( hkey, NULL, L"ShowSystray", RRF_RT_REG_DWORD, NULL, &result, &size ))
+            found = TRUE;
+        RegCloseKey( hkey );
+    }
+
+    /* Default on */
+    if (!found) result = TRUE;
+    return result;
+}
+
+static void load_graphics_driver( const WCHAR *driver, GUID *guid )
+{
+    static const WCHAR device_keyW[] = L"System\\CurrentControlSet\\Control\\Video\\{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}\\0000";
 
     WCHAR buffer[MAX_PATH], libname[32], *name, *next;
     WCHAR key[ARRAY_SIZE( device_keyW ) + 39];
@@ -818,10 +888,10 @@ static HMODULE load_graphics_driver( const WCHAR *driver, const GUID *guid )
         lstrcpyW( buffer, default_driver );
 
         /* @@ Wine registry key: HKCU\Software\Wine\Drivers */
-        if (!RegOpenKeyW( HKEY_CURRENT_USER, driversW, &hkey ))
+        if (!RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\Drivers", &hkey ))
         {
             DWORD count = sizeof(buffer);
-            RegQueryValueExW( hkey, graphicsW, 0, NULL, (LPBYTE)buffer, &count );
+            RegQueryValueExW( hkey, L"Graphics", 0, NULL, (LPBYTE)buffer, &count );
             RegCloseKey( hkey );
         }
     }
@@ -835,13 +905,14 @@ static HMODULE load_graphics_driver( const WCHAR *driver, const GUID *guid )
 
         if (!wcscmp( name, L"null" ))
         {
+            memset( guid, 0, sizeof(*guid) );
             TRACE( "display %s using null driver\n", debugstr_guid(guid) );
             wcscpy( libname, L"null" );
             null_driver = TRUE;
             break;
         }
 
-        swprintf( libname, ARRAY_SIZE( libname ), drv_formatW, name );
+        swprintf( libname, ARRAY_SIZE( libname ), L"wine%s.drv", name );
         if ((module = LoadLibraryW( libname )) != 0) break;
         switch (GetLastError())
         {
@@ -868,51 +939,75 @@ static HMODULE load_graphics_driver( const WCHAR *driver, const GUID *guid )
                           REG_OPTION_VOLATILE, KEY_SET_VALUE, NULL, &hkey, NULL  ))
     {
         if (module || null_driver)
-            RegSetValueExW( hkey, graphics_driverW, 0, REG_SZ,
+            RegSetValueExW( hkey, L"GraphicsDriver", 0, REG_SZ,
                             (BYTE *)libname, (lstrlenW(libname) + 1) * sizeof(WCHAR) );
         else
             RegSetValueExA( hkey, "DriverError", 0, REG_SZ, (BYTE *)error, strlen(error) + 1 );
         RegCloseKey( hkey );
     }
-
-    return module;
 }
 
-static void initialize_display_settings(void)
+static const char *debugstr_devmodew( const DEVMODEW *devmode )
 {
-    DISPLAY_DEVICEW ddW;
-    DEVMODEW dmW;
-    DWORD i = 0;
+    char position[32] = {0};
+
+    if (devmode->dmFields & DM_POSITION)
+    {
+        snprintf( position, sizeof(position), " at (%d,%d)",
+                 (int)devmode->dmPosition.x, (int)devmode->dmPosition.y );
+    }
+
+    return wine_dbg_sprintf( "%ux%u %ubits %uHz rotated %u degrees%s",
+                             (unsigned int)devmode->dmPelsWidth,
+                             (unsigned int)devmode->dmPelsHeight,
+                             (unsigned int)devmode->dmBitsPerPel,
+                             (unsigned int)devmode->dmDisplayFrequency,
+                             (unsigned int)devmode->dmDisplayOrientation * 90,
+                             position );
+}
+
+static void initialize_display_settings( unsigned int width, unsigned int height )
+{
+    DISPLAY_DEVICEW device = {.cb = sizeof(DISPLAY_DEVICEW)};
+    DWORD i = 0, flags = CDS_GLOBAL | CDS_UPDATEREGISTRY;
 
     /* Store current display mode in the registry */
-    ddW.cb = sizeof(ddW);
-    memset(&dmW, 0, sizeof(dmW));
-    dmW.dmSize = sizeof(dmW);
-    while (EnumDisplayDevicesW( NULL, i++, &ddW, 0 ))
+    while (EnumDisplayDevicesW( NULL, i++, &device, 0 ))
     {
-        if (!EnumDisplaySettingsExW( ddW.DeviceName, ENUM_CURRENT_SETTINGS, &dmW, 0))
+        DEVMODEW devmode = {.dmSize = sizeof(DEVMODEW)};
+
+        if (!EnumDisplaySettingsExW( device.DeviceName, ENUM_CURRENT_SETTINGS, &devmode, 0))
         {
-            WINE_ERR( "Failed to query current display settings for %s.\n",
-                      wine_dbgstr_w( ddW.DeviceName ) );
+            ERR( "Failed to query current display settings for %s.\n", debugstr_w( device.DeviceName ) );
             continue;
         }
 
-        WINE_TRACE( "Device %s current display mode %lux%lu %luBits %luHz at %ld,%ld.\n",
-                    wine_dbgstr_w( ddW.DeviceName ), dmW.dmPelsWidth, dmW.dmPelsHeight,
-                    dmW.dmBitsPerPel, dmW.dmDisplayFrequency, dmW.u1.s2.dmPosition.x,
-                    dmW.u1.s2.dmPosition.y );
+        TRACE( "Device %s current display mode %s.\n", debugstr_w( device.DeviceName ), debugstr_devmodew( &devmode ) );
 
-        if (ChangeDisplaySettingsExW( ddW.DeviceName, &dmW, 0,
-                                      CDS_GLOBAL | CDS_NORESET | CDS_UPDATEREGISTRY, 0 ))
-            WINE_ERR( "Failed to initialize registry display settings for %s.\n",
-                       wine_dbgstr_w( ddW.DeviceName ) );
+        if (ChangeDisplaySettingsExW( device.DeviceName, &devmode, 0, flags | CDS_NORESET, 0 ))
+            ERR( "Failed to initialize registry display settings for %s.\n", debugstr_w( device.DeviceName ) );
+    }
+
+    if (!using_root)
+    {
+        DEVMODEW devmode =
+        {
+            .dmSize = sizeof(DEVMODEW),
+            .dmFields = DM_PELSWIDTH | DM_PELSHEIGHT,
+            .dmPelsWidth = width,
+            .dmPelsHeight = height,
+        };
+
+        /* in virtual desktop mode, set the primary display settings to match desktop size */
+        if (ChangeDisplaySettingsExW( NULL, &devmode, 0, flags, NULL ))
+            ERR( "Failed to set primary display settings.\n" );
     }
 }
 
 static void set_desktop_window_title( HWND hwnd, const WCHAR *name )
 {
-    static const WCHAR desktop_nameW[] = {'W','i','n','e',' ','d','e','s','k','t','o','p',0};
-    static const WCHAR desktop_name_separatorW[] = {' ', '-', ' ', 0};
+    static const WCHAR desktop_nameW[] = L"Wine desktop";
+    static const WCHAR desktop_name_separatorW[] = L" - ";
     WCHAR *window_titleW = NULL;
     int window_title_len;
 
@@ -925,7 +1020,7 @@ static void set_desktop_window_title( HWND hwnd, const WCHAR *name )
     window_title_len = lstrlenW(name) * sizeof(WCHAR)
                      + sizeof(desktop_name_separatorW)
                      + sizeof(desktop_nameW);
-    window_titleW = HeapAlloc( GetProcessHeap(), 0, window_title_len );
+    window_titleW = malloc( window_title_len );
     if (!window_titleW)
     {
         SetWindowTextW( hwnd, desktop_nameW );
@@ -937,7 +1032,7 @@ static void set_desktop_window_title( HWND hwnd, const WCHAR *name )
     lstrcatW( window_titleW, desktop_nameW );
 
     SetWindowTextW( hwnd, window_titleW );
-    HeapFree( GetProcessHeap(), 0, window_titleW );
+    free( window_titleW );
 }
 
 static inline BOOL is_whitespace(WCHAR c)
@@ -948,19 +1043,19 @@ static inline BOOL is_whitespace(WCHAR c)
 /* main desktop management function */
 void manage_desktop( WCHAR *arg )
 {
-    static const WCHAR messageW[] = {'M','e','s','s','a','g','e',0};
     HDESK desktop = 0;
     GUID guid;
     MSG msg;
     HWND hwnd;
-    HMODULE graphics_driver;
     unsigned int width, height;
     WCHAR *cmdline = NULL, *driver = NULL;
     WCHAR *p = arg;
     const WCHAR *name = NULL;
-    BOOL enable_shell = FALSE;
+    BOOL enable_shell = FALSE, show_systray = TRUE;
     void (WINAPI *pShellDDEInit)( BOOL ) = NULL;
     HMODULE shell32;
+    HANDLE thread;
+    DWORD id;
 
     /* get the rest of the command line (if any) */
     while (*p && !is_whitespace(*p)) p++;
@@ -990,22 +1085,26 @@ void manage_desktop( WCHAR *arg )
         if (!get_default_desktop_size( name, &width, &height )) width = height = 0;
     }
 
-    if (name)
-        enable_shell = get_default_enable_shell( name );
+    if (name) enable_shell = get_default_enable_shell( name );
+    show_systray = get_default_show_systray( name );
+
+    UuidCreate( &guid );
+    TRACE( "display guid %s\n", debugstr_guid(&guid) );
+    load_graphics_driver( driver, &guid );
 
     if (name && width && height)
     {
-        if (!(desktop = CreateDesktopW( name, NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL )))
+        DEVMODEW devmode = {.dmPelsWidth = width, .dmPelsHeight = height};
+        /* magic: desktop "root" means use the root window */
+        if ((using_root = !wcsicmp( name, L"root" ))) desktop = CreateDesktopW( name, NULL, NULL, DF_WINE_ROOT_DESKTOP, DESKTOP_ALL_ACCESS, NULL );
+        else desktop = CreateDesktopW( name, NULL, &devmode, DF_WINE_VIRTUAL_DESKTOP, DESKTOP_ALL_ACCESS, NULL );
+        if (!desktop)
         {
-            WINE_ERR( "failed to create desktop %s error %ld\n", wine_dbgstr_w(name), GetLastError() );
+            ERR( "failed to create desktop %s error %ld\n", debugstr_w(name), GetLastError() );
             ExitProcess( 1 );
         }
         SetThreadDesktop( desktop );
     }
-
-    UuidCreate( &guid );
-    TRACE( "display guid %s\n", debugstr_guid(&guid) );
-    graphics_driver = load_graphics_driver( driver, &guid );
 
     /* create the desktop window */
     hwnd = CreateWindowExW( 0, DESKTOP_CLASS_ATOM, NULL,
@@ -1014,25 +1113,26 @@ void manage_desktop( WCHAR *arg )
     if (hwnd)
     {
         /* create the HWND_MESSAGE parent */
-        CreateWindowExW( 0, messageW, NULL, WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+        CreateWindowExW( 0, L"Message", NULL, WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
                          0, 0, 100, 100, 0, 0, 0, NULL );
 
         desktop_orig_wndproc = (WNDPROC)SetWindowLongPtrW( hwnd, GWLP_WNDPROC,
             (LONG_PTR)desktop_wnd_proc );
-        using_root = !desktop || !create_desktop( graphics_driver, name, width, height );
         SendMessageW( hwnd, WM_SETICON, ICON_BIG, (LPARAM)LoadIconW( 0, MAKEINTRESOURCEW(OIC_WINLOGO)));
         if (name) set_desktop_window_title( hwnd, name );
         SetWindowPos( hwnd, 0, GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
                       GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN),
                       SWP_SHOWWINDOW );
+        thread = CreateThread( NULL, 0, clipboard_thread, NULL, 0, &id );
+        if (thread) CloseHandle( thread );
         SystemParametersInfoW( SPI_SETDESKWALLPAPER, 0, NULL, FALSE );
         ClipCursor( NULL );
-        initialize_display_settings();
+        initialize_display_settings( width, height );
         initialize_appbar();
 
         if (using_root) enable_shell = FALSE;
 
-        initialize_systray( graphics_driver, using_root, enable_shell );
+        initialize_systray( using_root, enable_shell, show_systray );
         if (!using_root) initialize_launchers( hwnd );
 
         if ((shell32 = LoadLibraryW( L"shell32.dll" )) &&
@@ -1050,7 +1150,7 @@ void manage_desktop( WCHAR *arg )
 
         memset( &si, 0, sizeof(si) );
         si.cb = sizeof(si);
-        WINE_TRACE( "starting %s\n", wine_dbgstr_w(cmdline) );
+        TRACE( "starting %s\n", debugstr_w(cmdline) );
         if (CreateProcessW( NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
         {
             CloseHandle( pi.hThread );
@@ -1059,15 +1159,14 @@ void manage_desktop( WCHAR *arg )
     }
 
     desktopshellbrowserwindow_init();
+    shellwindows_init();
 
     /* run the desktop message loop */
     if (hwnd)
     {
-        shellwindows_init();
-
-        WINE_TRACE( "desktop message loop starting on hwnd %p\n", hwnd );
+        TRACE( "desktop message loop starting on hwnd %p\n", hwnd );
         while (GetMessageW( &msg, 0, 0, 0 )) DispatchMessageW( &msg );
-        WINE_TRACE( "desktop message loop exiting for hwnd %p\n", hwnd );
+        TRACE( "desktop message loop exiting for hwnd %p\n", hwnd );
     }
 
     if (pShellDDEInit) pShellDDEInit( FALSE );
@@ -2305,7 +2404,7 @@ static void shellwindows_init(void)
     CoInitialize(NULL);
 
     shellwindows.IShellWindows_iface.lpVtbl = &shellwindowsvtbl;
-    InitializeCriticalSection(&shellwindows.cs);
+    InitializeCriticalSectionEx(&shellwindows.cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
     shellwindows.cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": shellwindows.cs");
 
     hr = CoRegisterClassObject(&CLSID_ShellWindows,

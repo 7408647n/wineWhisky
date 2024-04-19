@@ -544,15 +544,23 @@ HRESULT d2d_bitmap_create_shared(struct d2d_device_context *context, REFIID iid,
             goto failed;
         }
 
-        if (!desc)
+        if (desc)
+        {
+            d = *desc;
+            if (d.pixelFormat.format == DXGI_FORMAT_UNKNOWN)
+                d.pixelFormat.format = src_impl->format.format;
+            if (d.pixelFormat.alphaMode == D2D1_ALPHA_MODE_UNKNOWN)
+                d.pixelFormat.alphaMode = src_impl->format.alphaMode;
+        }
+        else
         {
             d.pixelFormat = src_impl->format;
             d.dpiX = src_impl->dpi_x;
             d.dpiY = src_impl->dpi_y;
             d.bitmapOptions = src_impl->options;
             d.colorContext = NULL;
-            desc = &d;
         }
+        desc = &d;
 
         if (!format_supported(&desc->pixelFormat))
         {
@@ -672,6 +680,7 @@ HRESULT d2d_bitmap_create_from_wic_bitmap(struct d2d_device_context *context, IW
         {&GUID_WICPixelFormat32bppPBGRA, {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}},
         {&GUID_WICPixelFormat32bppPRGBA, {DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}},
         {&GUID_WICPixelFormat32bppBGR,   {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE}},
+        {&GUID_WICPixelFormat32bppRGB,   {DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_IGNORE}},
     };
 
     if (FAILED(hr = IWICBitmapSource_GetSize(bitmap_source, &size.width, &size.height)))

@@ -84,24 +84,6 @@ extern INT    WINAPI FindMRUData(HANDLE hList, LPCVOID lpData, DWORD cbData, LPI
 extern INT    WINAPI EnumMRUListA(HANDLE hList, INT nItemPos, LPVOID lpBuffer, DWORD nBufferSize);
 
 
-/* Get a function pointer from a DLL handle */
-#define GET_FUNC(func, module, name, fail) \
-  do { \
-    if (!func) { \
-      if (!SHELL32_h##module && !(SHELL32_h##module = LoadLibraryA(#module ".dll"))) return fail; \
-      func = (void*)GetProcAddress(SHELL32_h##module, name); \
-      if (!func) return fail; \
-    } \
-  } while (0)
-
-/* Function pointers for GET_FUNC macro */
-static HMODULE SHELL32_hshlwapi=NULL;
-static HANDLE (WINAPI *pSHAllocShared)(LPCVOID,DWORD,DWORD);
-static LPVOID (WINAPI *pSHLockShared)(HANDLE,DWORD);
-static BOOL   (WINAPI *pSHUnlockShared)(LPVOID);
-static BOOL   (WINAPI *pSHFreeShared)(HANDLE,DWORD);
-
-
 /*************************************************************************
  * ParseFieldA					[internal]
  *
@@ -188,23 +170,12 @@ static BOOL GetFileNameFromBrowseA(
 	LPCSTR lpstrFilter,
 	LPCSTR lpstrTitle)
 {
-    HMODULE hmodule;
-    BOOL (WINAPI *pGetOpenFileNameA)(LPOPENFILENAMEA);
     OPENFILENAMEA ofn;
     BOOL ret;
 
     TRACE("%p, %s, %ld, %s, %s, %s, %s)\n",
 	  hwndOwner, lpstrFile, nMaxFile, lpstrInitialDir, lpstrDefExt,
 	  lpstrFilter, lpstrTitle);
-
-    hmodule = LoadLibraryA("comdlg32.dll");
-    if(!hmodule) return FALSE;
-    pGetOpenFileNameA = (void *)GetProcAddress(hmodule, "GetOpenFileNameA");
-    if(!pGetOpenFileNameA)
-    {
-	FreeLibrary(hmodule);
-	return FALSE;
-    }
 
     memset(&ofn, 0, sizeof(ofn));
 
@@ -217,9 +188,8 @@ static BOOL GetFileNameFromBrowseA(
     ofn.lpstrTitle = lpstrTitle;
     ofn.lpstrDefExt = lpstrDefExt;
     ofn.Flags = OFN_EXPLORER | OFN_HIDEREADONLY | OFN_FILEMUSTEXIST;
-    ret = pGetOpenFileNameA(&ofn);
+    ret = GetOpenFileNameA(&ofn);
 
-    FreeLibrary(hmodule);
     return ret;
 }
 
@@ -235,23 +205,12 @@ static BOOL GetFileNameFromBrowseW(
 	LPCWSTR lpstrFilter,
 	LPCWSTR lpstrTitle)
 {
-    HMODULE hmodule;
-    BOOL (WINAPI *pGetOpenFileNameW)(LPOPENFILENAMEW);
     OPENFILENAMEW ofn;
     BOOL ret;
 
     TRACE("%p, %s, %ld, %s, %s, %s, %s)\n",
 	  hwndOwner, debugstr_w(lpstrFile), nMaxFile, debugstr_w(lpstrInitialDir), debugstr_w(lpstrDefExt),
 	  debugstr_w(lpstrFilter), debugstr_w(lpstrTitle));
-
-    hmodule = LoadLibraryA("comdlg32.dll");
-    if(!hmodule) return FALSE;
-    pGetOpenFileNameW = (void *)GetProcAddress(hmodule, "GetOpenFileNameW");
-    if(!pGetOpenFileNameW)
-    {
-	FreeLibrary(hmodule);
-	return FALSE;
-    }
 
     memset(&ofn, 0, sizeof(ofn));
 
@@ -264,9 +223,8 @@ static BOOL GetFileNameFromBrowseW(
     ofn.lpstrTitle = lpstrTitle;
     ofn.lpstrDefExt = lpstrDefExt;
     ofn.Flags = OFN_EXPLORER | OFN_HIDEREADONLY | OFN_FILEMUSTEXIST;
-    ret = pGetOpenFileNameW(&ofn);
+    ret = GetOpenFileNameW(&ofn);
 
-    FreeLibrary(hmodule);
     return ret;
 }
 
@@ -348,12 +306,12 @@ VOID WINAPI SHGetSettings(LPSHELLFLAGSTATE lpsfs, DWORD dwMask)
 	    if (SSF_SHOWSYSFILES & dwMask)	lpsfs->fShowSysFiles  = 0;
 	  }
 	  else if (dwData == 1)
-	  { if (SSF_SHOWALLOBJECTS & dwMask)	lpsfs->fShowAllObjects  = 1;
+	  { if (SSF_SHOWALLOBJECTS & dwMask)	lpsfs->fShowAllObjects  = -1;
 	    if (SSF_SHOWSYSFILES & dwMask)	lpsfs->fShowSysFiles  = 0;
 	  }
 	  else if (dwData == 2)
 	  { if (SSF_SHOWALLOBJECTS & dwMask)	lpsfs->fShowAllObjects  = 0;
-	    if (SSF_SHOWSYSFILES & dwMask)	lpsfs->fShowSysFiles  = 1;
+	    if (SSF_SHOWSYSFILES & dwMask)	lpsfs->fShowSysFiles  = -1;
 	  }
 	}
 	RegCloseKey (hKey);
@@ -1224,15 +1182,15 @@ BOOL WINAPI ReadCabinetState(CABINETSTATE *cs, int length)
 		memset(cs, 0, sizeof(*cs));
 		cs->cLength          = sizeof(*cs);
 		cs->nVersion         = 2;
-		cs->fFullPathTitle   = FALSE;
-		cs->fSaveLocalView   = TRUE;
-		cs->fNotShell        = FALSE;
-		cs->fSimpleDefault   = TRUE;
-		cs->fDontShowDescBar = FALSE;
-		cs->fNewWindowMode   = FALSE;
-		cs->fShowCompColor   = FALSE;
-		cs->fDontPrettyNames = FALSE;
-		cs->fAdminsCreateCommonGroups = TRUE;
+		cs->fFullPathTitle   = 0;
+		cs->fSaveLocalView   = -1;
+		cs->fNotShell        = 0;
+		cs->fSimpleDefault   = -1;
+		cs->fDontShowDescBar = 0;
+		cs->fNewWindowMode   = 0;
+		cs->fShowCompColor   = 0;
+		cs->fDontPrettyNames = 0;
+		cs->fAdminsCreateCommonGroups = -1;
 		cs->fMenuEnumFilter  = 96;
 	}
 	
@@ -1310,7 +1268,7 @@ BOOL WINAPI IsUserAnAdmin(VOID)
         }
     }
 
-    lpGroups = heap_alloc(dwSize);
+    lpGroups = malloc(dwSize);
     if (lpGroups == NULL)
     {
         CloseHandle(hToken);
@@ -1319,7 +1277,7 @@ BOOL WINAPI IsUserAnAdmin(VOID)
 
     if (!GetTokenInformation(hToken, TokenGroups, lpGroups, dwSize, &dwSize))
     {
-        heap_free(lpGroups);
+        free(lpGroups);
         CloseHandle(hToken);
         return FALSE;
     }
@@ -1329,7 +1287,7 @@ BOOL WINAPI IsUserAnAdmin(VOID)
                                   DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
                                   &lpSid))
     {
-        heap_free(lpGroups);
+        free(lpGroups);
         return FALSE;
     }
 
@@ -1343,52 +1301,8 @@ BOOL WINAPI IsUserAnAdmin(VOID)
     }
 
     FreeSid(lpSid);
-    heap_free(lpGroups);
+    free(lpGroups);
     return bResult;
-}
-
-/*************************************************************************
- * SHAllocShared				[SHELL32.520]
- *
- * See shlwapi.SHAllocShared
- */
-HANDLE WINAPI SHAllocShared(const void *lpvData, DWORD dwSize, DWORD dwProcId)
-{
-    GET_FUNC(pSHAllocShared, shlwapi, (char*)7, NULL);
-    return pSHAllocShared(lpvData, dwSize, dwProcId);
-}
-
-/*************************************************************************
- * SHLockShared					[SHELL32.521]
- *
- * See shlwapi.SHLockShared
- */
-LPVOID WINAPI SHLockShared(HANDLE hShared, DWORD dwProcId)
-{
-    GET_FUNC(pSHLockShared, shlwapi, (char*)8, NULL);
-    return pSHLockShared(hShared, dwProcId);
-}
-
-/*************************************************************************
- * SHUnlockShared				[SHELL32.522]
- *
- * See shlwapi.SHUnlockShared
- */
-BOOL WINAPI SHUnlockShared(LPVOID lpView)
-{
-    GET_FUNC(pSHUnlockShared, shlwapi, (char*)9, FALSE);
-    return pSHUnlockShared(lpView);
-}
-
-/*************************************************************************
- * SHFreeShared					[SHELL32.523]
- *
- * See shlwapi.SHFreeShared
- */
-BOOL WINAPI SHFreeShared(HANDLE hShared, DWORD dwProcId)
-{
-    GET_FUNC(pSHFreeShared, shlwapi, (char*)10, FALSE);
-    return pSHFreeShared(hShared, dwProcId);
 }
 
 /*************************************************************************
@@ -1513,7 +1427,7 @@ DWORD WINAPI DoEnvironmentSubstA(LPSTR pszString, UINT cchString)
 
     TRACE("(%s, %d)\n", debugstr_a(pszString), cchString);
 
-    if ((dst = heap_alloc(cchString * sizeof(CHAR))))
+    if ((dst = malloc(cchString * sizeof(CHAR))))
     {
         len = ExpandEnvironmentStringsA(pszString, dst, cchString);
         /* len includes the terminating 0 */
@@ -1525,7 +1439,7 @@ DWORD WINAPI DoEnvironmentSubstA(LPSTR pszString, UINT cchString)
         else
             len = cchString;
 
-        heap_free(dst);
+        free(dst);
     }
     return MAKELONG(len, res);
 }
@@ -1557,7 +1471,7 @@ DWORD WINAPI DoEnvironmentSubstW(LPWSTR pszString, UINT cchString)
 
     TRACE("(%s, %d)\n", debugstr_w(pszString), cchString);
 
-    if ((cchString < MAXLONG) && (dst = heap_alloc(cchString * sizeof(WCHAR))))
+    if ((cchString < MAXLONG) && (dst = malloc(cchString * sizeof(WCHAR))))
     {
         len = ExpandEnvironmentStringsW(pszString, dst, cchString);
         /* len includes the terminating 0 */
@@ -1569,7 +1483,7 @@ DWORD WINAPI DoEnvironmentSubstW(LPWSTR pszString, UINT cchString)
         else
             len = cchString;
 
-        heap_free(dst);
+        free(dst);
     }
     return MAKELONG(len, res);
 }

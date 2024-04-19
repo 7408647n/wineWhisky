@@ -17,7 +17,6 @@
  */
 
 #define COBJMACROS
-#define NONAMELESSUNION
 
 #include <assert.h>
 
@@ -25,7 +24,6 @@
 #include "inetcomm_private.h"
 
 #include "wine/debug.h"
-#include "wine/heap.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(inetcomm);
 
@@ -61,22 +59,6 @@ typedef struct {
 
 static const WCHAR mhtml_prefixW[] = L"mhtml:";
 static const WCHAR mhtml_separatorW[] = L"!x-usc:";
-
-static inline LPWSTR heap_strdupW(LPCWSTR str)
-{
-    LPWSTR ret = NULL;
-
-    if(str) {
-        DWORD size;
-
-        size = (lstrlenW(str)+1)*sizeof(WCHAR);
-        ret = heap_alloc(size);
-        if(ret)
-            memcpy(ret, str, size);
-    }
-
-    return ret;
-}
 
 static HRESULT parse_mhtml_url(const WCHAR *url, mhtml_url_t *r)
 {
@@ -247,7 +229,7 @@ static ULONG WINAPI BindStatusCallback_Release(IBindStatusCallback *iface)
             IInternetProtocol_Release(&This->protocol->IInternetProtocol_iface);
         if(This->stream)
             IStream_Release(This->stream);
-        heap_free(This);
+        free(This);
     }
 
     return ref;
@@ -333,7 +315,7 @@ static HRESULT WINAPI BindStatusCallback_OnDataAvailable(IBindStatusCallback *if
     assert(pstgmed->tymed == TYMED_ISTREAM);
 
     while(1) {
-        hres = IStream_Read(pstgmed->u.pstm, buf, sizeof(buf), &read);
+        hres = IStream_Read(pstgmed->pstm, buf, sizeof(buf), &read);
         if(FAILED(hres))
             return hres;
         if(!read)
@@ -419,8 +401,8 @@ static ULONG WINAPI MimeHtmlProtocol_Release(IUnknown *iface)
             IInternetProtocolSink_Release(This->sink);
         if(This->stream)
             IStream_Release(This->stream);
-        heap_free(This->location);
-        heap_free(This);
+        free(This->location);
+        free(This);
     }
 
     return ref;
@@ -475,7 +457,7 @@ static HRESULT WINAPI MimeHtmlProtocol_Start(IInternetProtocol *iface, const WCH
     if(FAILED(hres))
         return hres;
 
-    if(url.location && !(This->location = heap_strdupW(url.location)))
+    if(url.location && !(This->location = wcsdup(url.location)))
         return E_OUTOFMEMORY;
 
     hres = IInternetBindInfo_GetBindInfo(pOIBindInfo, &bindf, &bindinfo);
@@ -488,7 +470,7 @@ static HRESULT WINAPI MimeHtmlProtocol_Start(IInternetProtocol *iface, const WCH
 
     IInternetProtocolSink_AddRef(This->sink = pOIProtSink);
 
-    binding = heap_alloc(FIELD_OFFSET(MimeHtmlBinding,  url[url.mhtml_len+1]));
+    binding = malloc(FIELD_OFFSET(MimeHtmlBinding, url[url.mhtml_len+1]));
     if(!binding)
         return E_OUTOFMEMORY;
     memcpy(binding->url, url.mhtml, url.mhtml_len*sizeof(WCHAR));
@@ -496,7 +478,7 @@ static HRESULT WINAPI MimeHtmlProtocol_Start(IInternetProtocol *iface, const WCH
 
     hres = CreateURLMoniker(NULL, binding->url, &mon);
     if(FAILED(hres)) {
-        heap_free(binding);
+        free(binding);
         return hres;
     }
 
@@ -584,7 +566,7 @@ static HRESULT WINAPI MimeHtmlProtocol_Seek(IInternetProtocol *iface, LARGE_INTE
         DWORD dwOrigin, ULARGE_INTEGER* plibNewPosition)
 {
     MimeHtmlProtocol *This = impl_from_IInternetProtocol(iface);
-    FIXME("(%p)->(%ld %ld %p)\n", This, dlibMove.u.LowPart, dwOrigin, plibNewPosition);
+    FIXME("(%p)->(%ld %ld %p)\n", This, dlibMove.LowPart, dwOrigin, plibNewPosition);
     return E_NOTIMPL;
 }
 
@@ -729,7 +711,7 @@ HRESULT MimeHtmlProtocol_create(IUnknown *outer, void **obj)
 {
     MimeHtmlProtocol *protocol;
 
-    protocol = heap_alloc(sizeof(*protocol));
+    protocol = malloc(sizeof(*protocol));
     if(!protocol)
         return E_OUTOFMEMORY;
 

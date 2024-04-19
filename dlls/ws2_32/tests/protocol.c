@@ -96,7 +96,7 @@ static void test_WSAEnumProtocolsA(void)
     error = WSAGetLastError();
     ok( error == WSAENOBUFS, "Expected 10055, received %ld\n", error);
 
-    buffer = HeapAlloc( GetProcessHeap(), 0, len );
+    buffer = malloc( len );
 
     if (buffer)
     {
@@ -107,12 +107,13 @@ static void test_WSAEnumProtocolsA(void)
         for (i = 0; i < ret; i++)
         {
             ok( strlen( buffer[i].szProtocol ), "No protocol name found\n" );
+            ok( !(buffer[i].dwProviderFlags & PFL_HIDDEN), "Found a protocol with PFL_HIDDEN.\n" );
             test_service_flags( buffer[i].iAddressFamily, buffer[i].iVersion,
                                 buffer[i].iSocketType, buffer[i].iProtocol,
                                 buffer[i].dwServiceFlags1);
         }
 
-        HeapFree( GetProcessHeap(), 0, buffer );
+        free( buffer );
     }
 
     /* Test invalid protocols in the list */
@@ -122,7 +123,7 @@ static void test_WSAEnumProtocolsA(void)
     ok( error == WSAENOBUFS || broken(error == WSAEFAULT) /* NT4 */,
        "Expected 10055, received %ld\n", error);
 
-    buffer = HeapAlloc( GetProcessHeap(), 0, len );
+    buffer = malloc( len );
 
     if (buffer)
     {
@@ -140,7 +141,7 @@ static void test_WSAEnumProtocolsA(void)
                 }
         ok(found == 0x0A, "Expected 2 bits represented as 0xA, received 0x%x\n", found);
 
-        HeapFree( GetProcessHeap(), 0, buffer );
+        free( buffer );
     }
 }
 
@@ -163,7 +164,7 @@ static void test_WSAEnumProtocolsW(void)
     error = WSAGetLastError();
     ok( error == WSAENOBUFS, "Expected 10055, received %ld\n", error);
 
-    buffer = HeapAlloc( GetProcessHeap(), 0, len );
+    buffer = malloc( len );
 
     if (buffer)
     {
@@ -174,12 +175,13 @@ static void test_WSAEnumProtocolsW(void)
         for (i = 0; i < ret; i++)
         {
             ok( lstrlenW( buffer[i].szProtocol ), "No protocol name found\n" );
+            ok( !(buffer[i].dwProviderFlags & PFL_HIDDEN), "Found a protocol with PFL_HIDDEN.\n" );
             test_service_flags( buffer[i].iAddressFamily, buffer[i].iVersion,
                                 buffer[i].iSocketType, buffer[i].iProtocol,
                                 buffer[i].dwServiceFlags1);
         }
 
-        HeapFree( GetProcessHeap(), 0, buffer );
+        free( buffer );
     }
 
     /* Test invalid protocols in the list */
@@ -189,7 +191,7 @@ static void test_WSAEnumProtocolsW(void)
     ok( error == WSAENOBUFS || broken(error == WSAEFAULT) /* NT4 */,
        "Expected 10055, received %ld\n", error);
 
-    buffer = HeapAlloc( GetProcessHeap(), 0, len );
+    buffer = malloc( len );
 
     if (buffer)
     {
@@ -207,7 +209,7 @@ static void test_WSAEnumProtocolsW(void)
                 }
         ok(found == 0x0A, "Expected 2 bits represented as 0xA, received 0x%x\n", found);
 
-        HeapFree( GetProcessHeap(), 0, buffer );
+        free( buffer );
     }
 }
 
@@ -404,7 +406,8 @@ static void test_WSALookupService(void)
 
     ret = WSALookupServiceBeginW(qs, 0, &handle);
     ok(ret == SOCKET_ERROR, "WSALookupServiceBeginW should have failed\n");
-    todo_wine ok(WSAGetLastError() == ERROR_INVALID_PARAMETER
+    todo_wine ok(WSAGetLastError() == WSAEINVAL
+            || broken(WSAGetLastError() == ERROR_INVALID_PARAMETER)
             || broken(WSAGetLastError() == WSASERVICE_NOT_FOUND) /* win10 1809 */,
             "got error %u\n", WSAGetLastError());
 
@@ -819,6 +822,8 @@ static void test_inet_pton(void)
         char input[64];
         int ret;
         unsigned short addr[8];
+        int broken;
+        int broken_ret;
     }
     ipv6_tests[] =
     {
@@ -904,10 +909,8 @@ static void test_inet_pton(void)
         {"::0:0:0:0",                                      1, {0, 0, 0, 0, 0, 0, 0, 0}},
         {"::0:0:0:0:0",                                    1, {0, 0, 0, 0, 0, 0, 0, 0}},
         {"::0:0:0:0:0:0",                                  1, {0, 0, 0, 0, 0, 0, 0, 0}},
-        /* this one and the next one are incorrectly parsed by windows,
-            it adds one zero too many in front, cutting off the last digit. */
-        {"::0:0:0:0:0:0:0",                                0, {0, 0, 0, 0, 0, 0, 0, 0}},
-        {"::0:a:b:c:d:e:f",                                0, {0, 0, 0, 0xa00, 0xb00, 0xc00, 0xd00, 0xe00}},
+        {"::0:0:0:0:0:0:0",                                1, {0, 0, 0, 0, 0, 0, 0, 0}, 1},
+        {"::0:a:b:c:d:e:f",                                1, {0, 0, 0xa00, 0xb00, 0xc00, 0xd00, 0xe00, 0xf00}, 1},
         {"::123.123.123.123",                              1, {0, 0, 0, 0, 0, 0, 0x7b7b, 0x7b7b}},
         {"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",        1, {0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff}},
         {"':10.0.0.1",                                     0, {0xabab, 0xabab, 0xabab, 0xabab, 0xabab, 0xabab, 0xabab, 0xabab}},
@@ -1074,17 +1077,31 @@ static void test_inet_pton(void)
         WSASetLastError(0xdeadbeef);
         memset(addr, 0xab, sizeof(addr));
         ret = p_inet_pton(AF_INET6, ipv6_tests[i].input, addr);
-        ok(ret == ipv6_tests[i].ret, "got %d\n", ret);
+        if (ipv6_tests[i].broken)
+            ok(ret == ipv6_tests[i].ret || broken(ret == ipv6_tests[i].broken_ret), "got %d\n", ret);
+        else
+            ok(ret == ipv6_tests[i].ret, "got %d\n", ret);
         ok(WSAGetLastError() == 0xdeadbeef, "got error %u\n", WSAGetLastError());
-        ok(!memcmp(addr, ipv6_tests[i].addr, sizeof(addr)), "address didn't match\n");
+        if (ipv6_tests[i].broken)
+            ok(!memcmp(addr, ipv6_tests[i].addr, sizeof(addr)) || broken(memcmp(addr, ipv6_tests[i].addr, sizeof(addr))),
+               "address didn't match\n");
+        else
+            ok(!memcmp(addr, ipv6_tests[i].addr, sizeof(addr)), "address didn't match\n");
 
         MultiByteToWideChar(CP_ACP, 0, ipv6_tests[i].input, -1, inputW, ARRAY_SIZE(inputW));
         WSASetLastError(0xdeadbeef);
         memset(addr, 0xab, sizeof(addr));
         ret = pInetPtonW(AF_INET6, inputW, addr);
-        ok(ret == ipv6_tests[i].ret, "got %d\n", ret);
+        if (ipv6_tests[i].broken)
+            ok(ret == ipv6_tests[i].ret || broken(ret == ipv6_tests[i].broken_ret), "got %d\n", ret);
+        else
+            ok(ret == ipv6_tests[i].ret, "got %d\n", ret);
         ok(WSAGetLastError() == (ret ? 0xdeadbeef : WSAEINVAL), "got error %u\n", WSAGetLastError());
-        ok(!memcmp(addr, ipv6_tests[i].addr, sizeof(addr)), "address didn't match\n");
+        if (ipv6_tests[i].broken)
+            ok(!memcmp(addr, ipv6_tests[i].addr, sizeof(addr)) || broken(memcmp(addr, ipv6_tests[i].addr, sizeof(addr))),
+               "address didn't match\n");
+        else
+            ok(!memcmp(addr, ipv6_tests[i].addr, sizeof(addr)), "address didn't match\n");
 
         winetest_pop_context();
     }
@@ -1453,6 +1470,8 @@ static void test_WSAStringToAddress(void)
         USHORT address[8];
         USHORT port;
         int error;
+        int broken;
+        int broken_error;
     }
     ipv6_tests[] =
     {
@@ -1462,7 +1481,7 @@ static void test_WSAStringToAddress(void)
         { "2001::1", { 0x120, 0, 0, 0, 0, 0, 0, 0x100 } },
         { "::1]:65535", { 0, 0, 0, 0, 0, 0, 0, 0x100 }, 0, WSAEINVAL },
         { "001::1", { 0x100, 0, 0, 0, 0, 0, 0, 0x100 } },
-        { "::1:2:3:4:5:6:7", { 0, 0, 0x100, 0x200, 0x300, 0x400, 0x500, 0x600 }, 0, WSAEINVAL }, /* Windows bug */
+        { "::1:2:3:4:5:6:7", { 0, 0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700 }, 0, 0, 1, WSAEINVAL },
         { "1.2.3.4", { 0x201, 0x3, 0, 0, 0, 0, 0, 0 }, 0, WSAEINVAL },
         { "1:2:3:", { 0x100, 0x200, 0x300, 0, 0, 0, 0 }, 0, WSAEINVAL },
         { "", { 0, 0, 0, 0, 0, 0, 0, 0 }, 0, WSAEINVAL },
@@ -1540,20 +1559,37 @@ static void test_WSAStringToAddress(void)
 
             winetest_push_context( "addr %s", debugstr_a(ipv6_tests[j].input) );
 
-            ok( ret == (ipv6_tests[j].error ? SOCKET_ERROR : 0), "got %d\n", ret );
-            ok( WSAGetLastError() == ipv6_tests[j].error, "got error %d\n", WSAGetLastError() );
-            ok( sockaddr6.sin6_family == (ipv6_tests[j].error ? 0 : AF_INET6),
-                "got family %#x\n", sockaddr6.sin6_family );
-            ok( !memcmp( &sockaddr6.sin6_addr, ipv6_tests[j].address, sizeof(sockaddr6.sin6_addr) ),
-                "got addr %x:%x:%x:%x:%x:%x:%x:%x\n",
-                sockaddr6.sin6_addr.s6_words[0], sockaddr6.sin6_addr.s6_words[1],
-                sockaddr6.sin6_addr.s6_words[2], sockaddr6.sin6_addr.s6_words[3],
-                sockaddr6.sin6_addr.s6_words[4], sockaddr6.sin6_addr.s6_words[5],
-                sockaddr6.sin6_addr.s6_words[6], sockaddr6.sin6_addr.s6_words[7] );
+            if (ipv6_tests[j].broken)
+            {
+                ok( ret == (ipv6_tests[j].error ? SOCKET_ERROR : 0) ||
+                    broken(ret == (ipv6_tests[j].broken_error ? SOCKET_ERROR : 0)), "got %d\n", ret );
+                ok( WSAGetLastError() == ipv6_tests[j].error ||
+                    broken(WSAGetLastError() == ipv6_tests[j].broken_error), "got error %d\n", WSAGetLastError() );
+                ok( !memcmp( &sockaddr6.sin6_addr, ipv6_tests[j].address, sizeof(sockaddr6.sin6_addr) ) ||
+                    broken(memcmp( &sockaddr6.sin6_addr, ipv6_tests[j].address, sizeof(sockaddr6.sin6_addr) )),
+                    "got addr %x:%x:%x:%x:%x:%x:%x:%x\n",
+                    sockaddr6.sin6_addr.s6_words[0], sockaddr6.sin6_addr.s6_words[1],
+                    sockaddr6.sin6_addr.s6_words[2], sockaddr6.sin6_addr.s6_words[3],
+                    sockaddr6.sin6_addr.s6_words[4], sockaddr6.sin6_addr.s6_words[5],
+                    sockaddr6.sin6_addr.s6_words[6], sockaddr6.sin6_addr.s6_words[7] );
+            }
+            else
+            {
+                ok( ret == (ipv6_tests[j].error ? SOCKET_ERROR : 0), "got %d\n", ret );
+                ok( WSAGetLastError() == ipv6_tests[j].error, "got error %d\n", WSAGetLastError() );
+                ok( !memcmp( &sockaddr6.sin6_addr, ipv6_tests[j].address, sizeof(sockaddr6.sin6_addr) ),
+                    "got addr %x:%x:%x:%x:%x:%x:%x:%x\n",
+                    sockaddr6.sin6_addr.s6_words[0], sockaddr6.sin6_addr.s6_words[1],
+                    sockaddr6.sin6_addr.s6_words[2], sockaddr6.sin6_addr.s6_words[3],
+                    sockaddr6.sin6_addr.s6_words[4], sockaddr6.sin6_addr.s6_words[5],
+                    sockaddr6.sin6_addr.s6_words[6], sockaddr6.sin6_addr.s6_words[7] );
+                ok( sockaddr6.sin6_family == (ipv6_tests[j].error ? 0 : AF_INET6),
+                    "got family %#x\n", sockaddr6.sin6_family );
+                ok( len == expected_len, "got len %d\n", len );
+            }
             ok( !sockaddr6.sin6_scope_id, "got scope id %lu\n", sockaddr6.sin6_scope_id );
             ok( sockaddr6.sin6_port == ipv6_tests[j].port, "got port %u\n", sockaddr6.sin6_port );
             ok( !sockaddr6.sin6_flowinfo, "got flowinfo %lu\n", sockaddr6.sin6_flowinfo );
-            ok( len == expected_len, "got len %d\n", len );
 
             winetest_pop_context();
         }
@@ -1570,7 +1606,7 @@ static const struct addr_hint_tests
 }
 hinttests[] =
 {
-    {AF_UNSPEC, SOCK_STREAM, IPPROTO_TCP, 0},
+    {AF_UNSPEC, SOCK_STREAM, IPPROTO_TCP, 0}, /* 0 */
     {AF_UNSPEC, SOCK_STREAM, IPPROTO_UDP, 0},
     {AF_UNSPEC, SOCK_STREAM, IPPROTO_IPV6,0},
     {AF_UNSPEC, SOCK_DGRAM,  IPPROTO_TCP, 0},
@@ -1580,7 +1616,7 @@ hinttests[] =
     {AF_INET,   SOCK_STREAM, IPPROTO_UDP, 0},
     {AF_INET,   SOCK_STREAM, IPPROTO_IPV6,0},
     {AF_INET,   SOCK_DGRAM,  IPPROTO_TCP, 0},
-    {AF_INET,   SOCK_DGRAM,  IPPROTO_UDP, 0},
+    {AF_INET,   SOCK_DGRAM,  IPPROTO_UDP, 0}, /* 10 */
     {AF_INET,   SOCK_DGRAM,  IPPROTO_IPV6,0},
     {AF_UNSPEC, 0,           IPPROTO_TCP, 0},
     {AF_UNSPEC, 0,           IPPROTO_UDP, 0},
@@ -1590,7 +1626,7 @@ hinttests[] =
     {AF_INET,   0,           IPPROTO_TCP, 0},
     {AF_INET,   0,           IPPROTO_UDP, 0},
     {AF_INET,   0,           IPPROTO_IPV6,0},
-    {AF_INET,   SOCK_STREAM, 0,           0},
+    {AF_INET,   SOCK_STREAM, 0,           0}, /* 20 */
     {AF_INET,   SOCK_DGRAM,  0,           0},
     {AF_UNSPEC, 999,         IPPROTO_TCP, WSAESOCKTNOSUPPORT},
     {AF_UNSPEC, 999,         IPPROTO_UDP, WSAESOCKTNOSUPPORT},
@@ -1600,7 +1636,7 @@ hinttests[] =
     {AF_INET,   999,         IPPROTO_IPV6,WSAESOCKTNOSUPPORT},
     {AF_UNSPEC, SOCK_STREAM, 999,         0},
     {AF_UNSPEC, SOCK_STREAM, 999,         0},
-    {AF_INET,   SOCK_DGRAM,  999,         0},
+    {AF_INET,   SOCK_DGRAM,  999,         0}, /* 30 */
     {AF_INET,   SOCK_DGRAM,  999,         0},
 };
 
@@ -1881,8 +1917,8 @@ static void test_GetAddrInfoW(void)
     SetLastError(0xdeadbeef);
     result2 = NULL;
     ret = GetAddrInfoW(idn_domain, NULL, &hint, &result2);
-    ok(ret == WSAHOST_NOT_FOUND, "got %d expected WSAHOST_NOT_FOUND\n", ret);
-    ok(WSAGetLastError() == WSAHOST_NOT_FOUND, "expected 11001, got %d\n", WSAGetLastError());
+    ok(ret == WSAHOST_NOT_FOUND || ret == WSATRY_AGAIN, "got %d\n", ret);
+    ok(WSAGetLastError() == ret, "got %d\n", WSAGetLastError());
     ok(result2 == NULL, "got %p\n", result2);
 }
 
@@ -1890,6 +1926,7 @@ static struct completion_routine_test
 {
     WSAOVERLAPPED  *overlapped;
     DWORD           error;
+    DWORD           error2;
     ADDRINFOEXW   **result;
     HANDLE          event;
     DWORD           called;
@@ -1899,7 +1936,7 @@ static void CALLBACK completion_routine(DWORD error, DWORD byte_count, WSAOVERLA
 {
     struct completion_routine_test *test = &completion_routine_test;
 
-    ok(error == test->error, "got %lu\n", error);
+    ok(error == test->error || (test->error2 && error == test->error2), "got %lu\n", error);
     ok(!byte_count, "got %lu\n", byte_count);
     ok(overlapped == test->overlapped, "got %p\n", overlapped);
     ok(overlapped->Internal == test->error, "got %Iu\n", overlapped->Internal);
@@ -2037,6 +2074,7 @@ static void test_GetAddrInfoExW(void)
     overlapped.hEvent = NULL;
     completion_routine_test.overlapped = &overlapped;
     completion_routine_test.error = ERROR_SUCCESS;
+    completion_routine_test.error2 = ERROR_SUCCESS;
     completion_routine_test.result = &result;
     completion_routine_test.event = event;
     completion_routine_test.called = 0;
@@ -2057,6 +2095,7 @@ static void test_GetAddrInfoExW(void)
     result = (void *)0xdeadbeef;
     completion_routine_test.overlapped = &overlapped;
     completion_routine_test.error = WSAHOST_NOT_FOUND;
+    completion_routine_test.error2 = WSANO_DATA;
     completion_routine_test.called = 0;
     ResetEvent(event);
     ret = pGetAddrInfoExW(nxdomain, NULL, NS_DNS, NULL, NULL, &result, NULL, &overlapped, completion_routine, NULL);
@@ -2140,6 +2179,7 @@ static void test_getaddrinfo(void)
     SOCKADDR_IN *sockaddr;
     CHAR name[256], *ip;
     DWORD size = sizeof(name);
+    BOOL has_ipv6_getaddrinfo = TRUE;
     BOOL has_ipv6_addr;
 
     memset(&hint, 0, sizeof(ADDRINFOA));
@@ -2340,8 +2380,10 @@ static void test_getaddrinfo(void)
     }
     else
     {
+        todo_wine
         ok(ret == WSAHOST_NOT_FOUND, "getaddrinfo failed with %d\n", ret);
-        win_skip("getaddrinfo does not support IPV6\n");
+        skip("getaddrinfo does not support IPV6\n");
+        has_ipv6_getaddrinfo = FALSE;
     }
 
     hint.ai_flags = 0;
@@ -2432,7 +2474,10 @@ static void test_getaddrinfo(void)
     ret = getaddrinfo("www.kernel.org", NULL, NULL, &result);
     ok(!ret, "getaddrinfo failed with %d\n", WSAGetLastError());
     if (!has_ipv6_addr)
-        todo_wine ok(!ipv6_found(result), "IPv6 address is returned.\n");
+    {
+        todo_wine_if(has_ipv6_getaddrinfo)
+        ok(!ipv6_found(result), "IPv6 address is returned.\n");
+    }
     freeaddrinfo(result);
 
     for (i = 0; i < ARRAY_SIZE(hinttests); i++)
@@ -2553,8 +2598,8 @@ static void test_gethostbyname(void)
     ret = GetIpForwardTable(NULL, &route_size, FALSE);
     ok(ret == ERROR_INSUFFICIENT_BUFFER, "GetIpForwardTable failed with a different error: %d\n", ret);
 
-    adapters = HeapAlloc(GetProcessHeap(), 0, adap_size);
-    routes = HeapAlloc(GetProcessHeap(), 0, route_size);
+    adapters = malloc(adap_size);
+    routes = malloc(route_size);
 
     ret = GetAdaptersInfo(adapters, &adap_size);
     ok(ret  == NO_ERROR, "GetAdaptersInfo failed, error: %d\n", ret);
@@ -2591,8 +2636,8 @@ static void test_gethostbyname(void)
     ok(found_default, "failed to find the first IP from gethostbyname!\n");
 
 cleanup:
-    HeapFree(GetProcessHeap(), 0, adapters);
-    HeapFree(GetProcessHeap(), 0, routes);
+    free(adapters);
+    free(routes);
 }
 
 static void test_gethostbyname_hack(void)
@@ -2750,13 +2795,13 @@ static void test_WSAEnumNameSpaceProvidersA(void)
     todo_wine
     ok(error == WSAEFAULT, "Expected 10014, got %lu\n", error);
 
-    name = HeapAlloc(GetProcessHeap(), 0, len);
+    name = malloc(len);
 
     ret = WSAEnumNameSpaceProvidersA(&len, name);
     todo_wine
     ok(ret > 0, "Expected more than zero name space providers\n");
 
-    HeapFree(GetProcessHeap(), 0, name);
+    free(name);
 }
 
 static void test_WSAEnumNameSpaceProvidersW(void)
@@ -2797,7 +2842,7 @@ static void test_WSAEnumNameSpaceProvidersW(void)
     todo_wine
     ok(error == WSAEFAULT, "Expected 10014, got %lu\n", error);
 
-    name = HeapAlloc(GetProcessHeap(), 0, len);
+    name = malloc(len);
 
     ret = WSAEnumNameSpaceProvidersW(&len, name);
     todo_wine
@@ -2826,7 +2871,7 @@ static void test_WSAEnumNameSpaceProvidersW(void)
         }
     }
 
-    HeapFree(GetProcessHeap(), 0, name);
+    free(name);
 }
 
 static void test_WSCGetProviderInfo(void)
@@ -2839,7 +2884,7 @@ static void test_WSCGetProviderInfo(void)
 
     if (!pWSCGetProviderInfo)
     {
-        skip("WSCGetProviderInfo is not available.\n");
+        win_skip("WSCGetProviderInfo is not available.\n");
         return;
     }
 

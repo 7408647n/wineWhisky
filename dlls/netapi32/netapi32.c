@@ -36,6 +36,7 @@
 #include "atsvc.h"
 #include "lmapibuf.h"
 #include "lmbrowsr.h"
+#include "lmremutl.h"
 #include "lmshare.h"
 #include "lmwksta.h"
 #include "netbios.h"
@@ -55,9 +56,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(netapi32);
 
 DEFINE_GUID(GUID_NULL,0,0,0,0,0,0,0,0,0,0,0);
 
-static unixlib_handle_t samba_handle;
-
-#define SAMBA_CALL(func, args) __wine_unix_call( samba_handle, unix_ ## func, args )
+#define SAMBA_CALL(func, args) WINE_UNIX_CALL( unix_ ## func, args )
 
 static INIT_ONCE init_once = INIT_ONCE_STATIC_INIT;
 
@@ -69,7 +68,7 @@ static BOOL WINAPI load_samba( INIT_ONCE *once, void *param, void **context )
 
 static BOOL samba_init(void)
 {
-    return samba_handle && InitOnceExecuteOnce( &init_once, load_samba, NULL, NULL );
+    return __wine_unixlib_handle && InitOnceExecuteOnce( &init_once, load_samba, NULL, NULL );
 }
 
 /************************************************************
@@ -96,8 +95,7 @@ BOOL WINAPI DllMain (HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
     switch (fdwReason) {
         case DLL_PROCESS_ATTACH:
-            NtQueryVirtualMemory( GetCurrentProcess(), hinstDLL, MemoryWineUnixFuncs,
-                                  &samba_handle, sizeof(samba_handle), NULL );
+            __wine_init_unix_call();
             DisableThreadLibraryCalls(hinstDLL);
             NetBIOSInit();
             NetBTInit();
@@ -2588,6 +2586,17 @@ NET_API_STATUS WINAPI NetLocalGroupSetMembers(
 }
 
 /************************************************************
+ *                NetRemoteTOD (NETAPI32.@)
+ */
+NET_API_STATUS NET_API_FUNCTION NetRemoteTOD(
+    LPCWSTR servername,
+    LPBYTE *buf)
+{
+    FIXME("(%s %p) stub!\n", debugstr_w(servername), buf);
+    return ERROR_NO_BROWSER_SERVERS_FOUND;
+}
+
+/************************************************************
  *                DavGetHTTPFromUNCPath (NETAPI32.@)
  */
 DWORD WINAPI DavGetHTTPFromUNCPath(const WCHAR *unc_path, WCHAR *buf, DWORD *buflen)
@@ -2777,17 +2786,17 @@ DWORD WINAPI DsEnumerateDomainTrustsW(LPWSTR server, ULONG flags, PDS_DOMAIN_TRU
     return ERROR_NO_LOGON_SERVERS;
 }
 
-DECLSPEC_HIDDEN void __RPC_FAR *__RPC_USER MIDL_user_allocate(SIZE_T n)
+void __RPC_FAR *__RPC_USER MIDL_user_allocate(SIZE_T n)
 {
     return HeapAlloc(GetProcessHeap(), 0, n);
 }
 
-DECLSPEC_HIDDEN void __RPC_USER MIDL_user_free(void __RPC_FAR *p)
+void __RPC_USER MIDL_user_free(void __RPC_FAR *p)
 {
     HeapFree(GetProcessHeap(), 0, p);
 }
 
-DECLSPEC_HIDDEN handle_t __RPC_USER ATSVC_HANDLE_bind(ATSVC_HANDLE str)
+handle_t __RPC_USER ATSVC_HANDLE_bind(ATSVC_HANDLE str)
 {
     static unsigned char ncalrpc[] = "ncalrpc";
     unsigned char *binding_str;
@@ -2801,7 +2810,7 @@ DECLSPEC_HIDDEN handle_t __RPC_USER ATSVC_HANDLE_bind(ATSVC_HANDLE str)
     return rpc_handle;
 }
 
-DECLSPEC_HIDDEN void __RPC_USER ATSVC_HANDLE_unbind(ATSVC_HANDLE ServerName, handle_t rpc_handle)
+void __RPC_USER ATSVC_HANDLE_unbind(ATSVC_HANDLE ServerName, handle_t rpc_handle)
 {
     RpcBindingFree(&rpc_handle);
 }

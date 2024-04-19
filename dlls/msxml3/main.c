@@ -170,12 +170,12 @@ static int to_utf8(int cp, unsigned char *out, int *outlen, const unsigned char 
     if (!in || !inlen) goto done;
 
     len = MultiByteToWideChar(cp, 0, (const char *)in, *inlen, NULL, 0);
-    tmp = heap_alloc(len * sizeof(WCHAR));
+    tmp = malloc(len * sizeof(WCHAR));
     if (!tmp) return -1;
     MultiByteToWideChar(cp, 0, (const char *)in, *inlen, tmp, len);
 
     len = WideCharToMultiByte(CP_UTF8, 0, tmp, len, (char *)out, *outlen, NULL, NULL);
-    heap_free(tmp);
+    free(tmp);
     if (!len) return -1;
 done:
     *outlen = len;
@@ -190,12 +190,12 @@ static int from_utf8(int cp, unsigned char *out, int *outlen, const unsigned cha
     if (!in || !inlen) goto done;
 
     len = MultiByteToWideChar(CP_UTF8, 0, (const char *)in, *inlen, NULL, 0);
-    tmp = heap_alloc(len * sizeof(WCHAR));
+    tmp = malloc(len * sizeof(WCHAR));
     if (!tmp) return -1;
     MultiByteToWideChar(CP_UTF8, 0, (const char *)in, *inlen, tmp, len);
 
     len = WideCharToMultiByte(cp, 0, tmp, len, (char *)out, *outlen, NULL, NULL);
-    heap_free(tmp);
+    free(tmp);
     if (!len) return -1;
 done:
     *outlen = len;
@@ -322,8 +322,6 @@ static void init_char_encoders(void)
         { "windows-1258", win1258_to_utf8, utf8_to_win1258 }
     };
     int i;
-
-    xmlInitCharEncodingHandlers();
 
     for (i = 0; i < ARRAY_SIZE(encoder); i++)
     {

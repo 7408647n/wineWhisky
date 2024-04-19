@@ -28,7 +28,6 @@
 #include "combase_private.h"
 
 #include "wine/debug.h"
-#include "wine/heap.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ole);
 
@@ -76,7 +75,7 @@ struct proxy_manager
     OXID_INFO oxid_info;      /* string binding, ipid of rem unknown and other information (RO) */
     OID oid;                  /* object ID (RO) */
     struct list interfaces;   /* imported interfaces (CS cs) */
-    LONG refs;                /* proxy reference count (LOCK) */
+    LONG refs;                /* proxy reference count (LOCK); 0 if about to be removed from list */
     CRITICAL_SECTION cs;      /* thread safety for this object and children */
     ULONG sorflags;           /* STDOBJREF flags (RO) */
     IRemUnknown *remunk;      /* proxy to IRemUnknown used for lifecycle management (CS cs) */
@@ -219,7 +218,7 @@ static ULONG WINAPI ftmarshaler_inner_Release(IUnknown *iface)
     TRACE("%p, refcount %lu\n", iface, refcount);
 
     if (!refcount)
-        heap_free(marshaler);
+        free(marshaler);
 
     return refcount;
 }
@@ -421,7 +420,7 @@ HRESULT WINAPI CoCreateFreeThreadedMarshaler(IUnknown *outer, IUnknown **marshal
 
     TRACE("%p, %p\n", outer, marshaler);
 
-    object = heap_alloc(sizeof(*object));
+    object = malloc(sizeof(*object));
     if (!object)
         return E_OUTOFMEMORY;
 
@@ -699,7 +698,7 @@ HRESULT WINAPI CoReleaseMarshalData(IStream *stream)
 }
 
 static HRESULT std_unmarshal_interface(MSHCTX dest_context, void *dest_context_data,
-        IStream *stream, REFIID riid, void **ppv)
+        IStream *stream, REFIID riid, void **ppv, BOOL dest_context_known)
 {
     struct stub_manager *stubmgr = NULL;
     struct OR_STANDARD obj;
@@ -758,6 +757,8 @@ static HRESULT std_unmarshal_interface(MSHCTX dest_context, void *dest_context_d
         {
             if (!stub_manager_notify_unmarshal(stubmgr, &obj.std.ipid))
                 hres = CO_E_OBJNOTCONNECTED;
+            if (SUCCEEDED(hres) && !dest_context_known)
+                hres = ipid_get_dest_context(&obj.std.ipid, &dest_context, &dest_context_data);
         }
         else
         {
@@ -804,7 +805,7 @@ HRESULT WINAPI CoUnmarshalInterface(IStream *stream, REFIID riid, void **ppv)
     hr = get_unmarshaler_from_stream(stream, &marshal, &iid);
     if (hr == S_FALSE)
     {
-        hr = std_unmarshal_interface(0, NULL, stream, &iid, (void **)&object);
+        hr = std_unmarshal_interface(0, NULL, stream, &iid, (void **)&object, FALSE);
         if (hr != S_OK)
             ERR("StdMarshal UnmarshalInterface failed, hr %#lx\n", hr);
     }
@@ -1001,9 +1002,9 @@ static HRESULT WINAPI ClientIdentity_QueryMultipleInterfaces(IMultiQI *iface, UL
     ULONG nonlocal_mqis = 0;
     ULONG i;
     ULONG successful_mqis = 0;
-    IID *iids = HeapAlloc(GetProcessHeap(), 0, cMQIs * sizeof(*iids));
+    IID *iids = malloc(cMQIs * sizeof(*iids));
     /* mapping of RemQueryInterface index to QueryMultipleInterfaces index */
-    ULONG *mapping = HeapAlloc(GetProcessHeap(), 0, cMQIs * sizeof(*mapping));
+    ULONG *mapping = malloc(cMQIs * sizeof(*mapping));
 
     TRACE("cMQIs: %ld\n", cMQIs);
 
@@ -1084,8 +1085,8 @@ static HRESULT WINAPI ClientIdentity_QueryMultipleInterfaces(IMultiQI *iface, UL
 
     TRACE("%ld/%ld successfully queried\n", successful_mqis, cMQIs);
 
-    HeapFree(GetProcessHeap(), 0, iids);
-    HeapFree(GetProcessHeap(), 0, mapping);
+    free(iids);
+    free(mapping);
 
     if (successful_mqis == cMQIs)
         return S_OK; /* we got all requested interfaces */
@@ -1531,20 +1532,20 @@ static void ifproxy_destroy(struct ifproxy * This)
 
     if (This->proxy) IRpcProxyBuffer_Release(This->proxy);
 
-    HeapFree(GetProcessHeap(), 0, This);
+    free(This);
 }
 
 static HRESULT proxy_manager_construct(
     struct apartment * apt, ULONG sorflags, OXID oxid, OID oid,
     const OXID_INFO *oxid_info, struct proxy_manager ** proxy_manager)
 {
-    struct proxy_manager * This = HeapAlloc(GetProcessHeap(), 0, sizeof(*This));
+    struct proxy_manager * This = malloc(sizeof(*This));
     if (!This) return E_OUTOFMEMORY;
 
     This->remoting_mutex = CreateMutexW(NULL, FALSE, NULL);
     if (!This->remoting_mutex)
     {
-        HeapFree(GetProcessHeap(), 0, This);
+        free(This);
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
@@ -1562,7 +1563,7 @@ static HRESULT proxy_manager_construct(
         if (FAILED(hr))
         {
             CloseHandle(This->remoting_mutex);
-            HeapFree(GetProcessHeap(), 0, This);
+            free(This);
             return hr;
         }
     }
@@ -1574,7 +1575,7 @@ static HRESULT proxy_manager_construct(
     list_init(&This->entry);
     list_init(&This->interfaces);
 
-    InitializeCriticalSection(&This->cs);
+    InitializeCriticalSectionEx(&This->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
     This->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": proxy_manager");
 
     /* the apartment the object was unmarshaled into */
@@ -1718,7 +1719,7 @@ static HRESULT proxy_manager_create_ifproxy(
 {
     HRESULT hr;
     IPSFactoryBuffer * psfb;
-    struct ifproxy * ifproxy = HeapAlloc(GetProcessHeap(), 0, sizeof(*ifproxy));
+    struct ifproxy * ifproxy = malloc(sizeof(*ifproxy));
     if (!ifproxy) return E_OUTOFMEMORY;
 
     list_init(&ifproxy->entry);
@@ -1888,6 +1889,32 @@ static HRESULT proxy_manager_get_remunknown(struct proxy_manager * This, IRemUnk
     return hr;
 }
 
+/*
+ * Safely increment the reference count of a proxy manager obtained from an
+ * apartment proxy list.
+ *
+ * This function shall be called inside the apartment's critical section.
+ */
+static LONG proxy_manager_addref_if_alive(struct proxy_manager * This)
+{
+    LONG refs = ReadNoFence(&This->refs);
+    LONG old_refs, new_refs;
+
+    do
+    {
+        if (refs == 0)
+        {
+            /* This proxy manager is about to be destroyed */
+            return 0;
+        }
+
+        old_refs = refs;
+        new_refs = refs + 1;
+    } while ((refs = InterlockedCompareExchange(&This->refs, new_refs, old_refs)) != old_refs);
+
+    return new_refs;
+}
+
 /* destroys a proxy manager, freeing the memory it used.
  * Note: this function should not be called from a list iteration in the
  * apartment, due to the fact that it removes itself from the apartment and
@@ -1931,7 +1958,7 @@ static void proxy_manager_destroy(struct proxy_manager * This)
 
     CloseHandle(This->remoting_mutex);
 
-    HeapFree(GetProcessHeap(), 0, This);
+    free(This);
 }
 
 /* finds the proxy manager corresponding to a given OXID and OID that has
@@ -1950,7 +1977,7 @@ static BOOL find_proxy_manager(struct apartment * apt, OXID oxid, OID oid, struc
             /* be careful of a race with ClientIdentity_Release, which would
              * cause us to return a proxy which is in the process of being
              * destroyed */
-            if (IMultiQI_AddRef(&proxy->IMultiQI_iface) != 0)
+            if (proxy_manager_addref_if_alive(proxy) != 0)
             {
                 *proxy_found = proxy;
                 found = TRUE;
@@ -2014,7 +2041,7 @@ static ULONG WINAPI StdMarshalImpl_Release(IMarshal *iface)
     ULONG refcount = InterlockedDecrement(&marshal->refcount);
 
     if (!refcount)
-        heap_free(marshal);
+        free(marshal);
 
     return refcount;
 }
@@ -2158,7 +2185,7 @@ static HRESULT WINAPI StdMarshalImpl_UnmarshalInterface(IMarshal *iface, IStream
         return E_NOTIMPL;
     }
 
-    return std_unmarshal_interface(marshal->dest_context, marshal->dest_context_data, stream, riid, ppv);
+    return std_unmarshal_interface(marshal->dest_context, marshal->dest_context_data, stream, riid, ppv, TRUE);
 }
 
 static HRESULT WINAPI StdMarshalImpl_ReleaseMarshalData(IMarshal *iface, IStream *stream)
@@ -2215,7 +2242,7 @@ static HRESULT StdMarshalImpl_Construct(REFIID riid, DWORD dest_context, void *d
     struct stdmarshal *object;
     HRESULT hr;
 
-    object = heap_alloc(sizeof(*object));
+    object = malloc(sizeof(*object));
     if (!object)
         return E_OUTOFMEMORY;
 

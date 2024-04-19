@@ -94,7 +94,7 @@ static BOOL compile_cs_to_dll(char *source_path, char *dest_path)
     ret = CreateProcessA(path_csc, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
     ok(ret, "Could not create process: %lu\n", GetLastError());
 
-    WaitForSingleObject(pi.hProcess, 5000);
+    wait_child_process(pi.hProcess);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
@@ -102,7 +102,7 @@ static BOOL compile_cs_to_dll(char *source_path, char *dest_path)
     ok(ret, "Compilation failed\n");
 
     ret = MoveFileA(path_temp, dest_path);
-    ok(ret, "Moving temporary file failed\n");
+    ok(ret, "Could not move %s to %s: %lu\n", path_temp, dest_path, GetLastError());
     return ret;
 }
 

@@ -39,7 +39,7 @@
 @ stub MFConvertToFP16Array
 @ stdcall MFCopyImage(ptr long ptr long long long)
 @ stdcall MFCreate2DMediaBuffer(long long long long ptr)
-@ stub MFCreateAMMediaTypeFromMFMediaType
+@ stdcall MFCreateAMMediaTypeFromMFMediaType(ptr int128 ptr)
 @ stdcall MFCreateAlignedMemoryBuffer(long long ptr)
 @ stdcall MFCreateAsyncResult(ptr ptr ptr ptr) rtworkq.RtwqCreateAsyncResult
 @ stdcall MFCreateAttributes(ptr long)
@@ -59,10 +59,10 @@
 @ stub MFCreateMediaBufferWrapper
 @ stdcall MFCreateMediaEvent(long ptr long ptr ptr)
 @ stdcall MFCreateMediaType(ptr)
-@ stub MFCreateMediaTypeFromRepresentation
+@ stdcall MFCreateMediaTypeFromRepresentation(int128 ptr ptr)
 @ stdcall MFCreateMemoryBuffer(long ptr)
 @ stub MFCreateMemoryStream
-@ stub MFCreatePathFromURL
+@ stdcall MFCreatePathFromURL(wstr ptr)
 @ stdcall MFCreatePresentationDescriptor(long ptr ptr)
 @ stdcall MFCreateSample(ptr)
 @ stub MFCreateSocket
@@ -81,7 +81,7 @@
 @ stub MFCreateVideoMediaTypeFromBitMapInfoHeaderEx
 @ stdcall MFCreateVideoMediaTypeFromSubtype(ptr ptr)
 @ stub MFCreateVideoMediaTypeFromVideoInfoHeader2
-@ stub MFCreateVideoMediaTypeFromVideoInfoHeader
+@ stdcall MFCreateVideoMediaTypeFromVideoInfoHeader(ptr long long long long int64 ptr ptr)
 @ stdcall MFCreateVideoSampleAllocatorEx(ptr ptr)
 @ stdcall MFCreateWaveFormatExFromMFMediaType(ptr ptr ptr long)
 @ stub MFDeserializeAttributesFromStream
@@ -117,14 +117,14 @@
 @ stdcall MFGetWorkQueueMMCSSPriority(long ptr) rtworkq.RtwqGetWorkQueueMMCSSPriority
 @ stdcall MFHeapAlloc(long long str long long)
 @ stdcall MFHeapFree(ptr)
-@ stub MFInitAMMediaTypeFromMFMediaType
+@ stdcall MFInitAMMediaTypeFromMFMediaType(ptr int128 ptr)
 @ stdcall MFInitAttributesFromBlob(ptr ptr long)
-@ stub MFInitMediaTypeFromAMMediaType
-@ stub MFInitMediaTypeFromMFVideoFormat
+@ stdcall MFInitMediaTypeFromAMMediaType(ptr ptr)
+@ stdcall MFInitMediaTypeFromMFVideoFormat(ptr ptr long)
 @ stub MFInitMediaTypeFromMPEG1VideoInfo
 @ stub MFInitMediaTypeFromMPEG2VideoInfo
-@ stub MFInitMediaTypeFromVideoInfoHeader2
-@ stub MFInitMediaTypeFromVideoInfoHeader
+@ stdcall MFInitMediaTypeFromVideoInfoHeader2(ptr ptr long ptr)
+@ stdcall MFInitMediaTypeFromVideoInfoHeader(ptr ptr long ptr)
 @ stdcall MFInitMediaTypeFromWaveFormatEx(ptr ptr long)
 @ stub MFInitVideoFormat
 @ stdcall MFInitVideoFormat_RGB(ptr long long long)

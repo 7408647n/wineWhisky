@@ -19,8 +19,6 @@
 #ifndef __WINE_BCRYPT_H
 #define __WINE_BCRYPT_H
 
-#include "wine/winheader_enter.h"
-
 #ifndef WINAPI
 #define WINAPI __stdcall
 #endif
@@ -60,12 +58,11 @@ typedef LONG NTSTATUS;
 #define BCRYPT_PADDING_SCHEMES      L"PaddingSchemes"
 #define BCRYPT_PROVIDER_HANDLE      L"ProviderHandle"
 #define BCRYPT_SIGNATURE_LENGTH     L"SignatureLength"
+#define BCRYPT_PUBLIC_KEY_LENGTH    L"PublicKeyLength"
 
 #define BCRYPT_OPAQUE_KEY_BLOB      L"OpaqueKeyBlob"
 #define BCRYPT_KEY_DATA_BLOB        L"KeyDataBlob"
 #define BCRYPT_AES_WRAP_KEY_BLOB    L"Rfc3565KeyWrapBlob"
-#define BCRYPT_DH_PUBLIC_BLOB       L"DHPUBLICBLOB"
-#define BCRYPT_DH_PRIVATE_BLOB      L"DHPRIVATEBLOB"
 #define BCRYPT_ECCPUBLIC_BLOB       L"ECCPUBLICBLOB"
 #define BCRYPT_ECCPRIVATE_BLOB      L"ECCPRIVATEBLOB"
 #define BCRYPT_RSAPUBLIC_BLOB       L"RSAPUBLICBLOB"
@@ -75,10 +72,14 @@ typedef LONG NTSTATUS;
 #define BCRYPT_DSA_PRIVATE_BLOB     L"DSAPRIVATEBLOB"
 #define BCRYPT_PUBLIC_KEY_BLOB      L"PUBLICBLOB"
 #define BCRYPT_PRIVATE_KEY_BLOB     L"PRIVATEBLOB"
+#define BCRYPT_DH_PUBLIC_BLOB       L"DHPUBLICBLOB"
+#define BCRYPT_DH_PRIVATE_BLOB      L"DHPRIVATEBLOB"
 #define LEGACY_DSA_PUBLIC_BLOB      L"CAPIDSAPUBLICBLOB"
 #define LEGACY_DSA_PRIVATE_BLOB     L"CAPIDSAPRIVATEBLOB"
 #define LEGACY_DSA_V2_PUBLIC_BLOB   L"V2CAPIDSAPUBLICBLOB"
 #define LEGACY_DSA_V2_PRIVATE_BLOB  L"V2CAPIDSAPRIVATEBLOB"
+#define LEGACY_RSAPUBLIC_BLOB       L"CAPIPUBLICBLOB"
+#define LEGACY_RSAPRIVATE_BLOB      L"CAPIPRIVATEBLOB"
 
 #define MS_PRIMITIVE_PROVIDER       L"Microsoft Primitive Provider"
 #define MS_PLATFORM_CRYPTO_PROVIDER L"Microsoft Platform Crypto Provider"
@@ -89,6 +90,7 @@ typedef LONG NTSTATUS;
 #define BCRYPT_DH_ALGORITHM         L"DH"
 #define BCRYPT_DSA_ALGORITHM        L"DSA"
 #define BCRYPT_ECDH_P256_ALGORITHM  L"ECDH_P256"
+#define BCRYPT_ECDH_P384_ALGORITHM  L"ECDH_P384"
 #define BCRYPT_ECDSA_P256_ALGORITHM L"ECDSA_P256"
 #define BCRYPT_ECDSA_P384_ALGORITHM L"ECDSA_P384"
 #define BCRYPT_ECDSA_P521_ALGORITHM L"ECDSA_P521"
@@ -137,12 +139,11 @@ static const WCHAR BCRYPT_OBJECT_LENGTH[] = {'O','b','j','e','c','t','L','e','n'
 static const WCHAR BCRYPT_PADDING_SCHEMES[] = {'P','a','d','d','i','n','g','S','c','h','e','m','e','s',0};
 static const WCHAR BCRYPT_PROVIDER_HANDLE[] = {'P','r','o','v','i','d','e','r','H','a','n','d','l','e',0};
 static const WCHAR BCRYPT_SIGNATURE_LENGTH[] = {'S','i','g','n','a','t','u','r','e','L','e','n','g','t','h',0};
+static const WCHAR BCRYPT_PUBLIC_KEY_LENGTH[] = {'P','u','b','l','i','c','K','e','y','L','e','n','g','t','h',0};
 
 static const WCHAR BCRYPT_OPAQUE_KEY_BLOB[] = {'O','p','a','q','u','e','K','e','y','B','l','o','b',0};
 static const WCHAR BCRYPT_KEY_DATA_BLOB[] = {'K','e','y','D','a','t','a','B','l','o','b',0};
 static const WCHAR BCRYPT_AES_WRAP_KEY_BLOB[] = {'R','f','c','3','5','6','5','K','e','y','W','r','a','p','B','l','o','b',0};
-static const WCHAR BCRYPT_DH_PUBLIC_BLOB[] = {'D','H','P','U','B','L','I','C','B','L','O','B',0};
-static const WCHAR BCRYPT_DH_PRIVATE_BLOB[] = {'D','H','P','R','I','V','A','T','E','B','L','O','B',0};
 static const WCHAR BCRYPT_ECCPUBLIC_BLOB[] = {'E','C','C','P','U','B','L','I','C','B','L','O','B',0};
 static const WCHAR BCRYPT_ECCPRIVATE_BLOB[] = {'E','C','C','P','R','I','V','A','T','E','B','L','O','B',0};
 static const WCHAR BCRYPT_RSAPUBLIC_BLOB[] = {'R','S','A','P','U','B','L','I','C','B','L','O','B',0};
@@ -152,10 +153,14 @@ static const WCHAR BCRYPT_DSA_PUBLIC_BLOB[] = {'D','S','A','P','U','B','L','I','
 static const WCHAR BCRYPT_DSA_PRIVATE_BLOB[] = {'D','S','A','P','R','I','V','A','T','E','B','L','O','B',0};
 static const WCHAR BCRYPT_PUBLIC_KEY_BLOB[] = {'P','U','B','L','I','C','B','L','O','B',0};
 static const WCHAR BCRYPT_PRIVATE_KEY_BLOB[] = {'P','R','I','V','A','T','E','B','L','O','B',0};
+static const WCHAR BCRYPT_DH_PUBLIC_BLOB[] = {'D','H','P','U','B','L','I','C','B','L','O','B',0};
+static const WCHAR BCRYPT_DH_PRIVATE_BLOB[] = {'D','H','P','R','I','V','A','T','E','B','L','O','B',0};
 static const WCHAR LEGACY_DSA_PUBLIC_BLOB[] = {'C','A','P','I','D','S','A','P','U','B','L','I','C','B','L','O','B',0};
 static const WCHAR LEGACY_DSA_PRIVATE_BLOB[] = {'C','A','P','I','D','S','A','P','R','I','V','A','T','E','B','L','O','B',0};
 static const WCHAR LEGACY_DSA_V2_PUBLIC_BLOB[] = {'V','2','C','A','P','I','D','S','A','P','U','B','L','I','C','B','L','O','B',0};
 static const WCHAR LEGACY_DSA_V2_PRIVATE_BLOB[] = {'V','2','C','A','P','I','D','S','A','P','R','I','V','A','T','E','B','L','O','B',0};
+static const WCHAR LEGACY_RSAPUBLIC_BLOB[] = {'C','A','P','I','P','U','B','L','I','C','B','L','O','B',0};
+static const WCHAR LEGACY_RSAPRIVATE_BLOB[] = {'C','A','P','I','P','R','I','V','A','T','E','B','L','O','B',0};
 
 static const WCHAR MS_PRIMITIVE_PROVIDER[] = \
 {'M','i','c','r','o','s','o','f','t',' ','P','r','i','m','i','t','i','v','e',' ','P','r','o','v','i','d','e','r',0};
@@ -168,6 +173,7 @@ static const WCHAR BCRYPT_DES_ALGORITHM[] = {'D','E','S',0};
 static const WCHAR BCRYPT_DH_ALGORITHM[] = {'D','H',0};
 static const WCHAR BCRYPT_DSA_ALGORITHM[] = {'D','S','A',0};
 static const WCHAR BCRYPT_ECDH_P256_ALGORITHM[] = {'E','C','D','H','_','P','2','5','6',0};
+static const WCHAR BCRYPT_ECDH_P384_ALGORITHM[] = {'E','C','D','H','_','P','3','8','4',0};
 static const WCHAR BCRYPT_ECDSA_P256_ALGORITHM[] = {'E','C','D','S','A','_','P','2','5','6',0};
 static const WCHAR BCRYPT_ECDSA_P384_ALGORITHM[] = {'E','C','D','S','A','_','P','3','8','4',0};
 static const WCHAR BCRYPT_ECDSA_P521_ALGORITHM[] = {'E','C','D','S','A','_','P','5','2','1',0};
@@ -196,7 +202,8 @@ static const WCHAR BCRYPT_KDF_HMAC[] = {'H','M','A','C',0};
 static const WCHAR BCRYPT_KDF_TLS_PRF[] = {'T','L','S','_','P','R','F',0};
 static const WCHAR BCRYPT_KDF_SP80056A_CONCAT[] = {'S','P','8','0','0','_','5','6','A','_','C','O','N','C','A','T',0};
 static const WCHAR BCRYPT_KDF_RAW_SECRET[] = {'T','R','U','N','C','A','T','E',0};
-#define BCRYPT_DH_PARAMETERS        u"DHParameters"
+
+static const WCHAR BCRYPT_DH_PARAMETERS[] = {'D','H','P','a','r','a','m','e','t','e','r','s',0};
 #endif
 
 #define BCRYPT_ECDSA_PUBLIC_P256_MAGIC  0x31534345
@@ -295,6 +302,19 @@ typedef struct _BCRYPT_PKCS1_PADDING_INFO
     LPCWSTR pszAlgId;
 } BCRYPT_PKCS1_PADDING_INFO;
 
+typedef struct _BCRYPT_PSS_PADDING_INFO
+{
+    LPCWSTR pszAlgId;
+    ULONG   cbSalt;
+} BCRYPT_PSS_PADDING_INFO;
+
+typedef struct _BCRYPT_OAEP_PADDING_INFO
+{
+    LPCWSTR pszAlgId;
+    PUCHAR  pbLabel;
+    ULONG   cbLabel;
+} BCRYPT_OAEP_PADDING_INFO;
+
 #define BCRYPT_PAD_NONE                     0x00000001
 #define BCRYPT_PAD_PKCS1                    0x00000002
 #define BCRYPT_PAD_OAEP                     0x00000004
@@ -315,15 +335,6 @@ typedef struct _BCRYPT_DSA_KEY_BLOB
 
 #define BCRYPT_DSA_PUBLIC_MAGIC_V2  0x32425044
 #define BCRYPT_DSA_PRIVATE_MAGIC_V2 0x32565044
-
-typedef struct _BCRYPT_DH_KEY_BLOB
-{
-    ULONG dwMagic;
-    ULONG cbKey;
-} BCRYPT_DH_KEY_BLOB, *PBCRYPT_DH_KEY_BLOB;
-
-#define BCRYPT_DH_PUBLIC_MAGIC  0x42504844
-#define BCRYPT_DH_PRIVATE_MAGIC 0x56504844
 
 typedef enum
 {
@@ -348,6 +359,24 @@ typedef struct _BCRYPT_DSA_KEY_BLOB_V2
     ULONG               cbGroupSize;
     UCHAR               Count[4];
 } BCRYPT_DSA_KEY_BLOB_V2, *PBCRYPT_DSA_KEY_BLOB_V2;
+
+#define BCRYPT_DH_PUBLIC_MAGIC  0x42504844
+#define BCRYPT_DH_PRIVATE_MAGIC 0x56504844
+
+typedef struct _BCRYPT_DH_KEY_BLOB
+{
+    ULONG dwMagic;
+    ULONG cbKey;
+} BCRYPT_DH_KEY_BLOB, *PBCRYPT_DH_KEY_BLOB;
+
+#define BCRYPT_DH_PARAMETERS_MAGIC  0x4d504844
+
+typedef struct _BCRYPT_DH_PARAMETER_HEADER
+{
+    ULONG cbLength;
+    ULONG dwMagic;
+    ULONG cbKeyLength;
+} BCRYPT_DH_PARAMETER_HEADER;
 
 #define BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION 1
 
@@ -384,15 +413,6 @@ typedef struct _BCRYPT_KEY_DATA_BLOB_HEADER
     ULONG cbKeyData;
 } BCRYPT_KEY_DATA_BLOB_HEADER, *PBCRYPT_KEY_DATA_BLOB_HEADER;
 
-typedef struct _BCRYPT_DH_PARAMETER_HEADER
-{
-    ULONG cbLength;
-    ULONG dwMagic;
-    ULONG cbKeyLength;
-} BCRYPT_DH_PARAMETER_HEADER;
-
-#define BCRYPT_DH_PARAMETERS_MAGIC 0x4d504844
-
 #define KDF_HASH_ALGORITHM 0x00000000
 #define KDF_SECRET_PREPEND 0x00000001
 #define KDF_SECRET_APPEND  0x00000002
@@ -422,7 +442,65 @@ typedef PVOID BCRYPT_HANDLE;
 typedef PVOID BCRYPT_HASH_HANDLE;
 typedef PVOID BCRYPT_SECRET_HANDLE;
 
-#define BCRYPT_NO_KEY_VALIDATION 0x00000008
+/* Pseudo handles */
+#define BCRYPT_MD2_ALG_HANDLE               ((BCRYPT_ALG_HANDLE)0x00000001)
+#define BCRYPT_MD4_ALG_HANDLE               ((BCRYPT_ALG_HANDLE)0x00000011)
+#define BCRYPT_MD5_ALG_HANDLE               ((BCRYPT_ALG_HANDLE)0x00000021)
+#define BCRYPT_SHA1_ALG_HANDLE              ((BCRYPT_ALG_HANDLE)0x00000031)
+#define BCRYPT_SHA256_ALG_HANDLE            ((BCRYPT_ALG_HANDLE)0x00000041)
+#define BCRYPT_SHA384_ALG_HANDLE            ((BCRYPT_ALG_HANDLE)0x00000051)
+#define BCRYPT_SHA512_ALG_HANDLE            ((BCRYPT_ALG_HANDLE)0x00000061)
+#define BCRYPT_RC4_ALG_HANDLE               ((BCRYPT_ALG_HANDLE)0x00000071)
+#define BCRYPT_RNG_ALG_HANDLE               ((BCRYPT_ALG_HANDLE)0x00000081)
+#define BCRYPT_HMAC_MD5_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000091)
+#define BCRYPT_HMAC_SHA1_ALG_HANDLE         ((BCRYPT_ALG_HANDLE)0x000000a1)
+#define BCRYPT_HMAC_SHA256_ALG_HANDLE       ((BCRYPT_ALG_HANDLE)0x000000b1)
+#define BCRYPT_HMAC_SHA384_ALG_HANDLE       ((BCRYPT_ALG_HANDLE)0x000000c1)
+#define BCRYPT_HMAC_SHA512_ALG_HANDLE       ((BCRYPT_ALG_HANDLE)0x000000d1)
+#define BCRYPT_RSA_ALG_HANDLE               ((BCRYPT_ALG_HANDLE)0x000000e1)
+#define BCRYPT_ECDSA_ALG_HANDLE             ((BCRYPT_ALG_HANDLE)0x000000f1)
+#define BCRYPT_AES_CMAC_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000101)
+#define BCRYPT_AES_GMAC_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000111)
+#define BCRYPT_HMAC_MD2_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000121)
+#define BCRYPT_HMAC_MD4_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000131)
+#define BCRYPT_3DES_CBC_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000141)
+#define BCRYPT_3DES_ECB_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000151)
+#define BCRYPT_3DES_CFB_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000161)
+#define BCRYPT_3DES_112_CBC_ALG_HANDLE      ((BCRYPT_ALG_HANDLE)0x00000171)
+#define BCRYPT_3DES_112_ECB_ALG_HANDLE      ((BCRYPT_ALG_HANDLE)0x00000181)
+#define BCRYPT_3DES_112_CFB_ALG_HANDLE      ((BCRYPT_ALG_HANDLE)0x00000191)
+#define BCRYPT_AES_CBC_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x000001a1)
+#define BCRYPT_AES_ECB_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x000001b1)
+#define BCRYPT_AES_CFB_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x000001c1)
+#define BCRYPT_AES_CCM_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x000001d1)
+#define BCRYPT_AES_GCM_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x000001e1)
+#define BCRYPT_DES_CBC_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x000001f1)
+#define BCRYPT_DES_ECB_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x00000201)
+#define BCRYPT_DES_CFB_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x00000211)
+#define BCRYPT_DESX_CBC_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000221)
+#define BCRYPT_DESX_ECB_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000231)
+#define BCRYPT_DESX_CFB_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000241)
+#define BCRYPT_RC2_CBC_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x00000251)
+#define BCRYPT_RC2_ECB_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x00000261)
+#define BCRYPT_RC2_CFB_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x00000271)
+#define BCRYPT_DH_ALG_HANDLE                ((BCRYPT_ALG_HANDLE)0x00000281)
+#define BCRYPT_ECDH_ALG_HANDLE              ((BCRYPT_ALG_HANDLE)0x00000291)
+#define BCRYPT_ECDH_P256_ALG_HANDLE         ((BCRYPT_ALG_HANDLE)0x000002a1)
+#define BCRYPT_ECDH_P384_ALG_HANDLE         ((BCRYPT_ALG_HANDLE)0x000002b1)
+#define BCRYPT_ECDH_P521_ALG_HANDLE         ((BCRYPT_ALG_HANDLE)0x000002c1)
+#define BCRYPT_DSA_ALG_HANDLE               ((BCRYPT_ALG_HANDLE)0x000002d1)
+#define BCRYPT_ECDSA_P256_ALG_HANDLE        ((BCRYPT_ALG_HANDLE)0x000002e1)
+#define BCRYPT_ECDSA_P384_ALG_HANDLE        ((BCRYPT_ALG_HANDLE)0x000002f1)
+#define BCRYPT_ECDSA_P521_ALG_HANDLE        ((BCRYPT_ALG_HANDLE)0x00000301)
+#define BCRYPT_RSA_SIGN_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000311)
+#define BCRYPT_CAPI_KDF_ALG_HANDLE          ((BCRYPT_ALG_HANDLE)0x00000321)
+#define BCRYPT_PBKDF2_ALG_HANDLE            ((BCRYPT_ALG_HANDLE)0x00000331)
+#define BCRYPT_SP800108_CTR_HMAC_ALG_HANDLE ((BCRYPT_ALG_HANDLE)0x00000341)
+#define BCRYPT_SP80056A_CONCAT_ALG_HANDLE   ((BCRYPT_ALG_HANDLE)0x00000351)
+#define BCRYPT_TLS1_1_KDF_ALG_HANDLE        ((BCRYPT_ALG_HANDLE)0x00000361)
+#define BCRYPT_TLS1_2_KDF_ALG_HANDLE        ((BCRYPT_ALG_HANDLE)0x00000371)
+#define BCRYPT_XTS_AES_ALG_HANDLE           ((BCRYPT_ALG_HANDLE)0x00000381)
+#define BCRYPT_HKDF_ALG_HANDLE              ((BCRYPT_ALG_HANDLE)0x00000391)
 
 /* Flags for BCryptGenRandom */
 #define BCRYPT_RNG_USE_ENTROPY_IN_BUFFER 0x00000001
@@ -480,7 +558,5 @@ NTSTATUS WINAPI BCryptSecretAgreement(BCRYPT_KEY_HANDLE, BCRYPT_KEY_HANDLE, BCRY
 NTSTATUS WINAPI BCryptSetProperty(BCRYPT_HANDLE, LPCWSTR, PUCHAR, ULONG, ULONG);
 NTSTATUS WINAPI BCryptSignHash(BCRYPT_KEY_HANDLE, void *, PUCHAR, ULONG, PUCHAR, ULONG, ULONG *, ULONG);
 NTSTATUS WINAPI BCryptVerifySignature(BCRYPT_KEY_HANDLE, void *, UCHAR *, ULONG, UCHAR *, ULONG, ULONG);
-
-#include "wine/winheader_exit.h"
 
 #endif  /* __WINE_BCRYPT_H */

@@ -57,9 +57,13 @@ typedef struct
 
 static ioinfo **__pioinfo;
 
-static int (__cdecl *p__open)(const char *, int, ...);
+static int (WINAPIV *p__open)(const char *, int, ...);
 static int (__cdecl *p__close)(int);
 static intptr_t (__cdecl *p__get_osfhandle)(int);
+static int (__cdecl *p_strcmp)(const char *, const char *);
+static int (__cdecl *p_strncmp)(const char *, const char *, size_t);
+static int (__cdecl *p_dupenv_s)(char **, size_t *, const char *);
+static int (__cdecl *p_wdupenv_s)(wchar_t **, size_t *, const wchar_t *);
 
 #define SETNOFAIL(x,y) x = (void*)GetProcAddress(hcrt,y)
 #define SET(x,y) do { SETNOFAIL(x,y); ok(x != NULL, "Export '%s' not found\n", y); } while(0)
@@ -78,6 +82,11 @@ static BOOL init(void)
     SET(p__open,"_open");
     SET(p__close,"_close");
     SET(p__get_osfhandle, "_get_osfhandle");
+
+    SET(p_strcmp, "strcmp");
+    SET(p_strncmp, "strncmp");
+    SET(p_dupenv_s, "_dupenv_s");
+    SET(p_wdupenv_s, "_wdupenv_s");
 
     return TRUE;
 }
@@ -139,10 +148,81 @@ static void test_ioinfo_flags(void)
     free(tempf);
 }
 
+static void test_strcmp(void)
+{
+    int ret = p_strcmp( "abc", "abcd" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strcmp( "", "abc" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strcmp( "abc", "ab\xa0" );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strcmp( "ab\xb0", "ab\xa0" );
+    ok( ret == 1, "wrong ret %d\n", ret );
+    ret = p_strcmp( "ab\xc2", "ab\xc2" );
+    ok( ret == 0, "wrong ret %d\n", ret );
+
+    ret = p_strncmp( "abc", "abcd", 3 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+#ifdef _WIN64
+    ret = p_strncmp( "", "abc", 3 );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strncmp( "abc", "ab\xa0", 4 );
+    ok( ret == -1, "wrong ret %d\n", ret );
+    ret = p_strncmp( "ab\xb0", "ab\xa0", 3 );
+    ok( ret == 1, "wrong ret %d\n", ret );
+#else
+    ret = p_strncmp( "", "abc", 3 );
+    ok( ret == 0 - 'a', "wrong ret %d\n", ret );
+    ret = p_strncmp( "abc", "ab\xa0", 4 );
+    ok( ret == 'c' - 0xa0, "wrong ret %d\n", ret );
+    ret = p_strncmp( "ab\xb0", "ab\xa0", 3 );
+    ok( ret == 0xb0 - 0xa0, "wrong ret %d\n", ret );
+#endif
+    ret = p_strncmp( "ab\xb0", "ab\xa0", 2 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = p_strncmp( "ab\xc2", "ab\xc2", 3 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = p_strncmp( "abc", "abd", 0 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+    ret = p_strncmp( "abc", "abc", 12 );
+    ok( ret == 0, "wrong ret %d\n", ret );
+}
+
+static void test_dupenv_s(void)
+{
+    size_t len;
+    char *tmp;
+    int ret;
+
+    len = 0xdeadbeef;
+    tmp = (void *)0xdeadbeef;
+    ret = p_dupenv_s( &tmp, &len, "nonexistent" );
+    ok( !ret, "_dupenv_s returned %d\n", ret );
+    ok( !len, "_dupenv_s returned length is %Id\n", len );
+    ok( !tmp, "_dupenv_s returned pointer is %p\n", tmp );
+}
+
+static void test_wdupenv_s(void)
+{
+    wchar_t *tmp;
+    size_t len;
+    int ret;
+
+    len = 0xdeadbeef;
+    tmp = (void *)0xdeadbeef;
+    ret = p_wdupenv_s( &tmp, &len, L"nonexistent" );
+    ok( !ret, "_wdupenv_s returned %d\n", ret );
+    ok( !len, "_wdupenv_s returned length is %Id\n", len );
+    ok( !tmp, "_wdupenv_s returned pointer is %p\n", tmp );
+}
+
 START_TEST(msvcr80)
 {
     if(!init())
         return;
 
     test_ioinfo_flags();
+    test_strcmp();
+    test_dupenv_s();
+    test_wdupenv_s();
 }

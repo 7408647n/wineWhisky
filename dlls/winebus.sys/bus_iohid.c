@@ -26,7 +26,7 @@
 #include <stdarg.h>
 #include <sys/types.h>
 
-#if defined(HAVE_IOKIT_HID_IOHIDLIB_H)
+#ifdef __APPLE__
 #define DWORD UInt32
 #define LPDWORD UInt32*
 #define LONG SInt32
@@ -81,7 +81,7 @@
 #undef LPLONG
 #undef E_PENDING
 #undef PAGE_SHIFT
-#endif /* HAVE_IOKIT_HID_IOHIDLIB_H */
+#endif /* __APPLE__ */
 
 #include <pthread.h>
 
@@ -98,7 +98,7 @@
 #include "unix_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(hid);
-#ifdef HAVE_IOHIDMANAGERCREATE
+#ifdef __APPLE__
 
 static pthread_mutex_t iohid_cs = PTHREAD_MUTEX_INITIALIZER;
 
@@ -271,16 +271,30 @@ static void handle_DeviceMatchingCallback(void *context, IOReturn result, void *
 {
     struct device_desc desc =
     {
-        .input = -1,
+        .input = -1, .is_hidraw = TRUE,
         .serialnumber = {'0','0','0','0',0},
     };
     struct iohid_device *impl;
     CFStringRef str;
 
+    desc.usages.UsagePage = CFNumberToDWORD(IOHIDDeviceGetProperty(IOHIDDevice, CFSTR(kIOHIDPrimaryUsagePageKey)));
+    desc.usages.Usage = CFNumberToDWORD(IOHIDDeviceGetProperty(IOHIDDevice, CFSTR(kIOHIDPrimaryUsageKey)));
+
     desc.vid = CFNumberToDWORD(IOHIDDeviceGetProperty(IOHIDDevice, CFSTR(kIOHIDVendorIDKey)));
     desc.pid = CFNumberToDWORD(IOHIDDeviceGetProperty(IOHIDDevice, CFSTR(kIOHIDProductIDKey)));
     desc.version = CFNumberToDWORD(IOHIDDeviceGetProperty(IOHIDDevice, CFSTR(kIOHIDVersionNumberKey)));
     desc.uid = CFNumberToDWORD(IOHIDDeviceGetProperty(IOHIDDevice, CFSTR(kIOHIDLocationIDKey)));
+
+    if (desc.usages.UsagePage != HID_USAGE_PAGE_GENERIC ||
+        !(desc.usages.Usage == HID_USAGE_GENERIC_JOYSTICK || desc.usages.Usage == HID_USAGE_GENERIC_GAMEPAD))
+    {
+        /* winebus isn't currently meant to handle anything but these, and
+         * opening keyboards, mice, or the Touch Bar on older MacBooks triggers
+         * a permissions dialog for input monitoring.
+         */
+        ERR("Ignoring HID device %p (vid %04x, pid %04x): not a joystick or gamepad\n", IOHIDDevice, desc.vid, desc.pid);
+        return;
+    }
 
     if (IOHIDDeviceOpen(IOHIDDevice, 0) != kIOReturnSuccess)
     {
@@ -441,4 +455,4 @@ NTSTATUS iohid_bus_stop(void *args)
     return STATUS_NOT_IMPLEMENTED;
 }
 
-#endif /* HAVE_IOHIDMANAGERCREATE */
+#endif /* __APPLE__ */

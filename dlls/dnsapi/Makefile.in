@@ -2,14 +2,12 @@ MODULE    = dnsapi.dll
 UNIXLIB   = dnsapi.so
 IMPORTLIB = dnsapi
 DELAYIMPORTS = netapi32
-EXTRALIBS = $(RESOLV_LIBS)
+UNIX_LIBS    = $(RESOLV_LIBS)
 
-C_SRCS = \
+SOURCES = \
 	libresolv.c \
 	main.c \
 	name.c \
 	query.c \
-	record.c
-
-RC_SRCS = \
+	record.c \
 	version.rc

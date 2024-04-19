@@ -19,13 +19,14 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
-#define NONAMELESSSTRUCT
-#define NONAMELESSUNION
 
 #include <stdarg.h>
+#include <ntstatus.h>
+#define WIN32_NO_STATUS
 #include <windows.h>
 #include <winternl.h>
 #include <winsvc.h>
+#include <ddk/ntddk.h>
 #include <ntsecapi.h>
 #include <rpc.h>
 
@@ -102,8 +103,10 @@ static void sc_notify_release(struct sc_notify_handle *notify)
     if (r == 0)
     {
         CloseHandle(notify->event);
-        HeapFree(GetProcessHeap(), 0, notify->params_list);
-        HeapFree(GetProcessHeap(), 0, notify);
+        if (notify->params_list)
+            free(notify->params_list->NotifyParamsArray[0].params);
+        free(notify->params_list);
+        free(notify);
     }
 }
 
@@ -197,22 +200,22 @@ static void free_service_strings(struct service_entry *old, struct service_entry
     QUERY_SERVICE_CONFIGW *new_cfg = &new->config;
 
     if (old_cfg->lpBinaryPathName != new_cfg->lpBinaryPathName)
-        HeapFree(GetProcessHeap(), 0, old_cfg->lpBinaryPathName);
+        free(old_cfg->lpBinaryPathName);
 
     if (old_cfg->lpLoadOrderGroup != new_cfg->lpLoadOrderGroup)
-        HeapFree(GetProcessHeap(), 0, old_cfg->lpLoadOrderGroup);
+        free(old_cfg->lpLoadOrderGroup);
 
     if (old_cfg->lpServiceStartName != new_cfg->lpServiceStartName)
-        HeapFree(GetProcessHeap(), 0, old_cfg->lpServiceStartName);
+        free(old_cfg->lpServiceStartName);
 
     if (old_cfg->lpDisplayName != new_cfg->lpDisplayName)
-        HeapFree(GetProcessHeap(), 0, old_cfg->lpDisplayName);
+        free(old_cfg->lpDisplayName);
 
     if (old->dependOnServices != new->dependOnServices)
-        HeapFree(GetProcessHeap(), 0, old->dependOnServices);
+        free(old->dependOnServices);
 
     if (old->dependOnGroups != new->dependOnGroups)
-        HeapFree(GetProcessHeap(), 0, old->dependOnGroups);
+        free(old->dependOnGroups);
 }
 
 /* Check if the given handle is of the required type and allows the requested access. */
@@ -281,7 +284,7 @@ DWORD __cdecl svcctl_OpenSCManagerW(
             return ERROR_INVALID_NAME;
     }
 
-    if (!(manager = HeapAlloc(GetProcessHeap(), 0, sizeof(*manager))))
+    if (!(manager = malloc(sizeof(*manager))))
         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
 
     manager->hdr.type = SC_HTYPE_MANAGER;
@@ -304,7 +307,7 @@ static void SC_RPC_HANDLE_destroy(SC_RPC_HANDLE handle)
         case SC_HTYPE_MANAGER:
         {
             struct sc_manager_handle *manager = (struct sc_manager_handle *)hdr;
-            HeapFree(GetProcessHeap(), 0, manager);
+            free(manager);
             break;
         }
         case SC_HTYPE_SERVICE:
@@ -319,7 +322,7 @@ static void SC_RPC_HANDLE_destroy(SC_RPC_HANDLE handle)
             }
             service_unlock(service->service_entry);
             release_service(service->service_entry);
-            HeapFree(GetProcessHeap(), 0, service);
+            free(service);
             break;
         }
         default:
@@ -418,7 +421,7 @@ static DWORD create_handle_for_service(struct service_entry *entry, DWORD dwDesi
 {
     struct sc_service_handle *service;
 
-    if (!(service = HeapAlloc(GetProcessHeap(), 0, sizeof(*service))))
+    if (!(service = malloc(sizeof(*service))))
     {
         release_service(entry);
         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
@@ -494,7 +497,7 @@ static DWORD parse_dependencies(const WCHAR *dependencies, struct service_entry 
     if (!len_services) entry->dependOnServices = NULL;
     else
     {
-        services = HeapAlloc(GetProcessHeap(), 0, (len_services + 1) * sizeof(WCHAR));
+        services = malloc((len_services + 1) * sizeof(WCHAR));
         if (!services)
             return ERROR_OUTOFMEMORY;
 
@@ -516,10 +519,10 @@ static DWORD parse_dependencies(const WCHAR *dependencies, struct service_entry 
     if (!len_groups) entry->dependOnGroups = NULL;
     else
     {
-        groups = HeapAlloc(GetProcessHeap(), 0, (len_groups + 1) * sizeof(WCHAR));
+        groups = malloc((len_groups + 1) * sizeof(WCHAR));
         if (!groups)
         {
-            HeapFree(GetProcessHeap(), 0, services);
+            free(services);
             return ERROR_OUTOFMEMORY;
         }
         s = groups;
@@ -591,10 +594,10 @@ static DWORD create_serviceW(
     entry->config.dwServiceType = entry->status.dwServiceType = dwServiceType;
     entry->config.dwStartType = dwStartType;
     entry->config.dwErrorControl = dwErrorControl;
-    entry->config.lpBinaryPathName = strdupW(lpBinaryPathName);
-    entry->config.lpLoadOrderGroup = strdupW(lpLoadOrderGroup);
-    entry->config.lpServiceStartName = strdupW(lpServiceStartName);
-    entry->config.lpDisplayName = strdupW(lpDisplayName);
+    entry->config.lpBinaryPathName = wcsdup(lpBinaryPathName);
+    entry->config.lpLoadOrderGroup = wcsdup(lpLoadOrderGroup);
+    entry->config.lpServiceStartName = wcsdup(lpServiceStartName);
+    entry->config.lpDisplayName = wcsdup(lpDisplayName);
 
     if (lpdwTagId)      /* TODO: In most situations a non-NULL TagId will generate an ERROR_INVALID_PARAMETER. */
         entry->config.dwTagId = *lpdwTagId;
@@ -702,12 +705,12 @@ DWORD __cdecl svcctl_QueryServiceConfigW(
     config->dwServiceType = service->service_entry->config.dwServiceType;
     config->dwStartType = service->service_entry->config.dwStartType;
     config->dwErrorControl = service->service_entry->config.dwErrorControl;
-    config->lpBinaryPathName = strdupW(service->service_entry->config.lpBinaryPathName);
-    config->lpLoadOrderGroup = strdupW(service->service_entry->config.lpLoadOrderGroup);
+    config->lpBinaryPathName = wcsdup(service->service_entry->config.lpBinaryPathName);
+    config->lpLoadOrderGroup = wcsdup(service->service_entry->config.lpLoadOrderGroup);
     config->dwTagId = service->service_entry->config.dwTagId;
     config->lpDependencies = NULL; /* TODO */
-    config->lpServiceStartName = strdupW(service->service_entry->config.lpServiceStartName);
-    config->lpDisplayName = strdupW(service->service_entry->config.lpDisplayName);
+    config->lpServiceStartName = wcsdup(service->service_entry->config.lpServiceStartName);
+    config->lpDisplayName = wcsdup(service->service_entry->config.lpDisplayName);
     service_unlock(service->service_entry);
 
     return ERROR_SUCCESS;
@@ -802,16 +805,16 @@ DWORD __cdecl svcctl_ChangeServiceConfigW(
 
     /* configuration OK. The strings needs to be duplicated */
     if (lpBinaryPathName != NULL)
-        new_entry.config.lpBinaryPathName = strdupW(lpBinaryPathName);
+        new_entry.config.lpBinaryPathName = wcsdup(lpBinaryPathName);
 
     if (lpLoadOrderGroup != NULL)
-        new_entry.config.lpLoadOrderGroup = strdupW(lpLoadOrderGroup);
+        new_entry.config.lpLoadOrderGroup = wcsdup(lpLoadOrderGroup);
 
     if (lpServiceStartName != NULL)
-        new_entry.config.lpServiceStartName = strdupW(lpServiceStartName);
+        new_entry.config.lpServiceStartName = wcsdup(lpServiceStartName);
 
     if (lpDisplayName != NULL)
-        new_entry.config.lpDisplayName = strdupW(lpDisplayName);
+        new_entry.config.lpDisplayName = wcsdup(lpDisplayName);
 
     /* try to save to Registry, commit or rollback depending on success */
     err = save_service_config(&new_entry);
@@ -841,12 +844,14 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
     SC_RPC_NOTIFY_PARAMS_LIST *list;
     SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2 *cparams;
 
-    list = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-            sizeof(SC_RPC_NOTIFY_PARAMS_LIST) + sizeof(SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2));
+    list = calloc(1, sizeof(SC_RPC_NOTIFY_PARAMS_LIST));
     if (!list)
         return;
-
-    cparams = (SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2 *)(list + 1);
+    if (!(cparams = calloc(1, sizeof(SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2))))
+    {
+        free(list);
+        return;
+    }
 
     cparams->dwNotifyMask = notify->notify_mask;
     fill_status_process(&cparams->ServiceStatus, service);
@@ -864,11 +869,32 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
     SetEvent(notify->event);
 }
 
+void notify_service_state(struct service_entry *service)
+{
+    struct sc_service_handle *service_handle;
+    DWORD mask;
+
+    mask = 1 << (service->status.dwCurrentState - SERVICE_STOPPED);
+    LIST_FOR_EACH_ENTRY(service_handle, &service->handles, struct sc_service_handle, entry)
+    {
+        struct sc_notify_handle *notify = service_handle->notify;
+        if (notify && (notify->notify_mask & mask))
+        {
+            fill_notify(notify, service);
+            sc_notify_release(notify);
+            service_handle->notify = NULL;
+            service_handle->status_notified = TRUE;
+        }
+        else
+            service_handle->status_notified = FALSE;
+    }
+}
+
 DWORD __cdecl svcctl_SetServiceStatus(SC_RPC_HANDLE handle, SERVICE_STATUS *status)
 {
-    struct sc_service_handle *service, *service_handle;
+    struct sc_service_handle *service;
     struct process_entry *process;
-    DWORD err, mask;
+    DWORD err;
 
     WINE_TRACE("(%p, %p)\n", handle, status);
 
@@ -898,21 +924,7 @@ DWORD __cdecl svcctl_SetServiceStatus(SC_RPC_HANDLE handle, SERVICE_STATUS *stat
         release_process(process);
     }
 
-    mask = 1 << (service->service_entry->status.dwCurrentState - SERVICE_STOPPED);
-    LIST_FOR_EACH_ENTRY(service_handle, &service->service_entry->handles, struct sc_service_handle, entry)
-    {
-        struct sc_notify_handle *notify = service_handle->notify;
-        if (notify && (notify->notify_mask & mask))
-        {
-            fill_notify(notify, service->service_entry);
-            sc_notify_release(notify);
-            service_handle->notify = NULL;
-            service_handle->status_notified = TRUE;
-        }
-        else
-            service_handle->status_notified = FALSE;
-    }
-
+    notify_service_state(service->service_entry);
     service_unlock(service->service_entry);
 
     return ERROR_SUCCESS;
@@ -937,13 +949,13 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
 
             if (config.descr->lpDescription[0])
             {
-                if (!(descr = strdupW( config.descr->lpDescription )))
+                if (!(descr = wcsdup( config.descr->lpDescription )))
                     return ERROR_NOT_ENOUGH_MEMORY;
             }
 
             WINE_TRACE( "changing service %p descr to %s\n", service, wine_dbgstr_w(descr) );
             service_lock( service->service_entry );
-            HeapFree( GetProcessHeap(), 0, service->service_entry->description );
+            free( service->service_entry->description );
             service->service_entry->description = descr;
             save_service_config( service->service_entry );
             service_unlock( service->service_entry );
@@ -1132,8 +1144,8 @@ static BOOL process_send_command(struct process_entry *process, const void *data
     DWORD count, ret;
     BOOL r;
 
-    overlapped.u.s.Offset = 0;
-    overlapped.u.s.OffsetHigh = 0;
+    overlapped.Offset = 0;
+    overlapped.OffsetHigh = 0;
     overlapped.hEvent = process->overlapped_event;
     r = WriteFile(process->control_pipe, data, size, &count, &overlapped);
     if (!r && GetLastError() == ERROR_IO_PENDING)
@@ -1197,7 +1209,7 @@ BOOL process_send_control(struct process_entry *process, BOOL shared_process, co
     /* calculate how much space we need to send the startup info */
     len = (lstrlenW(name) + 1) * sizeof(WCHAR) + data_size;
 
-    ssi = HeapAlloc(GetProcessHeap(),0,FIELD_OFFSET(service_start_info, data[len]));
+    ssi = malloc(FIELD_OFFSET(service_start_info, data[len]));
     ssi->magic = SERVICE_PROTOCOL_MAGIC;
     ssi->control = control;
     ssi->total_size = FIELD_OFFSET(service_start_info, data[len]);
@@ -1206,7 +1218,7 @@ BOOL process_send_control(struct process_entry *process, BOOL shared_process, co
     if (data_size) memcpy(&ssi->data[ssi->name_size * sizeof(WCHAR)], data, data_size);
 
     r = process_send_command(process, ssi, ssi->total_size, result);
-    HeapFree( GetProcessHeap(), 0, ssi );
+    free(ssi);
     return r;
 }
 
@@ -1705,7 +1717,7 @@ DWORD __cdecl svcctl_NotifyServiceStatusChange(
         return ERROR_CALL_NOT_IMPLEMENTED;
     }
 
-    notify = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*notify));
+    notify = calloc(1, sizeof(*notify));
     if (!notify)
         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
 
@@ -2160,10 +2172,10 @@ void __RPC_USER SC_NOTIFY_RPC_HANDLE_rundown(SC_NOTIFY_RPC_HANDLE handle)
 
 void  __RPC_FAR * __RPC_USER MIDL_user_allocate(SIZE_T len)
 {
-    return HeapAlloc(GetProcessHeap(), 0, len);
+    return malloc(len);
 }
 
 void __RPC_USER MIDL_user_free(void __RPC_FAR * ptr)
 {
-    HeapFree(GetProcessHeap(), 0, ptr);
+    free(ptr);
 }

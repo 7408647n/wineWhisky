@@ -225,11 +225,11 @@ static inline void get_color_masks( DC *dc, const dib_info *dib, UINT rop, COLOR
     calc_rop_masks( rop, color, bg_mask );
 }
 
-static inline void order_end_points(int *s, int *e)
+static inline void order_end_points(LONG *s, LONG *e)
 {
     if(*s > *e)
     {
-        int tmp;
+        LONG tmp;
         tmp = *s + 1;
         *s = *e + 1;
         *e = tmp;
@@ -1770,12 +1770,12 @@ static inline int get_pen_device_width( DC *dc, int width )
 /***********************************************************************
  *           dibdrv_SetDCPenColor
  */
-COLORREF CDECL dibdrv_SetDCPenColor( PHYSDEV dev, COLORREF color )
+COLORREF dibdrv_SetDCPenColor( PHYSDEV dev, COLORREF color )
 {
     dibdrv_physdev *pdev = get_dibdrv_pdev(dev);
     DC *dc = get_physdev_dc( dev );
 
-    if (dc->hPen == get_stock_object( DC_PEN ))
+    if (dc->hPen == GetStockObject( DC_PEN ))
         pdev->pen_brush.colorref = color;
 
     return color;
@@ -2131,7 +2131,7 @@ static void select_brush( dibdrv_physdev *pdev, dib_brush *brush,
 /***********************************************************************
  *           dibdrv_SelectBrush
  */
-HBRUSH CDECL dibdrv_SelectBrush( PHYSDEV dev, HBRUSH hbrush, const struct brush_pattern *pattern )
+HBRUSH dibdrv_SelectBrush( PHYSDEV dev, HBRUSH hbrush, const struct brush_pattern *pattern )
 {
     dibdrv_physdev *pdev = get_dibdrv_pdev(dev);
     DC *dc = get_physdev_dc( dev );
@@ -2141,7 +2141,7 @@ HBRUSH CDECL dibdrv_SelectBrush( PHYSDEV dev, HBRUSH hbrush, const struct brush_
 
     NtGdiExtGetObjectW( hbrush, sizeof(logbrush), &logbrush );
 
-    if (hbrush == get_stock_object( DC_BRUSH ))
+    if (hbrush == GetStockObject( DC_BRUSH ))
         logbrush.lbColor = dc->attr->brush_color;
 
     select_brush( pdev, &pdev->brush, &logbrush, pattern, TRUE );
@@ -2151,7 +2151,7 @@ HBRUSH CDECL dibdrv_SelectBrush( PHYSDEV dev, HBRUSH hbrush, const struct brush_
 /***********************************************************************
  *           dibdrv_SelectPen
  */
-HPEN CDECL dibdrv_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern *pattern )
+HPEN dibdrv_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern *pattern )
 {
     dibdrv_physdev *pdev = get_dibdrv_pdev(dev);
     DC *dc = get_physdev_dc( dev );
@@ -2193,7 +2193,7 @@ HPEN CDECL dibdrv_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern 
     pdev->pen_endcap = logpen.lopnStyle & PS_ENDCAP_MASK;
     pdev->pen_width  = get_pen_device_width( dc, logpen.lopnWidth.x );
 
-    if (hpen == get_stock_object( DC_PEN ))
+    if (hpen == GetStockObject( DC_PEN ))
         logbrush.lbColor = dc->attr->pen_color;
 
     set_dash_pattern( &pdev->pen_pattern, 0, NULL );
@@ -2256,12 +2256,12 @@ HPEN CDECL dibdrv_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern 
 /***********************************************************************
  *           dibdrv_SetDCBrushColor
  */
-COLORREF CDECL dibdrv_SetDCBrushColor( PHYSDEV dev, COLORREF color )
+COLORREF dibdrv_SetDCBrushColor( PHYSDEV dev, COLORREF color )
 {
     dibdrv_physdev *pdev = get_dibdrv_pdev(dev);
     DC *dc = get_physdev_dc( dev );
 
-    if (dc->hBrush == get_stock_object( DC_BRUSH ))
+    if (dc->hBrush == GetStockObject( DC_BRUSH ))
     {
         LOGBRUSH logbrush = { BS_SOLID, color, 0 };
         select_brush( pdev, &pdev->brush, &logbrush, NULL, TRUE );

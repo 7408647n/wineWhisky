@@ -38,6 +38,7 @@
 #include "winbase.h"
 #include "wingdi.h"
 #include "winuser.h"
+#include "winnls.h"
 
 #define MAXHWNDS 1024
 static HWND hwnd [MAXHWNDS];
@@ -567,8 +568,46 @@ static LRESULT CALLBACK test_control_procA(HWND hwnd, UINT msg, WPARAM wparam, L
     return DefWindowProcA(hwnd, msg, wparam, lparam);
 }
 
+static int wm_char_count;
+
+static BOOL is_cjk(void)
+{
+    int lang_id = PRIMARYLANGID(GetUserDefaultLangID());
+
+    if (lang_id == LANG_CHINESE || lang_id == LANG_JAPANESE || lang_id == LANG_KOREAN)
+        return TRUE;
+    return FALSE;
+}
+
+static LRESULT CALLBACK test_IsDialogMessageA_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    switch (msg)
+    {
+    case WM_CHAR:
+        if (is_cjk())
+            ok(wparam == 0x5b57, "Got unexpected wparam %#Ix.\n", wparam);
+        else if (PRIMARYLANGID(GetUserDefaultLangID()) == LANG_HINDI && GetACP() == CP_UTF8)
+            ok(wparam == 0xfffd, "Got unexpected wparam %#Ix.\n", wparam);
+        else
+            ok(wparam == 0x3f, "Got unexpected wparam %#Ix.\n", wparam);
+        wm_char_count++;
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_GETDLGCODE:
+        return DLGC_WANTCHARS;
+    default:
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+}
+
 static BOOL RegisterWindowClasses (void)
 {
+    WNDCLASSW cls_w;
     WNDCLASSA cls;
 
     cls.style = 0;
@@ -597,6 +636,11 @@ static BOOL RegisterWindowClasses (void)
     cls.lpszClassName = "WM_NEXTDLGCTLWndClass";
     if (!RegisterClassA (&cls)) return FALSE;
 
+    memset (&cls_w, 0, sizeof(cls_w));
+    cls_w.lpfnWndProc = test_IsDialogMessageA_proc;
+    cls_w.hInstance = g_hinst;
+    cls_w.lpszClassName = L"TestIsDialogMessageAClass";
+    if (!RegisterClassW (&cls_w)) return FALSE;
     return TRUE;
 }
 
@@ -729,6 +773,8 @@ static LRESULT CALLBACK hook_proc2(INT code, WPARAM wParam, LPARAM lParam)
 static void test_IsDialogMessage(void)
 {
     HHOOK hook;
+    HWND child;
+    BOOL ret;
     MSG msg;
 
     g_hwndMain = CreateWindowA("IsDialogMessageWindowClass", "IsDialogMessageWindowClass",
@@ -816,6 +862,35 @@ static void test_IsDialogMessage(void)
     ok(IsDialogMessageA(g_hwndMain, &msg), "Did not handle the ENTER\n");
     ok(g_button1Clicked, "Did not receive button 1 click notification\n");
 
+    /* Test IsDialogMessageA converting a WM_CHAR wparam in ASCII to Unicode */
+    child = CreateWindowW(L"TestIsDialogMessageAClass", L"test", WS_CHILD | WS_VISIBLE, 0, 0, 10,
+                          10, g_hwndMain, 0, g_hinst, 0);
+    ok(!!child, "Failed to create a window, error %#lx.\n", GetLastError());
+
+    /* \u5b57 is a '字' in Chinese */
+    PostMessageW(child, WM_CHAR, 0x5b57, 0x1);
+    PostMessageW(child, WM_CLOSE, 0, 0);
+
+    while (GetMessageA(&msg, child, 0, 0) > 0)
+    {
+        if (msg.message == WM_CHAR)
+        {
+            if (is_cjk())
+                ok(msg.wParam != 0x3f && msg.wParam != 0x5b57, "Got unexpected wparam %#Ix.\n", msg.wParam);
+            else if (PRIMARYLANGID(GetUserDefaultLangID()) == LANG_HINDI && GetACP() == CP_UTF8)
+                ok(msg.wParam == 0x97ade5, "Got unexpected wparam %#Ix.\n", msg.wParam);
+            else
+                ok(msg.wParam == 0x3f, "Got unexpected wparam %#Ix.\n", msg.wParam);
+            ret = IsDialogMessageA(g_hwndMain, &msg);
+            ok(ret, "IsDialogMessageA failed.\n");
+        }
+        else
+        {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+    }
+    ok(wm_char_count == 1, "Got unexpected WM_CHAR count %d.\n", wm_char_count);
     DestroyWindow(g_hwndMain);
 }
 
@@ -2123,15 +2198,35 @@ static void test_timer_message(void)
     DialogBoxA(g_hinst, "RADIO_TEST_DIALOG", NULL, timer_message_dlg_proc);
 }
 
+static unsigned int msgbox_hook_proc_called;
+static UINT msgbox_type;
+
 static LRESULT CALLBACK msgbox_hook_proc(INT code, WPARAM wParam, LPARAM lParam)
 {
+    static const LONG considered_ex_styles = WS_EX_CONTROLPARENT | WS_EX_WINDOWEDGE | WS_EX_DLGMODALFRAME | WS_EX_TOPMOST;
+
     if (code == HCBT_ACTIVATE)
     {
         HWND msgbox = (HWND)wParam, msghwnd;
+        LONG exstyles, expected_exstyles;
+        BOOL system_modal;
         char text[64];
 
         if (msgbox)
         {
+            exstyles = GetWindowLongA(msgbox, GWL_EXSTYLE) & considered_ex_styles;
+
+            ++msgbox_hook_proc_called;
+            system_modal = msgbox_type & MB_SYSTEMMODAL && !(msgbox_type & MB_TASKMODAL);
+            expected_exstyles = WS_EX_CONTROLPARENT | WS_EX_WINDOWEDGE;
+            if ((msgbox_type & MB_TOPMOST) || system_modal)
+                expected_exstyles |= WS_EX_TOPMOST;
+            if (!system_modal)
+                expected_exstyles |= WS_EX_DLGMODALFRAME;
+
+            todo_wine_if(system_modal && exstyles == (expected_exstyles | WS_EX_DLGMODALFRAME))
+            ok(exstyles == expected_exstyles, "got %#lx, expected %#lx\n", exstyles, expected_exstyles);
+
             text[0] = 0;
             GetWindowTextA(msgbox, text, sizeof(text));
             ok(!strcmp(text, "MSGBOX caption"), "Unexpected window text \"%s\"\n", text);
@@ -2141,6 +2236,8 @@ static LRESULT CALLBACK msgbox_hook_proc(INT code, WPARAM wParam, LPARAM lParam)
 
             text[0] = 0;
             GetWindowTextA(msghwnd, text, sizeof(text));
+
+            todo_wine_if(msgbox_type != MB_OKCANCEL && !*text)
             ok(!strcmp(text, "Text"), "Unexpected window text \"%s\"\n", text);
 
             SendDlgItemMessageA(msgbox, IDCANCEL, WM_LBUTTONDOWN, 0, 0);
@@ -2153,13 +2250,32 @@ static LRESULT CALLBACK msgbox_hook_proc(INT code, WPARAM wParam, LPARAM lParam)
 
 static void test_MessageBox(void)
 {
+    static const UINT tests[] =
+    {
+        MB_OKCANCEL,
+        MB_OKCANCEL | MB_SYSTEMMODAL,
+        MB_OKCANCEL | MB_TASKMODAL | MB_SYSTEMMODAL,
+        MB_OKCANCEL | MB_TOPMOST,
+        MB_OKCANCEL | MB_TOPMOST | MB_SYSTEMMODAL,
+        MB_OKCANCEL | MB_TASKMODAL | MB_TOPMOST,
+        MB_OKCANCEL | MB_TASKMODAL | MB_SYSTEMMODAL | MB_TOPMOST,
+    };
+    unsigned int i;
     HHOOK hook;
     int ret;
 
     hook = SetWindowsHookExA(WH_CBT, msgbox_hook_proc, NULL, GetCurrentThreadId());
 
-    ret = MessageBoxA(NULL, "Text", "MSGBOX caption", MB_OKCANCEL);
-    ok(ret == IDCANCEL, "got %d\n", ret);
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        msgbox_type = tests[i];
+        winetest_push_context("type %#x", msgbox_type);
+        msgbox_hook_proc_called = 0;
+        ret = MessageBoxA(NULL, "Text", "MSGBOX caption", msgbox_type);
+        ok(ret == IDCANCEL, "got %d\n", ret);
+        ok(msgbox_hook_proc_called, "got %u.\n", msgbox_hook_proc_called);
+        winetest_pop_context();
+    }
 
     UnhookWindowsHookEx(hook);
 }
@@ -2260,6 +2376,64 @@ static void test_capture_release(void)
     DestroyWindow(window);
 }
 
+static WNDPROC orig_static_proc;
+static WCHAR cs_name_paramW[3];
+static char cs_name_paramA[4];
+
+static LRESULT WINAPI test_static_create_procW(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    if (msg == WM_NCCREATE)
+    {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lparam;
+        memcpy( cs_name_paramW, cs->lpszName, sizeof(cs_name_paramW) );
+    }
+
+    return orig_static_proc(hwnd, msg, wparam, lparam);
+}
+
+static LRESULT WINAPI test_static_create_procA(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    if (msg == WM_NCCREATE)
+    {
+        CREATESTRUCTA *cs = (CREATESTRUCTA *)lparam;
+        memcpy( cs_name_paramA, cs->lpszName, sizeof(cs_name_paramA) );
+    }
+
+    return orig_static_proc(hwnd, msg, wparam, lparam);
+}
+
+static void test_create_controls(void)
+{
+    HWND control;
+    INT_PTR ret;
+
+    control = CreateWindowA("static", "", 0, 100, 200, 300, 400, NULL, NULL, NULL, NULL);
+    ok(control != 0, "failed to create control window\n");
+
+    orig_static_proc = (WNDPROC)SetClassLongPtrA(control, GCLP_WNDPROC, (ULONG_PTR)test_static_create_procA);
+
+    cs_name_paramW[0] = 0;
+    ret = DialogBoxParamA(GetModuleHandleA(NULL), "IDD_SS_ICON_DIALOG", 0, DestroyOnCloseDlgWinProc, 0);
+    ok(0 == ret, "DialogBoxParamA returned %Id, expected 0\n", ret);
+    ok(!memcmp(cs_name_paramA, "\xff\0\x61", 3), "name param = %s\n", debugstr_an(cs_name_paramA, 3));
+
+    SetClassLongPtrA(control, GCLP_WNDPROC, (ULONG_PTR)orig_static_proc);
+    DestroyWindow(control);
+
+    control = CreateWindowW(L"static", L"", 0, 100, 200, 300, 400, NULL, NULL, NULL, NULL);
+    ok(control != 0, "failed to create control window\n");
+
+    orig_static_proc = (WNDPROC)SetClassLongPtrW(control, GCLP_WNDPROC, (ULONG_PTR)test_static_create_procW);
+
+    ret = DialogBoxParamW(GetModuleHandleW(NULL), L"IDD_SS_ICON_DIALOG", 0, DestroyOnCloseDlgWinProc, 0);
+    ok(0 == ret, "DialogBoxParamW returned %Id, expected 0\n", ret);
+    ok(!memcmp(cs_name_paramW, L"\xffff\x6100", 2 * sizeof(WCHAR)),
+       "name param = %s\n", debugstr_wn(cs_name_paramW, 2));
+
+    SetClassLongPtrW(control, GCLP_WNDPROC, (ULONG_PTR)orig_static_proc);
+    DestroyWindow(control);
+}
+
 START_TEST(dialog)
 {
     g_hinst = GetModuleHandleA (0);
@@ -2273,6 +2447,7 @@ START_TEST(dialog)
     test_focus();
     test_GetDlgItem();
     test_GetDlgItemText();
+    test_create_controls();
     test_DialogBoxParam();
     test_DisabledDialogTest();
     test_MessageBoxFontTest();

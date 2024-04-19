@@ -26,7 +26,10 @@
 #define VKD3D_NO_WIN32_TYPES
 #include "initguid.h"
 #include "wined3d_private.h"
+#include "wined3d_gl.h"
 #include "d3d12.h"
+#define VK_NO_PROTOTYPES
+#include "wine/vulkan.h"
 #include <vkd3d.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
@@ -127,23 +130,22 @@ struct wined3d_settings wined3d_settings =
     .max_sm_cs = UINT_MAX,
     .renderer = WINED3D_RENDERER_AUTO,
     .shader_backend = WINED3D_SHADER_BACKEND_AUTO,
-    .multiply_special = 1,
 };
 
-/* CXGames hacks, not in the main wined3d configuration settings */
-struct cxgames_hacks cxgames_hacks =
+enum wined3d_renderer CDECL wined3d_get_renderer(void)
 {
-    FALSE,                      /* safe_vs_consts */
-    WINED3D_MAPBUF_NEVER_NV,    /* Don't use glMapBuffer on dynamic buffers with NV threading */
-    FALSE,                      /* Don't force success when creating transform feedback buffers */
-};
+    if (wined3d_settings.renderer == WINED3D_RENDERER_AUTO)
+        return WINED3D_RENDERER_OPENGL;
 
-struct wined3d * CDECL wined3d_create(DWORD flags)
+    return wined3d_settings.renderer;
+}
+
+struct wined3d * CDECL wined3d_create(uint32_t flags)
 {
     struct wined3d *object;
     HRESULT hr;
 
-    if (!(object = heap_alloc_zero(FIELD_OFFSET(struct wined3d, adapters[1]))))
+    if (!(object = calloc(1, FIELD_OFFSET(struct wined3d, adapters[1]))))
     {
         ERR("Failed to allocate wined3d object memory.\n");
         return NULL;
@@ -154,8 +156,8 @@ struct wined3d * CDECL wined3d_create(DWORD flags)
 
     if (FAILED(hr = wined3d_init(object, flags)))
     {
-        WARN("Failed to initialize wined3d object, hr %#x.\n", hr);
-        heap_free(object);
+        WARN("Failed to initialize wined3d object, hr %#lx.\n", hr);
+        free(object);
         return NULL;
     }
 
@@ -212,7 +214,7 @@ static DWORD get_config_key(HKEY defkey, HKEY appkey, const char *env, const cha
     return ERROR_FILE_NOT_FOUND;
 }
 
-static DWORD get_config_key_dword(HKEY defkey, HKEY appkey, const char *env, const char *name, DWORD *value)
+static DWORD get_config_key_dword(HKEY defkey, HKEY appkey, const char *env, const char *name, unsigned int *value)
 {
     DWORD type, data, size;
     const char *env_value;
@@ -277,13 +279,13 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
     const char *env;
     HKEY hkey = 0;
     HKEY appkey = 0;
-    DWORD tmpvalue;
+    unsigned int tmpvalue;
     WNDCLASSA wc;
 
     wined3d_context_tls_idx = TlsAlloc();
     if (wined3d_context_tls_idx == TLS_OUT_OF_INDEXES)
     {
-        DWORD err = GetLastError();
+        unsigned int err = GetLastError();
         ERR("Failed to allocate context TLS index, err %#x.\n", err);
         return FALSE;
     }
@@ -308,7 +310,7 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
         ERR("Failed to register window class 'WineD3D_OpenGL'!\n");
         if (!TlsFree(wined3d_context_tls_idx))
         {
-            DWORD err = GetLastError();
+            unsigned int err = GetLastError();
             ERR("Failed to free context TLS index, err %#x.\n", err);
         }
         return FALSE;
@@ -343,11 +345,6 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
     {
         if (!get_config_key_dword(hkey, appkey, env, "csmt", &wined3d_settings.cs_multithreaded))
             ERR_(winediag)("Setting multithreaded command stream to %#x.\n", wined3d_settings.cs_multithreaded);
-        else if (!get_config_key(hkey, appkey, env, "csmt", buffer, size) && !strcmp(buffer,"disabled"))
-        {
-            wined3d_settings.cs_multithreaded = 0;
-            ERR_(winediag)("Disabling multithreaded command stream.\n");
-        }
         if (!get_config_key_dword(hkey, appkey, env, "MaxVersionGL", &tmpvalue))
         {
             ERR_(winediag)("Setting maximum allowed wined3d GL version to %u.%u.\n",
@@ -361,47 +358,7 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
                 ERR_(winediag)("Using the GLSL shader backend.\n");
                 wined3d_settings.shader_backend = WINED3D_SHADER_BACKEND_GLSL;
             }
-            else if (!stricmp(buffer, "arb"))
-            {
-                ERR_(winediag)("Using the ARB shader backend.\n");
-                wined3d_settings.shader_backend = WINED3D_SHADER_BACKEND_ARB;
-            }
-            else if (!stricmp(buffer, "none"))
-            {
-                ERR_(winediag)("Disabling shader backends.\n");
-                wined3d_settings.shader_backend = WINED3D_SHADER_BACKEND_NONE;
-            }
         }
-        if (wined3d_settings.shader_backend == WINED3D_SHADER_BACKEND_ARB
-                || wined3d_settings.shader_backend == WINED3D_SHADER_BACKEND_NONE)
-        {
-            ERR_(winediag)("The GLSL shader backend has been disabled. You get to keep all the pieces if it breaks.\n");
-            TRACE("Use of GL Shading Language disabled.\n");
-        }
-        if ( !get_config_key( hkey, appkey, env, "hl2_disable_glsl", buffer, size) )
-        {
-            /* This allows disabling GLSL for single HL2 mods(they all use hl2.exe).
-             * It is important that this key is evaluated *after* the UseGLS one,
-             * otherwise the useGLSL key may overwrite decisions made here
-             */
-            char *token;
-            LPSTR cmdline;
-            cmdline = GetCommandLineA();
-            TRACE("Checking command line for disabling GLSL per HL2 mod\n");
-            token = strtok(buffer, ";");
-            while(token) {
-                TRACE("Looking for \"%s\"\n", token);
-                if(strstr(cmdline, token)) {
-                    TRACE("Disabling GLSL for this HL2 mod\n");
-                    wined3d_settings.shader_backend = WINED3D_SHADER_BACKEND_ARB;
-                    break;
-                }
-                token = strtok(NULL, ";");
-            }
-        }
-        if (!get_config_key(hkey, appkey, env, "OffscreenRenderingMode", buffer, size)
-                && !strcmp(buffer,"backbuffer"))
-            wined3d_settings.offscreen_rendering_mode = ORM_BACKBUFFER;
         if (!get_config_key_dword(hkey, appkey, env, "VideoPciDeviceID", &tmpvalue))
         {
             int pci_device_id = tmpvalue;
@@ -449,7 +406,7 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
         {
             size_t len = strlen(buffer) + 1;
 
-            if (!(wined3d_settings.logo = heap_alloc(len)))
+            if (!(wined3d_settings.logo = malloc(len)))
                 ERR("Failed to allocate logo path memory.\n");
             else
                 memcpy(wined3d_settings.logo, buffer, len);
@@ -459,14 +416,6 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
         if (!get_config_key_dword(hkey, appkey, env, "SampleCount", &wined3d_settings.sample_count))
             ERR_(winediag)("Forcing sample count to %u. This may not be compatible with all applications.\n",
                     wined3d_settings.sample_count);
-        if ( !get_config_key( hkey, appkey, env, "SafeVsConsts", buffer, size) )
-        {
-            if (!strcmp(buffer,"enable"))
-            {
-                TRACE("Advertising only always available shader constants\n");
-                cxgames_hacks.safe_vs_consts = TRUE;
-            }
-        }
         if (!get_config_key(hkey, appkey, env, "CheckFloatConstants", buffer, size)
                 && !strcmp(buffer, "enabled"))
         {
@@ -475,8 +424,6 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
         }
         if (!get_config_key_dword(hkey, appkey, env, "strict_shader_math", &wined3d_settings.strict_shader_math))
             ERR_(winediag)("Setting strict shader math to %#x.\n", wined3d_settings.strict_shader_math);
-        if (!get_config_key_dword(hkey, appkey, env, "multiply_special", &wined3d_settings.multiply_special))
-            ERR_(winediag)("Setting multiply special to %#x.\n", wined3d_settings.multiply_special);
         if (!get_config_key_dword(hkey, appkey, env, "MaxShaderModelVS", &wined3d_settings.max_sm_vs))
             TRACE("Limiting VS shader model to %u.\n", wined3d_settings.max_sm_vs);
         if (!get_config_key_dword(hkey, appkey, env, "MaxShaderModelHS", &wined3d_settings.max_sm_hs))
@@ -507,28 +454,10 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
                 wined3d_settings.renderer = WINED3D_RENDERER_NO3D;
             }
         }
-        if (!get_config_key(hkey, appkey, env, "AllowGlMapBuffer", buffer, size))
-        {
-            if (!strcmp(buffer, "always"))
-            {
-                TRACE("Always using glMapBuffer if possible.\n");
-                cxgames_hacks.allow_glmapbuffer = WINED3D_MAPBUF_ALWAYS;
-            }
-            else if (!strcmp(buffer, "never") || !strcmp(buffer, "static"))
-            {
-                TRACE("Never using glMapBuffer.\n");
-                cxgames_hacks.allow_glmapbuffer = WINED3D_MAPBUF_NEVER;
-            }
-        }
         if (!get_config_key_dword(hkey, appkey, env, "cb_access_map_w", &tmpvalue) && tmpvalue)
         {
             TRACE("Forcing all constant buffers to be write-mappable.\n");
             wined3d_settings.cb_access_map_w = TRUE;
-        }
-        if (!get_config_key_dword(hkey, appkey, env, "force_transform_feedback", &tmpvalue) && tmpvalue)
-        {
-            TRACE("Forcing success on transform feedback buffer creation.\n");
-            cxgames_hacks.force_transform_feedback = TRUE;
         }
     }
 
@@ -564,7 +493,7 @@ static BOOL wined3d_dll_destroy(HINSTANCE hInstDLL)
 
     if (!TlsFree(wined3d_context_tls_idx))
     {
-        DWORD err = GetLastError();
+        unsigned int err = GetLastError();
         ERR("Failed to free context TLS index, err %#x.\n", err);
     }
 
@@ -578,17 +507,17 @@ static BOOL wined3d_dll_destroy(HINSTANCE hInstDLL)
          * these entries. */
         WARN("Leftover wndproc table entry %p.\n", &wndproc_table.entries[i]);
     }
-    heap_free(wndproc_table.entries);
+    free(wndproc_table.entries);
 
-    heap_free(swapchain_state_table.states);
+    free(swapchain_state_table.states);
     for (i = 0; i < swapchain_state_table.hook_count; ++i)
     {
         WARN("Leftover swapchain state hook %p.\n", &swapchain_state_table.hooks[i]);
         UnhookWindowsHookEx(swapchain_state_table.hooks[i].hook);
     }
-    heap_free(swapchain_state_table.hooks);
+    free(swapchain_state_table.hooks);
 
-    heap_free(wined3d_settings.logo);
+    free(wined3d_settings.logo);
     UnregisterClassA(WINED3D_OPENGL_WINDOW_CLASS_NAME, hInstDLL);
 
     DeleteCriticalSection(&wined3d_command_cs);
@@ -632,7 +561,7 @@ static struct wined3d_output * wined3d_get_output_from_window(const struct wined
     monitor_info.cbSize = sizeof(monitor_info);
     if (!GetMonitorInfoW(monitor, (MONITORINFO *)&monitor_info))
     {
-        ERR("GetMonitorInfoW failed, error %#x.\n", GetLastError());
+        ERR("GetMonitorInfoW failed, error %#lx.\n", GetLastError());
         return NULL;
     }
 

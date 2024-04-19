@@ -38,9 +38,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(msvcirt);
 #define RESERVE_SIZE 512
 #define STATEBUF_SIZE 8
 
-void* (__cdecl *operator_new)(SIZE_T);
-void (__cdecl *operator_delete)(void*);
-
 /* ?sh_none@filebuf@@2HB */
 const int filebuf_sh_none = 0x800;
 /* ?sh_read@filebuf@@2HB */
@@ -820,7 +817,7 @@ int __thiscall streambuf_xsputn(streambuf *this, const char *data, int length)
 
     while (copied < length) {
         if (this->unbuffered || this->pptr == this->epptr) {
-            if (call_streambuf_overflow(this, data[copied]) == EOF)
+            if (call_streambuf_overflow(this, (unsigned char)data[copied]) == EOF)
                 break;
             copied++;
         } else {
@@ -2670,15 +2667,12 @@ ostream* __thiscall ostream_write(ostream *this, const char *str, int count)
     return this;
 }
 
-/* ?writepad@ostream@@AAEAAV1@PBD0@Z */
-/* ?writepad@ostream@@AEAAAEAV1@PEBD0@Z */
-DEFINE_THISCALL_WRAPPER(ostream_writepad, 12)
-ostream* __thiscall ostream_writepad(ostream *this, const char *str1, const char *str2)
+static ostream* ostream_writepad_len(ostream *this, const char *str1, const char *str2, int len2)
 {
     ios *base = ostream_get_ios(this);
-    int len1 = strlen(str1), len2 = strlen(str2), i;
+    int len1 = strlen(str1), i;
 
-    TRACE("(%p %p %p)\n", this, str1, str2);
+    TRACE("(%p %p %p %d)\n", this, str1, str2, len2);
 
     /* left of the padding */
     if (base->flags & (FLAGS_left|FLAGS_internal)) {
@@ -2701,6 +2695,14 @@ ostream* __thiscall ostream_writepad(ostream *this, const char *str1, const char
             base->state |= IOSTATE_failbit | IOSTATE_badbit;
     }
     return this;
+}
+
+/* ?writepad@ostream@@AAEAAV1@PBD0@Z */
+/* ?writepad@ostream@@AEAAAEAV1@PEBD0@Z */
+DEFINE_THISCALL_WRAPPER(ostream_writepad, 12)
+ostream* __thiscall ostream_writepad(ostream *this, const char *str1, const char *str2)
+{
+    return ostream_writepad_len(this, str1, str2, strlen(str2));
 }
 
 static ostream* ostream_internal_print_integer(ostream *ostr, int n, BOOL unsig, BOOL shrt)
@@ -2792,12 +2794,10 @@ static ostream* ostream_internal_print_float(ostream *ostr, double d, BOOL dbl)
 DEFINE_THISCALL_WRAPPER(ostream_print_char, 8)
 ostream* __thiscall ostream_print_char(ostream *this, char c)
 {
-    const char c_str[2] = {c, 0};
-
-    TRACE("(%p %c)\n", this, c);
+    TRACE("(%p %d)\n", this, c);
 
     if (ostream_opfx(this)) {
-        ostream_writepad(this, "", c_str);
+        ostream_writepad_len(this, "", &c, 1);
         ostream_osfx(this);
     }
     return this;
@@ -5129,19 +5129,32 @@ void __cdecl _mtunlock(CRITICAL_SECTION *crit)
     LeaveCriticalSection(crit);
 }
 
+static void* (__cdecl *MSVCRT_operator_new)(SIZE_T);
+static void (__cdecl *MSVCRT_operator_delete)(void*);
+
+void* __cdecl operator_new(SIZE_T size)
+{
+    return MSVCRT_operator_new(size);
+}
+
+void __cdecl operator_delete(void *mem)
+{
+    MSVCRT_operator_delete(mem);
+}
+
 static void init_cxx_funcs(void)
 {
     HMODULE hmod = GetModuleHandleA("msvcrt.dll");
 
     if (sizeof(void *) > sizeof(int))  /* 64-bit has different names */
     {
-        operator_new = (void*)GetProcAddress(hmod, "??2@YAPEAX_K@Z");
-        operator_delete = (void*)GetProcAddress(hmod, "??3@YAXPEAX@Z");
+        MSVCRT_operator_new = (void*)GetProcAddress(hmod, "??2@YAPEAX_K@Z");
+        MSVCRT_operator_delete = (void*)GetProcAddress(hmod, "??3@YAXPEAX@Z");
     }
     else
     {
-        operator_new = (void*)GetProcAddress(hmod, "??2@YAPAXI@Z");
-        operator_delete = (void*)GetProcAddress(hmod, "??3@YAXPAX@Z");
+        MSVCRT_operator_new = (void*)GetProcAddress(hmod, "??2@YAPAXI@Z");
+        MSVCRT_operator_delete = (void*)GetProcAddress(hmod, "??3@YAXPAX@Z");
     }
 }
 

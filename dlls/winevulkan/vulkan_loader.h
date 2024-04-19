@@ -30,7 +30,6 @@
 #include "winternl.h"
 #include "wine/debug.h"
 #include "wine/vulkan.h"
-#include "wine/vulkan_driver.h"
 #include "wine/unixlib.h"
 #include "wine/list.h"
 
@@ -40,8 +39,6 @@
 #define VULKAN_ICD_MAGIC_VALUE 0x01CDC0DE
 
 #define WINEVULKAN_QUIRK_GET_DEVICE_PROC_ADDR 0x00000001
-#define WINEVULKAN_QUIRK_ADJUST_MAX_IMAGE_COUNT 0x00000002
-#define WINEVULKAN_QUIRK_IGNORE_EXPLICIT_LAYERS 0x00000004
 
 /* Base 'class' for our Vulkan dispatchable objects such as VkDevice and VkInstance.
  * This structure MUST be the first element of a dispatchable object as the ICD
@@ -104,9 +101,9 @@ struct vulkan_func
     void *func;
 };
 
-void *wine_vk_get_device_proc_addr(const char *name) DECLSPEC_HIDDEN;
-void *wine_vk_get_phys_dev_proc_addr(const char *name) DECLSPEC_HIDDEN;
-void *wine_vk_get_instance_proc_addr(const char *name) DECLSPEC_HIDDEN;
+void *wine_vk_get_device_proc_addr(const char *name);
+void *wine_vk_get_phys_dev_proc_addr(const char *name);
+void *wine_vk_get_instance_proc_addr(const char *name);
 
 /* debug callbacks params */
 
@@ -146,12 +143,6 @@ struct is_available_device_function_params
     const char *name;
 };
 
-extern NTSTATUS WINAPI __wine_direct_unix_call(unixlib_handle_t handle, unsigned int code, void *params);
-extern unixlib_handle_t unix_handle DECLSPEC_HIDDEN;
-
-static inline NTSTATUS vk_unix_call(enum unix_call code, void *params)
-{
-    return __wine_unix_call(unix_handle, code, params);
-}
+#define UNIX_CALL(code, params) WINE_UNIX_CALL(unix_ ## code, params)
 
 #endif /* __WINE_VULKAN_LOADER_H */

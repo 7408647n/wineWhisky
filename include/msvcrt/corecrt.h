@@ -21,15 +21,16 @@
 #ifndef __WINE_CORECRT_H
 #define __WINE_CORECRT_H
 
-#include "wine/winheader_enter.h"
-#include "wine/32on64utils.h"
-
 #ifndef __WINE_USE_MSVCRT
 #define __WINE_USE_MSVCRT
 #endif
 
 #ifdef __WINE_CONFIG_H
 # error You cannot use config.h with msvcrt
+#endif
+
+#ifdef WINE_UNIX_LIB
+# error msvcrt headers cannot be used in Unix code
 #endif
 
 #ifndef _WIN32
@@ -40,7 +41,7 @@
 # define WIN32
 #endif
 
-#if ((defined(__x86_64__) && !defined(__i386_on_x86_64__)) || defined(__aarch64__)) && !defined(_WIN64)
+#if (defined(__x86_64__) || defined(__powerpc64__) || defined(__aarch64__)) && !defined(_WIN64)
 #define _WIN64
 #endif
 
@@ -85,7 +86,7 @@
 #define __has_attribute(x) 0
 #endif
 
-#ifndef _MSC_VER
+#if !defined(_MSC_VER) && !defined(__MINGW32__)
 # undef __stdcall
 # ifdef __i386__
 #  ifdef __GNUC__
@@ -97,24 +98,19 @@
 #  else
 #   error You need to define __stdcall for your compiler
 #  endif
-# elif defined(__i386_on_x86_64__)
-#   define __stdcall __attribute__((stdcall32)) __attribute__((__force_align_arg_pointer__))
 # elif defined(__x86_64__) && defined (__GNUC__)
 #  if __has_attribute(__force_align_arg_pointer__)
 #   define __stdcall __attribute__((ms_abi)) __attribute__((__force_align_arg_pointer__))
 #  else
 #   define __stdcall __attribute__((ms_abi))
 #  endif
-# elif defined(__arm__) && defined (__GNUC__) && !defined(__SOFTFP__) && !defined(__MINGW32__) && !defined(__CYGWIN__)
+# elif defined(__arm__) && defined (__GNUC__) && !defined(__SOFTFP__) && !defined(__CYGWIN__)
 #   define __stdcall __attribute__((pcs("aapcs-vfp")))
 # elif defined(__aarch64__) && defined (__GNUC__) && __has_attribute(ms_abi)
 #  define __stdcall __attribute__((ms_abi))
 # else  /* __i386__ */
 #  define __stdcall
 # endif  /* __i386__ */
-#endif /* __stdcall */
-
-#ifndef _MSC_VER
 # undef __cdecl
 # if defined(__i386__) && defined(__GNUC__)
 #  if (__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 2)) || defined(__APPLE__)
@@ -122,35 +118,10 @@
 #  else
 #   define __cdecl __attribute__((__cdecl__))
 #  endif
-# elif defined(__i386_on_x86_64__)
-#   define __cdecl __attribute__((cdecl32)) __attribute__((__force_align_arg_pointer__))
 # else
 #  define __cdecl __stdcall
 # endif
-#endif
-
-
-#if defined(__i386_on_x86_64__)
-# include <stdarg.h>
-# undef va_list
-# undef va_start
-# undef va_end
-# undef va_copy
-# define va_list __builtin_va_list32
-# define va_start(list,arg) __builtin_va_start32(list,arg)
-# define va_end(list) __builtin_va_end32(list)
-# define va_copy(dest,src) __builtin_va_copy32(dest,src)
-#elif (defined(__x86_64__) || (defined(__aarch64__) && __has_attribute(ms_abi))) && defined (__GNUC__)
-# include <stdarg.h>
-# undef va_list
-# undef va_start
-# undef va_end
-# undef va_copy
-# define va_list __builtin_ms_va_list
-# define va_start(list,arg) __builtin_ms_va_start(list,arg)
-# define va_end(list) __builtin_ms_va_end(list)
-# define va_copy(dest,src) __builtin_ms_va_copy(dest,src)
-#endif
+#endif  /* _MSC_VER || __MINGW32__ */
 
 #ifndef WINAPIV
 # if defined(__arm__) && defined (__GNUC__) && !defined(__SOFTFP__) && !defined(__MINGW32__) && !defined(__CYGWIN__)
@@ -352,12 +323,30 @@ typedef struct threadlocaleinfostruct {
 #define _THREADLOCALEINFO
 #endif
 
-#if !defined(__WINE_USE_MSVCRT) || defined(__MINGW32__)
+#ifdef __MINGW32__
 #define __WINE_CRT_PRINTF_ATTR(fmt,args) __attribute__((format (printf,fmt,args)))
 #define __WINE_CRT_SCANF_ATTR(fmt,args)  __attribute__((format (scanf,fmt,args)))
 #else
 #define __WINE_CRT_PRINTF_ATTR(fmt,args)
 #define __WINE_CRT_SCANF_ATTR(fmt,args)
+#endif
+
+#if defined(__GNUC__) && ((__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 3)))
+#define __WINE_ALLOC_SIZE(...) __attribute__((__alloc_size__(__VA_ARGS__)))
+#else
+#define __WINE_ALLOC_SIZE(...)
+#endif
+
+#if defined(__GNUC__) && (__GNUC__ > 10)
+#define __WINE_DEALLOC(...) __attribute__((malloc (__VA_ARGS__)))
+#else
+#define __WINE_DEALLOC(...)
+#endif
+
+#if defined(__GNUC__) && (__GNUC__ > 2)
+#define __WINE_MALLOC __attribute__((malloc))
+#else
+#define __WINE_MALLOC
 #endif
 
 #endif /* __WINE_CORECRT_H */

@@ -198,6 +198,21 @@ sync_test("add_remove_listener", function() {
     calls = "";
     div.click();
     ok(calls === "", "calls = " + calls);
+
+    /* test undefined function argument */
+    div.addEventListener("click", undefined, false);
+
+    calls = "";
+    div.click();
+    ok(calls === "", "calls = " + calls);
+
+    div.addEventListener("click", listener, false);
+    div.removeEventListener("click", undefined);
+
+    calls = "";
+    div.click();
+    ok(calls === "listener,", "calls = " + calls);
+    div.removeEventListener("click", listener);
 });
 
 sync_test("event_phase", function() {
@@ -745,6 +760,7 @@ sync_test("keyboard_event", function() {
     ok(e.location === 0, "location = " + e.location);
     ok(e.detail === 0, "detail = " + e.detail);
     ok(e.which === 0, "which = " + e.which);
+    ok(e.locale === "", "locale = " + e.locale);
 });
 
 sync_test("custom_event", function() {
@@ -797,17 +813,40 @@ async_test("detached_img_error_event", function() {
     img.src = "about:blank";
 });
 
+async_test("img_wrong_content_type", function() {
+    var img = new Image();
+    img.onload = function() {
+        ok(img.width === 2, "width = " + img.width);
+        ok(img.height === 2, "height = " + img.height);
+        next_test();
+    }
+    img.src = "img.png?content-type=image/jpeg";
+});
+
 async_test("message event", function() {
-    var listener_called = false;
+    var listener_called = false, iframe = document.createElement("iframe");
 
     window.addEventListener("message", function(e) {
+        if(listener_called) {
+            ok(e.data === "echo", "e.data (diff origin) = " + e.data);
+            ok(e.source === iframe.contentWindow, "e.source (diff origin) not iframe.contentWindow");
+            ok(e.origin === "http://winetest.different.org:1234", "e.origin (diff origin) = " + e.origin);
+            next_test();
+            return;
+        }
         listener_called = true;
+        e.initMessageEvent("blah", true, true, "barfoo", "wine", 1234, window);
         ok(e.data === "test", "e.data = " + e.data);
         ok(e.bubbles === false, "bubbles = " + e.bubbles);
         ok(e.cancelable === false, "cancelable = " + e.cancelable);
-        next_test();
+        ok(e.source === window, "e.source = " + e.source);
+        ok(e.origin === "http://winetest.example.org", "e.origin = " + e.origin);
+
+        iframe.onload = function() { iframe.contentWindow.postMessage("echo", "hTtP://WinEtesT.difFerent.ORG:1234"); }
+        iframe.src = "http://winetest.different.org:1234/xhr_iframe.html";
+        document.body.appendChild(iframe);
     });
 
-    window.postMessage("test", "http://winetest.example.org");
+    window.postMessage("test", "httP://wineTest.example.org");
     ok(listener_called == false, "listener already called");
 });

@@ -36,8 +36,6 @@
 #include <ctype.h>
 #include <time.h>
 
-#define NONAMELESSUNION
-
 #include "widl.h"
 #include "typelib.h"
 #include "typelib_struct.h"
@@ -1056,7 +1054,7 @@ static int encode_var(
          var, type, type->name ? type->name : "NULL");
 
     if (is_array(type) && !type_array_is_decl_as_ptr(type)) {
-        int num_dims, elements = 1, arrayoffset;
+        int num_dims, arrayoffset;
         type_t *atype;
         int *arraydata;
 
@@ -1083,7 +1081,6 @@ static int encode_var(
             arraydata[0] = type_array_get_dim(atype);
             arraydata[1] = 0;
             arraydata += 2;
-            elements *= type_array_get_dim(atype);
         }
 
         typeoffset = ctl2_alloc_segment(typelib, MSFT_SEG_TYPEDESC, 8, 0);
@@ -1231,6 +1228,9 @@ static void write_default_value(msft_typelib_t *typelib, type_t *type, expr_t *e
         case VT_INT:
         case VT_UINT:
         case VT_HRESULT:
+            break;
+        case VT_USERDEFINED:
+            vt = VT_I4;
             break;
         case VT_VARIANT: {
             switch (expr->type) {
@@ -1419,6 +1419,7 @@ static int add_func_desc(msft_typeinfo_t* typeinfo, var_t *func, int index)
             break;
         case ATTR_OUT:
             break;
+        case ATTR_DEFAULT_OVERLOAD:
         case ATTR_OVERLOAD:
             break;
         case ATTR_PROPGET:
@@ -2225,6 +2226,9 @@ static void add_structure_typeinfo(msft_typelib_t *typelib, type_t *structure)
 
     if (-1 < structure->typelib_idx)
         return;
+
+    if (!structure->name)
+        structure->name = gen_name();
 
     structure->typelib_idx = typelib->typelib_header.nrtypeinfos;
     msft_typeinfo = create_msft_typeinfo(typelib, TKIND_RECORD, structure->name, structure->attrs);

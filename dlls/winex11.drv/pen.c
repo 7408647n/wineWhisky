@@ -18,6 +18,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#if 0
+#pragma makedep unix
+#endif
+
 #include "config.h"
 
 #include "x11drv.h"
@@ -47,14 +51,14 @@ static DWORD get_user_dashes( char *res, const DWORD *style, DWORD len )
         }
         else dashes[pos++] = dashes[i];
     }
-    for (i = 0; i < pos; i++) res[i] = min( dashes[i], 255 );
+    for (i = 0; i < pos; i++) res[i] = (char)min( dashes[i], 255 );
     return pos;
 }
 
 /***********************************************************************
  *           SelectPen   (X11DRV.@)
  */
-HPEN CDECL X11DRV_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern *pattern )
+HPEN X11DRV_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern *pattern )
 {
     static const char PEN_dash[]          = { 16,8 };
     static const char PEN_dot[]           = { 4,4 };
@@ -78,7 +82,7 @@ HPEN CDECL X11DRV_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern 
         if (!size) return 0;
 
         physDev->pen.ext = 1;
-        elp = HeapAlloc( GetProcessHeap(), 0, size );
+        elp = malloc( size );
 
         NtGdiExtGetObjectW( hpen, size, elp );
         logpen.lopnStyle = elp->elpPenStyle;
@@ -143,9 +147,9 @@ HPEN CDECL X11DRV_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern 
        (logpen.lopnStyle & PS_STYLE_MASK) != PS_USERSTYLE &&
        (logpen.lopnStyle & PS_STYLE_MASK) != PS_ALTERNATE)
         for(i = 0; i < physDev->pen.dash_len; i++)
-            physDev->pen.dashes[i] = min( physDev->pen.dashes[i] * physDev->pen.width, 255 );
+            physDev->pen.dashes[i] = (char)min( physDev->pen.dashes[i] * physDev->pen.width, 255 );
 
-    HeapFree( GetProcessHeap(), 0, elp );
+    free( elp );
 
     return hpen;
 }
@@ -154,7 +158,7 @@ HPEN CDECL X11DRV_SelectPen( PHYSDEV dev, HPEN hpen, const struct brush_pattern 
 /***********************************************************************
  *           SetDCPenColor (X11DRV.@)
  */
-COLORREF CDECL X11DRV_SetDCPenColor( PHYSDEV dev, COLORREF crColor )
+COLORREF X11DRV_SetDCPenColor( PHYSDEV dev, COLORREF crColor )
 {
     X11DRV_PDEVICE *physDev = get_x11drv_dev( dev );
 

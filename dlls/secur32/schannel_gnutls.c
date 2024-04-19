@@ -54,6 +54,8 @@
 WINE_DEFAULT_DEBUG_CHANNEL(secur32);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
+static const char *system_priority_file;
+
 /* Not present in gnutls version < 2.9.10. */
 static int (*pgnutls_cipher_get_block_size)(gnutls_cipher_algorithm_t);
 
@@ -82,6 +84,7 @@ static void *libgnutls_handle;
 #define MAKE_FUNCPTR(f) static typeof(f) * p##f
 MAKE_FUNCPTR(gnutls_alert_get);
 MAKE_FUNCPTR(gnutls_alert_get_name);
+MAKE_FUNCPTR(gnutls_alert_send);
 MAKE_FUNCPTR(gnutls_certificate_allocate_credentials);
 MAKE_FUNCPTR(gnutls_certificate_free_credentials);
 MAKE_FUNCPTR(gnutls_certificate_get_peers);
@@ -109,6 +112,7 @@ MAKE_FUNCPTR(gnutls_record_recv);
 MAKE_FUNCPTR(gnutls_record_send);
 MAKE_FUNCPTR(gnutls_server_name_set);
 MAKE_FUNCPTR(gnutls_session_channel_binding);
+MAKE_FUNCPTR(gnutls_set_default_priority);
 MAKE_FUNCPTR(gnutls_transport_get_ptr);
 MAKE_FUNCPTR(gnutls_transport_set_errno);
 MAKE_FUNCPTR(gnutls_transport_set_ptr);
@@ -131,6 +135,11 @@ MAKE_FUNCPTR(gnutls_x509_privkey_deinit);
 #define GNUTLS_KX_ECDHE_RSA     12
 #define GNUTLS_KX_ECDHE_ECDSA   13
 #define GNUTLS_KX_ECDHE_PSK     14
+#endif
+
+#if GNUTLS_VERSION_MAJOR < 3 || (GNUTLS_VERSION_MAJOR == 3 && GNUTLS_VERSION_MINOR < 4)
+#define GNUTLS_CIPHER_AES_128_CCM 19
+#define GNUTLS_CIPHER_AES_256_CCM 20
 #endif
 
 #if GNUTLS_VERSION_MAJOR < 3 || (GNUTLS_VERSION_MAJOR == 3 && GNUTLS_VERSION_MINOR < 5)
@@ -345,10 +354,12 @@ static ssize_t push_adapter(gnutls_transport_ptr_t transport, const void *buff, 
     return len;
 }
 
-static const struct {
+struct protocol_priority_flag {
     DWORD enable_flag;
     const char *gnutls_flag;
-} protocol_priority_flags[] = {
+};
+
+static const struct protocol_priority_flag client_protocol_priority_flags[] = {
     {SP_PROT_DTLS1_2_CLIENT, "VERS-DTLS1.2"},
     {SP_PROT_DTLS1_0_CLIENT, "VERS-DTLS1.0"},
     {SP_PROT_TLS1_3_CLIENT, "VERS-TLS1.3"},
@@ -359,33 +370,46 @@ static const struct {
     /* {SP_PROT_SSL2_CLIENT} is not supported by GnuTLS */
 };
 
+static const struct protocol_priority_flag server_protocol_priority_flags[] = {
+    {SP_PROT_DTLS1_2_SERVER, "VERS-DTLS1.2"},
+    {SP_PROT_DTLS1_0_SERVER, "VERS-DTLS1.0"},
+    {SP_PROT_TLS1_3_SERVER, "VERS-TLS1.3"},
+    {SP_PROT_TLS1_2_SERVER, "VERS-TLS1.2"},
+    {SP_PROT_TLS1_1_SERVER, "VERS-TLS1.1"},
+    {SP_PROT_TLS1_0_SERVER, "VERS-TLS1.0"},
+    {SP_PROT_SSL3_SERVER,   "VERS-SSL3.0"}
+    /* {SP_PROT_SSL2_SERVER} is not supported by GnuTLS */
+};
+
 static DWORD supported_protocols;
 
-static void check_supported_protocols(void)
+static void check_supported_protocols(
+ const struct protocol_priority_flag *flags, int num_flags, BOOLEAN server)
 {
+    const char *type_desc = server ? "server" : "client";
     gnutls_session_t session;
     char priority[64];
     unsigned i;
     int err;
 
-    err = pgnutls_init(&session, GNUTLS_CLIENT);
+    err = pgnutls_init(&session, server ? GNUTLS_SERVER : GNUTLS_CLIENT);
     if (err != GNUTLS_E_SUCCESS)
     {
         pgnutls_perror(err);
         return;
     }
 
-    for(i = 0; i < ARRAY_SIZE(protocol_priority_flags); i++)
+    for(i = 0; i < num_flags; i++)
     {
-        sprintf(priority, "NORMAL:-%s", protocol_priority_flags[i].gnutls_flag);
+        snprintf(priority, sizeof(priority), "NORMAL:-%s", flags[i].gnutls_flag);
         err = pgnutls_priority_set_direct(session, priority, NULL);
         if (err == GNUTLS_E_SUCCESS)
         {
-            TRACE("%s is supported\n", protocol_priority_flags[i].gnutls_flag);
-            supported_protocols |= protocol_priority_flags[i].enable_flag;
+            TRACE("%s %s is supported\n", type_desc, flags[i].gnutls_flag);
+            supported_protocols |= flags[i].enable_flag;
         }
         else
-            TRACE("%s is not supported\n", protocol_priority_flags[i].gnutls_flag);
+            TRACE("%s %s is not supported\n", type_desc, flags[i].gnutls_flag);
     }
 
     pgnutls_deinit(session);
@@ -408,20 +432,78 @@ static int pull_timeout(gnutls_transport_ptr_t transport, unsigned int timeout)
     return 0;
 }
 
+static NTSTATUS set_priority(schan_credentials *cred, gnutls_session_t session)
+{
+    char priority[128] = "NORMAL:%LATEST_RECORD_VERSION", *p;
+    BOOL server = !!(cred->credential_use & SECPKG_CRED_INBOUND);
+    const struct protocol_priority_flag *protocols =
+        server ? server_protocol_priority_flags : client_protocol_priority_flags;
+    int num_protocols = server ? ARRAYSIZE(server_protocol_priority_flags)
+                               : ARRAYSIZE(client_protocol_priority_flags);
+    BOOL using_vers_all = FALSE, disabled;
+    int i, err;
+
+    if (system_priority_file && strcmp(system_priority_file, "/dev/null"))
+    {
+        TRACE("Using defaults with system priority file override\n");
+        err = pgnutls_set_default_priority(session);
+        if (err != GNUTLS_E_SUCCESS)
+        {
+            pgnutls_perror(err);
+            return STATUS_INTERNAL_ERROR;
+        }
+        return STATUS_SUCCESS;
+    }
+
+    p = priority + strlen(priority);
+
+    /* VERS-ALL is nice to use for forward compatibility. It was introduced before support for TLS1.3,
+     * so if TLS1.3 is supported, we may safely use it. Otherwise explicitly disable all known
+     * disabled protocols. */
+    if (supported_protocols & SP_PROT_TLS1_3_CLIENT)
+    {
+        strcpy(p, ":-VERS-ALL");
+        p += strlen(p);
+        using_vers_all = TRUE;
+    }
+
+    for (i = 0; i < num_protocols; i++)
+    {
+        if (!(supported_protocols & protocols[i].enable_flag)) continue;
+
+        disabled = !(cred->enabled_protocols & protocols[i].enable_flag);
+        if (using_vers_all && disabled) continue;
+
+        *p++ = ':';
+        *p++ = disabled ? '-' : '+';
+        strcpy(p, protocols[i].gnutls_flag);
+        p += strlen(p);
+    }
+
+    TRACE("Using %s priority\n", debugstr_a(priority));
+    err = pgnutls_priority_set_direct(session, priority, NULL);
+    if (err != GNUTLS_E_SUCCESS)
+    {
+        pgnutls_perror(err);
+        return STATUS_INTERNAL_ERROR;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS schan_create_session( void *args )
 {
     const struct create_session_params *params = args;
     schan_credentials *cred = params->cred;
-    char priority[128] = "NORMAL:%LATEST_RECORD_VERSION", *p;
-    BOOL using_vers_all = FALSE, disabled;
-    unsigned int i, flags = (cred->credential_use == SECPKG_CRED_INBOUND) ? GNUTLS_SERVER : GNUTLS_CLIENT;
+    unsigned int flags = (cred->credential_use == SECPKG_CRED_INBOUND) ? GNUTLS_SERVER : GNUTLS_CLIENT;
     struct schan_transport *transport;
     gnutls_session_t s;
+    NTSTATUS status;
     int err;
 
     *params->session = 0;
 
-    if (cred->enabled_protocols & (SP_PROT_DTLS1_0_CLIENT | SP_PROT_DTLS1_2_CLIENT))
+    if (cred->enabled_protocols & SP_PROT_DTLS1_X)
     {
         flags |= GNUTLS_DATAGRAM | GNUTLS_NONBLOCK;
     }
@@ -440,39 +522,11 @@ static NTSTATUS schan_create_session( void *args )
     }
     transport->session = s;
 
-    p = priority + strlen(priority);
-
-    /* VERS-ALL is nice to use for forward compatibility. It was introduced before support for TLS1.3,
-     * so if TLS1.3 is supported, we may safely use it. Otherwise explicitly disable all known
-     * disabled protocols. */
-    if (supported_protocols & SP_PROT_TLS1_3_CLIENT)
+    if ((status = set_priority(cred, s)))
     {
-        strcpy(p, ":-VERS-ALL");
-        p += strlen(p);
-        using_vers_all = TRUE;
-    }
-
-    for (i = 0; i < ARRAY_SIZE(protocol_priority_flags); i++)
-    {
-        if (!(supported_protocols & protocol_priority_flags[i].enable_flag)) continue;
-
-        disabled = !(cred->enabled_protocols & protocol_priority_flags[i].enable_flag);
-        if (using_vers_all && disabled) continue;
-
-        *p++ = ':';
-        *p++ = disabled ? '-' : '+';
-        strcpy(p, protocol_priority_flags[i].gnutls_flag);
-        p += strlen(p);
-    }
-
-    TRACE("Using %s priority\n", debugstr_a(priority));
-    err = pgnutls_priority_set_direct(s, priority, NULL);
-    if (err != GNUTLS_E_SUCCESS)
-    {
-        pgnutls_perror(err);
         pgnutls_deinit(s);
         free(transport);
-        return STATUS_INTERNAL_ERROR;
+        return status;
     }
 
     err = pgnutls_credentials_set(s, GNUTLS_CRD_CERTIFICATE, certificate_creds_from_handle(cred->credentials));
@@ -512,6 +566,74 @@ static NTSTATUS schan_set_session_target( void *args )
     return STATUS_SUCCESS;
 }
 
+static gnutls_alert_level_t map_alert_type(unsigned int type)
+{
+    switch (type)
+    {
+    case TLS1_ALERT_WARNING: return GNUTLS_AL_WARNING;
+    case TLS1_ALERT_FATAL:   return GNUTLS_AL_FATAL;
+    default:
+        FIXME( "unknown type %u\n", type );
+        return -1;
+    }
+}
+
+static gnutls_alert_description_t map_alert_number(unsigned int number)
+{
+    switch (number)
+    {
+    case TLS1_ALERT_CLOSE_NOTIFY:           return GNUTLS_A_CLOSE_NOTIFY;
+    case TLS1_ALERT_UNEXPECTED_MESSAGE:     return GNUTLS_A_UNEXPECTED_MESSAGE;
+    case TLS1_ALERT_BAD_RECORD_MAC:         return GNUTLS_A_BAD_RECORD_MAC;
+    case TLS1_ALERT_DECRYPTION_FAILED:      return GNUTLS_A_DECRYPTION_FAILED;
+    case TLS1_ALERT_RECORD_OVERFLOW:        return GNUTLS_A_RECORD_OVERFLOW;
+    case TLS1_ALERT_DECOMPRESSION_FAIL:     return GNUTLS_A_DECOMPRESSION_FAILURE;
+    case TLS1_ALERT_HANDSHAKE_FAILURE:      return GNUTLS_A_HANDSHAKE_FAILURE;
+    case TLS1_ALERT_BAD_CERTIFICATE:        return GNUTLS_A_BAD_CERTIFICATE;
+    case TLS1_ALERT_UNSUPPORTED_CERT:       return GNUTLS_A_UNSUPPORTED_CERTIFICATE;
+    case TLS1_ALERT_CERTIFICATE_REVOKED:    return GNUTLS_A_CERTIFICATE_REVOKED;
+    case TLS1_ALERT_CERTIFICATE_EXPIRED:    return GNUTLS_A_CERTIFICATE_EXPIRED;
+    case TLS1_ALERT_CERTIFICATE_UNKNOWN:    return GNUTLS_A_CERTIFICATE_UNKNOWN;
+    case TLS1_ALERT_ILLEGAL_PARAMETER:      return GNUTLS_A_ILLEGAL_PARAMETER;
+    case TLS1_ALERT_UNKNOWN_CA:             return GNUTLS_A_UNKNOWN_CA;
+    case TLS1_ALERT_ACCESS_DENIED:          return GNUTLS_A_ACCESS_DENIED;
+    case TLS1_ALERT_DECODE_ERROR:           return GNUTLS_A_DECODE_ERROR;
+    case TLS1_ALERT_DECRYPT_ERROR:          return GNUTLS_A_DECRYPT_ERROR;
+    case TLS1_ALERT_EXPORT_RESTRICTION:     return GNUTLS_A_EXPORT_RESTRICTION;
+    case TLS1_ALERT_PROTOCOL_VERSION:       return GNUTLS_A_PROTOCOL_VERSION;
+    case TLS1_ALERT_INSUFFIENT_SECURITY:    return GNUTLS_A_INSUFFICIENT_SECURITY;
+    case TLS1_ALERT_INTERNAL_ERROR:         return GNUTLS_A_INTERNAL_ERROR;
+    case TLS1_ALERT_USER_CANCELED:          return GNUTLS_A_USER_CANCELED;
+    case TLS1_ALERT_NO_RENEGOTIATION:       return GNUTLS_A_NO_RENEGOTIATION;
+    case TLS1_ALERT_UNSUPPORTED_EXT:        return GNUTLS_A_UNSUPPORTED_EXTENSION;
+    case TLS1_ALERT_UNKNOWN_PSK_IDENTITY:   return GNUTLS_A_UNKNOWN_PSK_IDENTITY;
+    case TLS1_ALERT_NO_APP_PROTOCOL:        return GNUTLS_A_NO_APPLICATION_PROTOCOL;
+    default:
+        FIXME("unhandled alert %u\n", number);
+        return -1;
+    }
+}
+
+static NTSTATUS send_alert(gnutls_session_t session, unsigned int type, unsigned int number)
+{
+    gnutls_alert_level_t level = map_alert_type(type);
+    gnutls_alert_description_t desc = map_alert_number(number);
+    int ret;
+
+    do
+    {
+        ret = pgnutls_alert_send(session, level, desc);
+    }
+    while (ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_AGAIN);
+
+    if (ret < 0)
+    {
+        pgnutls_perror(ret);
+        return SEC_E_INTERNAL_ERROR;
+    }
+    return SEC_E_OK;
+}
+
 static NTSTATUS schan_handshake( void *args )
 {
     const struct handshake_params *params = args;
@@ -523,6 +645,12 @@ static NTSTATUS schan_handshake( void *args )
     init_schan_buffers(&t->in, params->input);
     t->in.limit = params->input_size;
     init_schan_buffers(&t->out, params->output);
+
+    if (params->control_token)
+    {
+        status = send_alert(s, params->alert_type, params->alert_number);
+        goto done;
+    }
 
     while (1)
     {
@@ -565,6 +693,7 @@ static NTSTATUS schan_handshake( void *args )
         break;
     }
 
+done:
     *params->input_offset = t->in.offset;
     *params->output_buffer_idx = t->out.current_buffer_idx;
     *params->output_offset = t->out.offset;
@@ -695,6 +824,211 @@ static NTSTATUS schan_get_connection_info( void *args )
     info->aiExch = get_kx_algid(kx);
     /* FIXME: info->dwExchStrength? */
     info->dwExchStrength = 0;
+    return SEC_E_OK;
+}
+
+static DWORD get_protocol_version( gnutls_session_t session )
+{
+    gnutls_protocol_t proto = pgnutls_protocol_get_version( session );
+
+    switch (proto)
+    {
+    case GNUTLS_SSL3:    return 0x300;
+    case GNUTLS_TLS1_0:  return 0x301;
+    case GNUTLS_TLS1_1:  return 0x302;
+    case GNUTLS_TLS1_2:  return 0x303;
+    case GNUTLS_DTLS1_0: return 0x201;
+    case GNUTLS_DTLS1_2: return 0x202;
+    default:
+        FIXME( "unknown protocol %u\n", proto );
+        return 0;
+    }
+}
+
+static const WCHAR *get_cipher_str( gnutls_session_t session )
+{
+    static const WCHAR aesW[] = {'A','E','S',0};
+    static const WCHAR unknownW[] = {'<','u','n','k','n','o','w','n','>',0};
+    gnutls_cipher_algorithm_t cipher = pgnutls_cipher_get( session );
+
+    switch (cipher)
+    {
+    case GNUTLS_CIPHER_AES_128_CBC:
+    case GNUTLS_CIPHER_AES_192_CBC:
+    case GNUTLS_CIPHER_AES_256_CBC:
+    case GNUTLS_CIPHER_AES_128_GCM:
+    case GNUTLS_CIPHER_AES_256_GCM:
+    case GNUTLS_CIPHER_AES_128_CCM:
+    case GNUTLS_CIPHER_AES_256_CCM:
+        return aesW;
+    default:
+        FIXME( "unknown cipher %u\n", cipher );
+        return unknownW;
+    }
+}
+
+static DWORD get_cipher_len( gnutls_session_t session )
+{
+    gnutls_cipher_algorithm_t cipher = pgnutls_cipher_get( session );
+
+    switch (cipher)
+    {
+    case GNUTLS_CIPHER_AES_128_CBC:
+    case GNUTLS_CIPHER_AES_128_GCM:
+    case GNUTLS_CIPHER_AES_128_CCM:
+        return 128;
+    case GNUTLS_CIPHER_AES_192_CBC:
+        return 192;
+    case GNUTLS_CIPHER_AES_256_CBC:
+    case GNUTLS_CIPHER_AES_256_GCM:
+    case GNUTLS_CIPHER_AES_256_CCM:
+        return 256;
+    default:
+        FIXME( "unknown cipher %u\n", cipher );
+        return 0;
+    }
+}
+
+static DWORD get_cipher_block_len( gnutls_session_t session )
+{
+    gnutls_cipher_algorithm_t cipher = pgnutls_cipher_get( session );
+    return pgnutls_cipher_get_block_size( cipher );
+}
+
+static const WCHAR *get_hash_str( gnutls_session_t session, BOOL full )
+{
+    static const WCHAR shaW[] = {'S','H','A',0};
+    static const WCHAR sha1W[] = {'S','H','A','1',0};
+    static const WCHAR sha224W[] = {'S','H','A','2','2','4',0};
+    static const WCHAR sha256W[] = {'S','H','A','2','5','6',0};
+    static const WCHAR sha384W[] = {'S','H','A','3','8','4',0};
+    static const WCHAR sha512W[] = {'S','H','A','5','1','2',0};
+    static const WCHAR unknownW[] = {'<','u','n','k','n','o','w','n','>',0};
+    gnutls_mac_algorithm_t mac = pgnutls_mac_get( session );
+
+    switch (mac)
+    {
+    case GNUTLS_MAC_SHA1:   return full ? sha1W : shaW;
+    case GNUTLS_MAC_SHA224: return sha224W;
+    case GNUTLS_MAC_SHA256: return sha256W;
+    case GNUTLS_MAC_SHA384: return sha384W;
+    case GNUTLS_MAC_SHA512: return sha512W;
+    default:
+        FIXME( "unknown mac %u\n", mac );
+        return unknownW;
+    }
+}
+
+static DWORD get_hash_len( gnutls_session_t session )
+{
+    gnutls_mac_algorithm_t mac = pgnutls_mac_get( session );
+    return pgnutls_mac_get_key_size( mac ) * 8;
+}
+
+static const WCHAR *get_exchange_str( gnutls_session_t session, BOOL full )
+{
+    static const WCHAR ecdhW[] = {'E','C','D','H',0};
+    static const WCHAR ecdheW[] = {'E','C','D','H','E',0};
+    static const WCHAR unknownW[] = {'<','u','n','k','n','o','w','n','>',0};
+    gnutls_kx_algorithm_t kx = pgnutls_kx_get( session );
+
+    switch (kx)
+    {
+    case GNUTLS_KX_ECDHE_RSA:
+    case GNUTLS_KX_ECDHE_ECDSA:
+        return full ? ecdheW : ecdhW;
+    default:
+        FIXME( "unknown kx %u\n", kx );
+        return unknownW;
+    }
+}
+
+static const WCHAR *get_certificate_str( gnutls_session_t session )
+{
+    static const WCHAR rsaW[] = {'R','S','A',0};
+    static const WCHAR ecdsaW[] = {'E','C','D','S','A',0};
+    static const WCHAR unknownW[] = {'<','u','n','k','n','o','w','n','>',0};
+    gnutls_kx_algorithm_t kx = pgnutls_kx_get( session );
+
+    switch (kx)
+    {
+    case GNUTLS_KX_RSA:
+    case GNUTLS_KX_RSA_EXPORT:
+    case GNUTLS_KX_DHE_RSA:
+    case GNUTLS_KX_ECDHE_RSA:   return rsaW;
+    case GNUTLS_KX_ECDHE_ECDSA: return ecdsaW;
+    default:
+        FIXME( "unknown kx %u\n", kx );
+        return unknownW;
+    }
+}
+
+static const WCHAR *get_chaining_mode_str( gnutls_session_t session )
+{
+    static const WCHAR cbcW[] = {'C','B','C',0};
+    static const WCHAR ccmW[] = {'C','C','M',0};
+    static const WCHAR gcmW[] = {'G','C','M',0};
+    static const WCHAR unknownW[] = {'<','u','n','k','n','o','w','n','>',0};
+    gnutls_cipher_algorithm_t cipher = pgnutls_cipher_get( session );
+
+    switch (cipher)
+    {
+    case GNUTLS_CIPHER_AES_128_CBC:
+    case GNUTLS_CIPHER_AES_192_CBC:
+    case GNUTLS_CIPHER_AES_256_CBC:
+        return cbcW;
+    case GNUTLS_CIPHER_AES_128_GCM:
+    case GNUTLS_CIPHER_AES_256_GCM:
+        return gcmW;
+    case GNUTLS_CIPHER_AES_128_CCM:
+    case GNUTLS_CIPHER_AES_256_CCM:
+        return ccmW;
+    default:
+        FIXME( "unknown cipher %u\n", cipher );
+        return unknownW;
+    }
+}
+
+static NTSTATUS schan_get_cipher_info( void *args )
+{
+    const WCHAR tlsW[] = {'T','L','S','_',0};
+    const WCHAR underscoreW[] = {'_',0};
+    const WCHAR widthW[] = {'_','W','I','T','H','_',0};
+    const struct get_cipher_info_params *params = args;
+    gnutls_session_t session = session_from_handle( params->session );
+    SecPkgContext_CipherInfo *info = params->info;
+    char buf[11];
+    WCHAR *ptr;
+    int len;
+
+    info->dwProtocol = get_protocol_version( session );
+    info->dwCipherSuite = 0; /* FIXME */
+    info->dwBaseCipherSuite = 0; /* FIXME */
+    wcscpy( info->szCipher, get_cipher_str( session ) );
+    info->dwCipherLen = get_cipher_len( session );
+    info->dwCipherBlockLen = get_cipher_block_len( session );
+    wcscpy( info->szHash, get_hash_str( session, TRUE ) );
+    info->dwHashLen = get_hash_len( session );
+    wcscpy( info->szExchange, get_exchange_str( session, FALSE ) );
+    info->dwMinExchangeLen = 0;
+    info->dwMaxExchangeLen = 65536;
+    wcscpy( info->szCertificate, get_certificate_str( session ) );
+    info->dwKeyType = 0; /* FIXME */
+
+    wcscpy( info->szCipherSuite, tlsW );
+    wcscat( info->szCipherSuite, get_exchange_str( session, TRUE ) );
+    wcscat( info->szCipherSuite, underscoreW );
+    wcscat( info->szCipherSuite, info->szCertificate );
+    wcscat( info->szCipherSuite, widthW );
+    wcscat( info->szCipherSuite, info->szCipher );
+    wcscat( info->szCipherSuite, underscoreW );
+    len = snprintf( buf, sizeof(buf), "%u", (unsigned int)info->dwCipherLen ) + 1;
+    ptr = info->szCipherSuite + wcslen( info->szCipherSuite );
+    ntdll_umbstowcs( buf, len, ptr, len );
+    wcscat( info->szCipherSuite, underscoreW );
+    wcscat( info->szCipherSuite, get_chaining_mode_str( session ) );
+    wcscat( info->szCipherSuite, underscoreW );
+    wcscat( info->szCipherSuite, get_hash_str( session, FALSE ) );
     return SEC_E_OK;
 }
 
@@ -1124,12 +1458,11 @@ static void gnutls_log(int level, const char *msg)
 
 static NTSTATUS process_attach( void *args )
 {
-    const char *env_str;
     int ret;
 
-    if ((env_str = getenv("GNUTLS_SYSTEM_PRIORITY_FILE")))
+    if ((system_priority_file = getenv("GNUTLS_SYSTEM_PRIORITY_FILE")))
     {
-        WARN("GNUTLS_SYSTEM_PRIORITY_FILE is %s.\n", debugstr_a(env_str));
+        TRACE("GNUTLS_SYSTEM_PRIORITY_FILE is %s.\n", debugstr_a(system_priority_file));
     }
     else
     {
@@ -1137,18 +1470,6 @@ static NTSTATUS process_attach( void *args )
         setenv("GNUTLS_SYSTEM_PRIORITY_FILE", "/dev/null", 0);
     }
 
-if (1) { /* CROSSOVER HACK - bug 10151 */
-    const char *libgnutls_name_candidates[] = {SONAME_LIBGNUTLS,
-                                               "libgnutls.so.30",
-                                               "libgnutls.so.28",
-                                               "libgnutls-deb0.so.28",
-                                               "libgnutls.so.26",
-                                               NULL};
-    int i;
-    for (i=0; libgnutls_name_candidates[i] && !libgnutls_handle; i++)
-        libgnutls_handle = dlopen(libgnutls_name_candidates[i], RTLD_NOW);
-}
-else
     libgnutls_handle = dlopen(SONAME_LIBGNUTLS, RTLD_NOW);
     if (!libgnutls_handle)
     {
@@ -1165,6 +1486,7 @@ else
 
     LOAD_FUNCPTR(gnutls_alert_get)
     LOAD_FUNCPTR(gnutls_alert_get_name)
+    LOAD_FUNCPTR(gnutls_alert_send)
     LOAD_FUNCPTR(gnutls_certificate_allocate_credentials)
     LOAD_FUNCPTR(gnutls_certificate_free_credentials)
     LOAD_FUNCPTR(gnutls_certificate_get_peers)
@@ -1192,6 +1514,7 @@ else
     LOAD_FUNCPTR(gnutls_record_send);
     LOAD_FUNCPTR(gnutls_server_name_set)
     LOAD_FUNCPTR(gnutls_session_channel_binding)
+    LOAD_FUNCPTR(gnutls_set_default_priority)
     LOAD_FUNCPTR(gnutls_transport_get_ptr)
     LOAD_FUNCPTR(gnutls_transport_set_errno)
     LOAD_FUNCPTR(gnutls_transport_set_ptr)
@@ -1257,7 +1580,8 @@ else
         pgnutls_global_set_log_function(gnutls_log);
     }
 
-    check_supported_protocols();
+    check_supported_protocols(client_protocol_priority_flags, ARRAYSIZE(client_protocol_priority_flags), FALSE);
+    check_supported_protocols(server_protocol_priority_flags, ARRAYSIZE(server_protocol_priority_flags), TRUE);
     return STATUS_SUCCESS;
 
 fail:
@@ -1283,6 +1607,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     schan_dispose_session,
     schan_free_certificate_credentials,
     schan_get_application_protocol,
+    schan_get_cipher_info,
     schan_get_connection_info,
     schan_get_enabled_protocols,
     schan_get_key_signature_algorithm,
@@ -1398,6 +1723,21 @@ static NTSTATUS wow64_schan_get_connection_info( void *args )
     return schan_get_connection_info(&params);
 }
 
+static NTSTATUS wow64_schan_get_cipher_info( void *args )
+{
+    struct
+    {
+        schan_session session;
+        PTR32 info;
+    } const *params32 = args;
+    struct get_cipher_info_params params =
+    {
+        params32->session,
+        ULongToPtr(params32->info),
+    };
+    return schan_get_cipher_info(&params);
+}
+
 static NTSTATUS wow64_schan_get_session_peer_certificate( void *args )
 {
     struct
@@ -1465,6 +1805,9 @@ static NTSTATUS wow64_schan_handshake( void *args )
         PTR32 input_offset;
         PTR32 output_buffer_idx;
         PTR32 output_offset;
+        enum control_token control_token;
+        unsigned int alert_type;
+        unsigned int alert_number;
     } const *params32 = args;
     struct handshake_params params =
     {
@@ -1475,6 +1818,9 @@ static NTSTATUS wow64_schan_handshake( void *args )
         ULongToPtr(params32->input_offset),
         ULongToPtr(params32->output_buffer_idx),
         ULongToPtr(params32->output_offset),
+        params32->control_token,
+        params32->alert_type,
+        params32->alert_number,
     };
     if (params32->input)
     {
@@ -1594,6 +1940,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     schan_dispose_session,
     wow64_schan_free_certificate_credentials,
     wow64_schan_get_application_protocol,
+    wow64_schan_get_cipher_info,
     wow64_schan_get_connection_info,
     schan_get_enabled_protocols,
     schan_get_key_signature_algorithm,

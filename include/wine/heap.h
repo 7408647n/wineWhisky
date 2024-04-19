@@ -25,12 +25,12 @@
 #include <winbase.h>
 #include <wine/winheader_enter.h>
 
-static inline void * __WINE_ALLOC_SIZE(1) heap_alloc(SIZE_T len)
+static inline void * __WINE_ALLOC_SIZE(1) __WINE_MALLOC heap_alloc(SIZE_T len)
 {
     return HeapAlloc(GetProcessHeap(), 0, len);
 }
 
-static inline void * __WINE_ALLOC_SIZE(1) heap_alloc_zero(SIZE_T len)
+static inline void * __WINE_ALLOC_SIZE(1) __WINE_MALLOC heap_alloc_zero(SIZE_T len)
 {
     return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, len);
 }
@@ -47,7 +47,7 @@ static inline void heap_free(void *mem)
     HeapFree(GetProcessHeap(), 0, mem);
 }
 
-static inline void *heap_calloc(SIZE_T count, SIZE_T size)
+static inline void * __WINE_ALLOC_SIZE(1,2) __WINE_MALLOC heap_calloc(SIZE_T count, SIZE_T size)
 {
     SIZE_T len = count * size;
 

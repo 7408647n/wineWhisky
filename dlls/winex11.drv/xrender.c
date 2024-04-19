@@ -23,6 +23,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#if 0
+#pragma makedep unix
+#endif
+
 #include "config.h"
 
 #include <assert.h>
@@ -35,7 +39,6 @@
 #include "winbase.h"
 #include "x11drv.h"
 #include "winternl.h"
-#include "wine/unicode.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xrender);
@@ -362,8 +365,7 @@ const struct gdi_dc_funcs *X11DRV_XRender_Init(void)
         return NULL;
     }
 
-    glyphsetCache = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                              sizeof(*glyphsetCache) * INIT_CACHE_SIZE);
+    glyphsetCache = calloc( sizeof(*glyphsetCache), INIT_CACHE_SIZE );
 
     glyphsetCacheSize = INIT_CACHE_SIZE;
     lastfree = 0;
@@ -471,7 +473,7 @@ static void update_xrender_clipping( struct xrender_physdev *dev, HRGN rgn )
         pXRenderSetPictureClipRectangles( gdi_display, dev->pict,
                                           dev->x11dev->dc_rect.left, dev->x11dev->dc_rect.top,
                                           (XRectangle *)data->Buffer, data->rdh.nCount );
-        HeapFree( GetProcessHeap(), 0, data );
+        free( data );
     }
 }
 
@@ -584,7 +586,7 @@ static BOOL fontcmp(LFANDSIZE *p1, LFANDSIZE *p2)
   if(memcmp(&p1->devsize, &p2->devsize, sizeof(p1->devsize))) return TRUE;
   if(memcmp(&p1->xform, &p2->xform, sizeof(p1->xform))) return TRUE;
   if(memcmp(&p1->lf, &p2->lf, offsetof(LOGFONTW, lfFaceName))) return TRUE;
-  return strcmpiW(p1->lf.lfFaceName, p2->lf.lfFaceName);
+  return wcsicmp( p1->lf.lfFaceName, p2->lf.lfFaceName );
 }
 
 static int LookupEntry(LFANDSIZE *plfsz)
@@ -630,14 +632,14 @@ static void FreeEntry(int entry)
                 formatEntry->glyphset = 0;
             }
             if(formatEntry->nrealized) {
-                HeapFree(GetProcessHeap(), 0, formatEntry->realized);
+                free( formatEntry->realized );
                 formatEntry->realized = NULL;
-                HeapFree(GetProcessHeap(), 0, formatEntry->gis);
+                free( formatEntry->gis );
                 formatEntry->gis = NULL;
                 formatEntry->nrealized = 0;
             }
 
-            HeapFree(GetProcessHeap(), 0, formatEntry);
+            free( formatEntry );
             glyphsetCache[entry].format[type][format] = NULL;
         }
     }
@@ -684,18 +686,12 @@ static int AllocEntry(void)
 
   TRACE("Growing cache\n");
   
-  if (glyphsetCache)
-    glyphsetCache = HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-			      glyphsetCache,
-			      (glyphsetCacheSize + INIT_CACHE_SIZE)
-			      * sizeof(*glyphsetCache));
-  else
-    glyphsetCache = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-			      (glyphsetCacheSize + INIT_CACHE_SIZE)
-			      * sizeof(*glyphsetCache));
+  glyphsetCache = realloc( glyphsetCache,
+                           (glyphsetCacheSize + INIT_CACHE_SIZE) * sizeof(*glyphsetCache) );
 
-  for(best = i = glyphsetCacheSize; i < glyphsetCacheSize + INIT_CACHE_SIZE;
-      i++) {
+  for (best = i = glyphsetCacheSize; i < glyphsetCacheSize + INIT_CACHE_SIZE; i++)
+  {
+    memset( &glyphsetCache[i], 0, sizeof(glyphsetCache[i]) );
     glyphsetCache[i].next = i + 1;
     glyphsetCache[i].count = -1;
   }
@@ -747,9 +743,9 @@ static void lfsz_calc_hash(LFANDSIZE *plfsz)
     two_chars = *ptr;
     pwc = (WCHAR *)&two_chars;
     if(!*pwc) break;
-    *pwc = toupperW(*pwc);
+    *pwc = RtlUpcaseUnicodeChar( *pwc );
     pwc++;
-    *pwc = toupperW(*pwc);
+    *pwc = RtlUpcaseUnicodeChar( *pwc );
     hash ^= two_chars;
     if(!*pwc) break;
   }
@@ -781,7 +777,7 @@ static AA_Type aa_type_from_flags( UINT aa_flags )
 
 static UINT get_xft_aa_flags( const LOGFONTW *lf )
 {
-    char *value;
+    char *value, *p;
     UINT ret = 0;
 
     switch (lf->lfQuality)
@@ -792,8 +788,8 @@ static UINT get_xft_aa_flags( const LOGFONTW *lf )
     default:
         if (!(value = XGetDefault( gdi_display, "Xft", "antialias" ))) break;
         TRACE( "got antialias '%s'\n", value );
-        if (tolower(value[0]) == 'f' || tolower(value[0]) == 'n' ||
-            value[0] == '0' || !_strnicmp( value, "off", -1 ))
+        for (p = value; *p; p++) if ('A' <= *p && *p <= 'Z') *p += 'a' - 'A'; /* to lower */
+        if (value[0] == 'f' || value[0] == 'n' || value[0] == '0' || !strcmp( value, "off" ))
         {
             ret = GGO_BITMAP;
             break;
@@ -817,7 +813,7 @@ static UINT get_xft_aa_flags( const LOGFONTW *lf )
 /**********************************************************************
  *	     xrenderdrv_SelectFont
  */
-static HFONT CDECL xrenderdrv_SelectFont( PHYSDEV dev, HFONT hfont, UINT *aa_flags )
+static HFONT xrenderdrv_SelectFont( PHYSDEV dev, HFONT hfont, UINT *aa_flags )
 {
     LFANDSIZE lfsz;
     struct xrender_physdev *physdev = get_xrender_dev( dev );
@@ -847,7 +843,7 @@ static HFONT CDECL xrenderdrv_SelectFont( PHYSDEV dev, HFONT hfont, UINT *aa_fla
     }
 
     TRACE("h=%d w=%d weight=%d it=%d charset=%d name=%s\n",
-          lfsz.lf.lfHeight, lfsz.lf.lfWidth, lfsz.lf.lfWeight,
+          (int)lfsz.lf.lfHeight, (int)lfsz.lf.lfWidth, (int)lfsz.lf.lfWeight,
           lfsz.lf.lfItalic, lfsz.lf.lfCharSet, debugstr_w(lfsz.lf.lfFaceName));
     lfsz.lf.lfWidth = abs( lfsz.lf.lfWidth );
     lfsz.devsize.cx = X11DRV_XWStoDS( dev->hdc, lfsz.lf.lfWidth );
@@ -891,7 +887,7 @@ static void set_physdev_format( struct xrender_physdev *physdev, enum wxr_format
 static BOOL create_xrender_dc( PHYSDEV *pdev, enum wxr_format format )
 {
     X11DRV_PDEVICE *x11dev = get_x11drv_dev( *pdev );
-    struct xrender_physdev *physdev = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*physdev) );
+    struct xrender_physdev *physdev = calloc( 1, sizeof(*physdev) );
 
     if (!physdev) return FALSE;
     physdev->x11dev = x11dev;
@@ -933,8 +929,7 @@ static void set_color_info( XRenderPictFormat *format, BITMAPINFO *info )
 /**********************************************************************
  *	     xrenderdrv_CreateDC
  */
-static BOOL CDECL xrenderdrv_CreateDC( PHYSDEV *pdev, LPCWSTR device, LPCWSTR output,
-                                       const DEVMODEW* initData )
+static BOOL xrenderdrv_CreateDC( PHYSDEV *pdev, LPCWSTR device, LPCWSTR output, const DEVMODEW* initData )
 {
     return create_xrender_dc( pdev, default_format );
 }
@@ -942,7 +937,7 @@ static BOOL CDECL xrenderdrv_CreateDC( PHYSDEV *pdev, LPCWSTR device, LPCWSTR ou
 /**********************************************************************
  *	     xrenderdrv_CreateCompatibleDC
  */
-static BOOL CDECL xrenderdrv_CreateCompatibleDC( PHYSDEV orig, PHYSDEV *pdev )
+static BOOL xrenderdrv_CreateCompatibleDC( PHYSDEV orig, PHYSDEV *pdev )
 {
     if (orig)  /* chain to x11drv first */
     {
@@ -957,7 +952,7 @@ static BOOL CDECL xrenderdrv_CreateCompatibleDC( PHYSDEV orig, PHYSDEV *pdev )
 /**********************************************************************
  *	     xrenderdrv_DeleteDC
  */
-static BOOL CDECL xrenderdrv_DeleteDC( PHYSDEV dev )
+static BOOL xrenderdrv_DeleteDC( PHYSDEV dev )
 {
     struct xrender_physdev *physdev = get_xrender_dev( dev );
 
@@ -967,15 +962,15 @@ static BOOL CDECL xrenderdrv_DeleteDC( PHYSDEV dev )
     if (physdev->cache_index != -1) dec_ref_cache( physdev->cache_index );
     pthread_mutex_unlock( &xrender_mutex );
 
-    HeapFree( GetProcessHeap(), 0, physdev );
+    free( physdev );
     return TRUE;
 }
 
 /**********************************************************************
  *           xrenderdrv_ExtEscape
  */
-static INT CDECL xrenderdrv_ExtEscape( PHYSDEV dev, INT escape, INT in_count, LPCVOID in_data,
-                                       INT out_count, LPVOID out_data )
+static INT xrenderdrv_ExtEscape( PHYSDEV dev, INT escape, INT in_count, LPCVOID in_data,
+                                 INT out_count, LPVOID out_data )
 {
     struct xrender_physdev *physdev = get_xrender_dev( dev );
 
@@ -1000,7 +995,7 @@ static INT CDECL xrenderdrv_ExtEscape( PHYSDEV dev, INT escape, INT in_count, LP
 /***********************************************************************
  *           xrenderdrv_SetDeviceClipping
  */
-static void CDECL xrenderdrv_SetDeviceClipping( PHYSDEV dev, HRGN rgn )
+static void xrenderdrv_SetDeviceClipping( PHYSDEV dev, HRGN rgn )
 {
     struct xrender_physdev *physdev = get_xrender_dev( dev );
 
@@ -1061,34 +1056,22 @@ static void UploadGlyph(struct xrender_physdev *physDev, UINT glyph, enum glyph_
 
     /* If there is nothing for the current type, we create the entry. */
     if( !entry->format[type][format] ) {
-        entry->format[type][format] = HeapAlloc(GetProcessHeap(),
-                                          HEAP_ZERO_MEMORY,
-                                          sizeof(gsCacheEntryFormat));
+        entry->format[type][format] = calloc( 1, sizeof(gsCacheEntryFormat) );
     }
     formatEntry = entry->format[type][format];
 
     if(formatEntry->nrealized <= glyph) {
-        formatEntry->nrealized = (glyph / 128 + 1) * 128;
+        size_t new_size = (glyph / 128 + 1) * 128;
 
-	if (formatEntry->realized)
-	    formatEntry->realized = HeapReAlloc(GetProcessHeap(),
-				      HEAP_ZERO_MEMORY,
-				      formatEntry->realized,
-				      formatEntry->nrealized * sizeof(BOOL));
-	else
-	    formatEntry->realized = HeapAlloc(GetProcessHeap(),
-				      HEAP_ZERO_MEMORY,
-				      formatEntry->nrealized * sizeof(BOOL));
+        formatEntry->realized = realloc( formatEntry->realized, new_size * sizeof(BOOL) );
+        memset( formatEntry->realized + formatEntry->nrealized, 0,
+                (new_size - formatEntry->nrealized) * sizeof(BOOL) );
 
-        if (formatEntry->gis)
-	    formatEntry->gis = HeapReAlloc(GetProcessHeap(),
-				   HEAP_ZERO_MEMORY,
-				   formatEntry->gis,
-				   formatEntry->nrealized * sizeof(formatEntry->gis[0]));
-        else
-	    formatEntry->gis = HeapAlloc(GetProcessHeap(),
-				   HEAP_ZERO_MEMORY,
-                                   formatEntry->nrealized * sizeof(formatEntry->gis[0]));
+        formatEntry->gis = realloc( formatEntry->gis, new_size * sizeof(formatEntry->gis[0]) );
+        memset( formatEntry->gis + formatEntry->nrealized, 0,
+                (new_size - formatEntry->nrealized) * sizeof(formatEntry->gis[0]) );
+
+        formatEntry->nrealized = new_size;
     }
 
 
@@ -1118,7 +1101,7 @@ static void UploadGlyph(struct xrender_physdev *physDev, UINT glyph, enum glyph_
     }
 
 
-    buf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, buflen);
+    buf = calloc( 1, buflen );
     if (buflen)
         NtGdiGetGlyphOutline( physDev->dev.hdc, glyph, ggo_format, &gm, buflen, buf, &identity, FALSE );
     else
@@ -1128,7 +1111,7 @@ static void UploadGlyph(struct xrender_physdev *physDev, UINT glyph, enum glyph_
     TRACE("buflen = %d. Got metrics: %dx%d adv=%d,%d origin=%d,%d\n",
 	  buflen,
 	  gm.gmBlackBoxX, gm.gmBlackBoxY, gm.gmCellIncX, gm.gmCellIncY,
-	  gm.gmptGlyphOrigin.x, gm.gmptGlyphOrigin.y);
+	  (int)gm.gmptGlyphOrigin.x, (int)gm.gmptGlyphOrigin.y);
 
     gi.width = gm.gmBlackBoxX;
     gi.height = gm.gmBlackBoxY;
@@ -1209,7 +1192,7 @@ static void UploadGlyph(struct xrender_physdev *physDev, UINT glyph, enum glyph_
                           buflen ? buf : zero, buflen ? buflen : sizeof(zero));
     }
 
-    HeapFree(GetProcessHeap(), 0, buf);
+    free( buf );
     formatEntry->gis[glyph] = gi;
 }
 
@@ -1300,8 +1283,8 @@ static Picture get_mask_pict( int alpha )
 /***********************************************************************
  *           xrenderdrv_ExtTextOut
  */
-static BOOL CDECL xrenderdrv_ExtTextOut( PHYSDEV dev, INT x, INT y, UINT flags,
-                                         const RECT *lprect, LPCWSTR wstr, UINT count, const INT *lpDx )
+static BOOL xrenderdrv_ExtTextOut( PHYSDEV dev, INT x, INT y, UINT flags,
+                                   const RECT *lprect, LPCWSTR wstr, UINT count, const INT *lpDx )
 {
     struct xrender_physdev *physdev = get_xrender_dev( dev );
     gsCacheEntry *entry;
@@ -1367,9 +1350,9 @@ static BOOL CDECL xrenderdrv_ExtTextOut( PHYSDEV dev, INT x, INT y, UINT flags,
     }
 
     TRACE("Writing %s at %d,%d\n", debugstr_wn(wstr,count),
-          physdev->x11dev->dc_rect.left + x, physdev->x11dev->dc_rect.top + y);
+          (int)(physdev->x11dev->dc_rect.left + x), (int)(physdev->x11dev->dc_rect.top + y));
 
-    elts = HeapAlloc(GetProcessHeap(), 0, sizeof(XGlyphElt16) * count);
+    elts = malloc( sizeof(XGlyphElt16) * count );
 
     /* There's a bug in XRenderCompositeText that ignores the xDst and yDst parameters.
        So we pass zeros to the function and move to our starting position using the first
@@ -1431,7 +1414,7 @@ static BOOL CDECL xrenderdrv_ExtTextOut( PHYSDEV dev, INT x, INT y, UINT flags,
                             pict,
                             formatEntry->font_format,
                             0, 0, 0, 0, elts, count);
-    HeapFree(GetProcessHeap(), 0, elts);
+    free( elts );
 
     pthread_mutex_unlock( &xrender_mutex );
     add_device_bounds( physdev->x11dev, &bounds );
@@ -1701,7 +1684,7 @@ static void xrender_put_image( Pixmap src_pixmap, Picture src_pict, Picture mask
         if (clip_data)
             pXRenderSetPictureClipRectangles( gdi_display, dst_pict, 0, 0,
                                               (XRectangle *)clip_data->Buffer, clip_data->rdh.nCount );
-        HeapFree( GetProcessHeap(), 0, clip_data );
+        free( clip_data );
     }
     else
     {
@@ -1727,8 +1710,8 @@ static void xrender_put_image( Pixmap src_pixmap, Picture src_pict, Picture mask
 /***********************************************************************
  *           xrenderdrv_StretchBlt
  */
-static BOOL CDECL xrenderdrv_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
-                                         PHYSDEV src_dev, struct bitblt_coords *src, DWORD rop )
+static BOOL xrenderdrv_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
+                                   PHYSDEV src_dev, struct bitblt_coords *src, DWORD rop )
 {
     struct xrender_physdev *physdev_dst = get_xrender_dev( dst_dev );
     struct xrender_physdev *physdev_src = get_xrender_dev( src_dev );
@@ -1784,9 +1767,9 @@ x11drv_fallback:
 /***********************************************************************
  *           xrenderdrv_PutImage
  */
-static DWORD CDECL xrenderdrv_PutImage( PHYSDEV dev, HRGN clip, BITMAPINFO *info,
-                                        const struct gdi_image_bits *bits, struct bitblt_coords *src,
-                                        struct bitblt_coords *dst, DWORD rop )
+static DWORD xrenderdrv_PutImage( PHYSDEV dev, HRGN clip, BITMAPINFO *info,
+                                  const struct gdi_image_bits *bits, struct bitblt_coords *src,
+                                  struct bitblt_coords *dst, DWORD rop )
 {
     struct xrender_physdev *physdev = get_xrender_dev( dev );
     DWORD ret;
@@ -1869,9 +1852,9 @@ x11drv_fallback:
 /***********************************************************************
  *           xrenderdrv_BlendImage
  */
-static DWORD CDECL xrenderdrv_BlendImage( PHYSDEV dev, BITMAPINFO *info, const struct gdi_image_bits *bits,
-                                          struct bitblt_coords *src, struct bitblt_coords *dst,
-                                          BLENDFUNCTION func )
+static DWORD xrenderdrv_BlendImage( PHYSDEV dev, BITMAPINFO *info, const struct gdi_image_bits *bits,
+                                    struct bitblt_coords *src, struct bitblt_coords *dst,
+                                    BLENDFUNCTION func )
 {
     struct xrender_physdev *physdev = get_xrender_dev( dev );
     DWORD ret;
@@ -1939,8 +1922,8 @@ update_format:
 /***********************************************************************
  *           xrenderdrv_AlphaBlend
  */
-static BOOL CDECL xrenderdrv_AlphaBlend( PHYSDEV dst_dev, struct bitblt_coords *dst,
-                                         PHYSDEV src_dev, struct bitblt_coords *src, BLENDFUNCTION blendfn )
+static BOOL xrenderdrv_AlphaBlend( PHYSDEV dst_dev, struct bitblt_coords *dst,
+                                   PHYSDEV src_dev, struct bitblt_coords *src, BLENDFUNCTION blendfn )
 {
     struct xrender_physdev *physdev_dst = get_xrender_dev( dst_dev );
     struct xrender_physdev *physdev_src = get_xrender_dev( src_dev );
@@ -1957,7 +1940,7 @@ static BOOL CDECL xrenderdrv_AlphaBlend( PHYSDEV dst_dev, struct bitblt_coords *
 
     if ((blendfn.AlphaFormat & AC_SRC_ALPHA) && physdev_src->format != WXR_FORMAT_A8R8G8B8)
     {
-        SetLastError( ERROR_INVALID_PARAMETER );
+        RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
         return FALSE;
     }
 
@@ -2023,8 +2006,8 @@ static BOOL CDECL xrenderdrv_AlphaBlend( PHYSDEV dst_dev, struct bitblt_coords *
 /***********************************************************************
  *           xrenderdrv_GradientFill
  */
-static BOOL CDECL xrenderdrv_GradientFill( PHYSDEV dev, TRIVERTEX *vert_array, ULONG nvert,
-                                           void * grad_array, ULONG ngrad, ULONG mode )
+static BOOL xrenderdrv_GradientFill( PHYSDEV dev, TRIVERTEX *vert_array, ULONG nvert,
+                                     void *grad_array, ULONG ngrad, ULONG mode )
 {
 #ifdef HAVE_XRENDERCREATELINEARGRADIENT
     static const XFixed stops[2] = { 0, 1 << 16 };
@@ -2100,7 +2083,7 @@ static BOOL CDECL xrenderdrv_GradientFill( PHYSDEV dev, TRIVERTEX *vert_array, U
             rc.bottom = max( pt[0].y, pt[1].y );
 
             TRACE( "%u gradient %s colors %04x,%04x,%04x,%04x -> %04x,%04x,%04x,%04x\n",
-                   mode, wine_dbgstr_rect( &rc ),
+                   (int)mode, wine_dbgstr_rect( &rc ),
                    colors[0].red, colors[0].green, colors[0].blue, colors[0].alpha,
                    colors[1].red, colors[1].green, colors[1].blue, colors[1].alpha );
 
@@ -2127,7 +2110,7 @@ fallback:
 /***********************************************************************
  *           xrenderdrv_SelectBrush
  */
-static HBRUSH CDECL xrenderdrv_SelectBrush( PHYSDEV dev, HBRUSH hbrush, const struct brush_pattern *pattern )
+static HBRUSH xrenderdrv_SelectBrush( PHYSDEV dev, HBRUSH hbrush, const struct brush_pattern *pattern )
 {
     struct xrender_physdev *physdev = get_xrender_dev( dev );
     Pixmap pixmap;
@@ -2251,8 +2234,6 @@ static const struct gdi_dc_funcs xrender_funcs =
     NULL,                               /* pStrokeAndFillPath */
     NULL,                               /* pStrokePath */
     NULL,                               /* pUnrealizePalette */
-    NULL,                               /* pD3DKMTCheckVidPnExclusiveOwnership */
-    NULL,                               /* pD3DKMTSetVidPnSourceOwner */
     GDI_PRIORITY_GRAPHICS_DRV + 10      /* priority */
 };
 

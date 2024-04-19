@@ -33,6 +33,7 @@
 #include <rpc.h>
 #include <rpcdce.h>
 #include <secext.h>
+#include <wincrypt.h>
 
 #include "wine/test.h"
 
@@ -819,8 +820,11 @@ static void testAuth(ULONG data_rep, BOOL fake)
     BOOL                    first = TRUE;
     SspiData                client = {{0}}, server = {{0}};
     SEC_WINNT_AUTH_IDENTITY_A id;
-    SecPkgContext_Sizes     ctxt_sizes;
+    SecPkgContext_Sizes sizes;
+    SecPkgContext_StreamSizes stream_sizes;
     SecPkgContext_NegotiationInfoA info;
+    SecPkgContext_KeyInfoA key;
+    SecPkgContext_SessionKey session_key;
     SecPkgInfoA *pi;
 
     if(pQuerySecurityPackageInfoA( sec_pkg_name, &pkg_info)!= SEC_E_OK)
@@ -895,24 +899,44 @@ static void testAuth(ULONG data_rep, BOOL fake)
         goto tAuthend;
     }
 
-    sec_status = pQueryContextAttributesA(&client.ctxt,
-            SECPKG_ATTR_SIZES, &ctxt_sizes);
+    sec_status = pQueryContextAttributesA(&client.ctxt, SECPKG_ATTR_SIZES, &sizes);
+    ok(sec_status == SEC_E_OK, "pQueryContextAttributesA(SECPKG_ATTR_SIZES) returned %s\n", getSecError(sec_status));
+    ok((sizes.cbMaxToken == 1904) || (sizes.cbMaxToken == 2888), "cbMaxToken should be 1904 or 2888 but is %lu\n",
+       sizes.cbMaxToken);
+    ok(sizes.cbMaxSignature == 16, "cbMaxSignature should be 16 but is %lu\n", sizes.cbMaxSignature);
+    ok(sizes.cbSecurityTrailer == 16, "cbSecurityTrailer should be 16 but is  %lu\n", sizes.cbSecurityTrailer);
+    ok(sizes.cbBlockSize == 0, "cbBlockSize should be 0 but is %lu\n", sizes.cbBlockSize);
 
-    ok(sec_status == SEC_E_OK,
-            "pQueryContextAttributesA(SECPKG_ATTR_SIZES) returned %s\n",
-            getSecError(sec_status));
-    ok((ctxt_sizes.cbMaxToken == 1904) || (ctxt_sizes.cbMaxToken == 2888),
-            "cbMaxToken should be 1904 or 2888 but is %lu\n",
-            ctxt_sizes.cbMaxToken);
-    ok(ctxt_sizes.cbMaxSignature == 16,
-            "cbMaxSignature should be 16 but is %lu\n",
-            ctxt_sizes.cbMaxSignature);
-    ok(ctxt_sizes.cbSecurityTrailer == 16,
-            "cbSecurityTrailer should be 16 but is  %lu\n",
-            ctxt_sizes.cbSecurityTrailer);
-    ok(ctxt_sizes.cbBlockSize == 0,
-            "cbBlockSize should be 0 but is %lu\n",
-            ctxt_sizes.cbBlockSize);
+    sec_status = pQueryContextAttributesA(&client.ctxt, SECPKG_ATTR_STREAM_SIZES, &stream_sizes);
+    ok(sec_status == SEC_E_UNSUPPORTED_FUNCTION, "pQueryContextAttributesA(SECPKG_ATTR_STREAM_SIZES) returned %s\n",
+       getSecError(sec_status));
+
+    memset( &key, 0, sizeof(key) );
+    sec_status = QueryContextAttributesA( &client.ctxt, SECPKG_ATTR_KEY_INFO, &key );
+    ok( sec_status == SEC_E_OK, "pQueryContextAttributesA returned %08lx\n", sec_status );
+    if (fake)
+    {
+        ok( !strcmp(key.sSignatureAlgorithmName, "RSADSI RC4-CRC32"), "got '%s'\n", key.sSignatureAlgorithmName );
+        ok( !strcmp(key.sEncryptAlgorithmName, "RSADSI RC4"), "got '%s'\n", key.sEncryptAlgorithmName );
+        ok( key.SignatureAlgorithm == 0xffffff7c, "got %#lx\n", key.SignatureAlgorithm );
+    }
+    else
+    {
+        ok( !strcmp(key.sSignatureAlgorithmName, "HMAC-MD5"), "got '%s'\n", key.sSignatureAlgorithmName );
+        ok( !strcmp(key.sEncryptAlgorithmName, "RSADSI RC4"), "got '%s'\n", key.sEncryptAlgorithmName );
+        ok( key.SignatureAlgorithm == 0xffffff76, "got %#lx\n", key.SignatureAlgorithm );
+    }
+    ok( key.KeySize == 128, "got %lu\n", key.KeySize );
+    ok( key.EncryptAlgorithm == CALG_RC4, "got %#lx\n", key.EncryptAlgorithm );
+    FreeContextBuffer( key.sSignatureAlgorithmName );
+    FreeContextBuffer( key.sEncryptAlgorithmName );
+
+    memset( &session_key, 0, sizeof(session_key) );
+    sec_status = QueryContextAttributesA( &client.ctxt, SECPKG_ATTR_SESSION_KEY, &session_key );
+    ok( sec_status == SEC_E_OK, "pQueryContextAttributesA returned %08lx\n", sec_status );
+    ok( session_key.SessionKeyLength, "got 0 key length\n" );
+    ok( session_key.SessionKey != NULL, "got NULL session key\n" );
+    FreeContextBuffer( session_key.SessionKey );
 
     memset(&info, 0, sizeof(info));
     sec_status = QueryContextAttributesA(&client.ctxt, SECPKG_ATTR_NEGOTIATION_INFO, &info);

@@ -19,6 +19,7 @@
  */
 
 #include "d3d10_private.h"
+#include <vkd3d_shader.h>
 
 #include <float.h>
 #include <stdint.h>
@@ -28,25 +29,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(d3d10);
 #define MAKE_TAG(ch0, ch1, ch2, ch3) \
     ((DWORD)(ch0) | ((DWORD)(ch1) << 8) | \
     ((DWORD)(ch2) << 16) | ((DWORD)(ch3) << 24 ))
-#define TAG_DXBC MAKE_TAG('D', 'X', 'B', 'C')
 #define TAG_FX10 MAKE_TAG('F', 'X', '1', '0')
 #define TAG_FXLC MAKE_TAG('F', 'X', 'L', 'C')
 #define TAG_CLI4 MAKE_TAG('C', 'L', 'I', '4')
 #define TAG_CTAB MAKE_TAG('C', 'T', 'A', 'B')
-
-#define D3D10_FX10_TYPE_COLUMN_SHIFT    11
-#define D3D10_FX10_TYPE_COLUMN_MASK     (0x7 << D3D10_FX10_TYPE_COLUMN_SHIFT)
-
-#define D3D10_FX10_TYPE_ROW_SHIFT       8
-#define D3D10_FX10_TYPE_ROW_MASK        (0x7 << D3D10_FX10_TYPE_ROW_SHIFT)
-
-#define D3D10_FX10_TYPE_BASETYPE_SHIFT  3
-#define D3D10_FX10_TYPE_BASETYPE_MASK   (0x1f << D3D10_FX10_TYPE_BASETYPE_SHIFT)
-
-#define D3D10_FX10_TYPE_CLASS_SHIFT     0
-#define D3D10_FX10_TYPE_CLASS_MASK      (0x7 << D3D10_FX10_TYPE_CLASS_SHIFT)
-
-#define D3D10_FX10_TYPE_MATRIX_COLUMN_MAJOR_MASK 0x4000
 
 static inline struct d3d10_effect *impl_from_ID3D10EffectPool(ID3D10EffectPool *iface)
 {
@@ -207,6 +193,167 @@ struct preshader_instr
 
 typedef void (*pres_op_func)(float **args, unsigned int n, const struct preshader_instr *instr);
 
+static void pres_mov(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = args[0][i];
+}
+
+static void pres_neg(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = -args[0][i];
+}
+
+static void pres_rcp(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = 1.0f / args[0][i];
+}
+
+static void pres_frc(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = args[0][i] - floor(args[0][i]);
+}
+
+static void pres_exp(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = exp2f(args[0][i]);
+}
+
+static void pres_log(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = (args[0][i] == 0.0f ? 0.0f : log2f(fabsf(args[0][i])));
+}
+
+static void pres_rsq(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = 1.0f / sqrtf(args[0][i]);
+}
+
+static void pres_sin(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = sin(args[0][i]);
+}
+
+static void pres_cos(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = cos(args[0][i]);
+}
+
+static void pres_asin(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = asinf(args[0][i]);
+}
+
+static void pres_acos(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = acosf(args[0][i]);
+}
+
+static void pres_atan(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = atanf(args[0][i]);
+}
+
+static void pres_sqrt(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = sqrtf(args[0][i]);
+}
+
+static void pres_ineg(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0];
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        int v = -arg1[i];
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_not(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0];
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        int v = ~arg1[0];
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_itof(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = *(int *)&args[0][i];
+}
+
+static void pres_utof(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = *(unsigned int *)&args[0][i];
+}
+
 static void pres_ftou(float **args, unsigned int n, const struct preshader_instr *instr)
 {
     float *retval = args[1];
@@ -219,6 +366,58 @@ static void pres_ftou(float **args, unsigned int n, const struct preshader_instr
     }
 }
 
+static void pres_ftob(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int u = args[0][i] == 0.0f ? 0 : ~0u;
+        retval[i] = *(float *)&u;
+    }
+}
+
+/* Only first source component is used. */
+static void pres_floor(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float value = floorf(args[0][0]);
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = value;
+}
+
+/* Only first source component is used. */
+static void pres_ceil(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float value = ceilf(args[0][0]);
+    float *retval = args[1];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = value;
+}
+
+static void pres_min(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = min(args[0][instr->scalar ? 0 : i], args[1][i]);
+}
+
+static void pres_max(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = max(args[0][instr->scalar ? 0 : i], args[1][i]);
+}
+
 static void pres_add(float **args, unsigned int n, const struct preshader_instr *instr)
 {
     float *retval = args[2];
@@ -228,17 +427,388 @@ static void pres_add(float **args, unsigned int n, const struct preshader_instr 
         retval[i] = args[0][instr->scalar ? 0 : i] + args[1][i];
 }
 
+static void pres_mul(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = args[0][instr->scalar ? 0 : i] * args[1][i];
+}
+
+static void pres_atan2(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = atan2f(args[0][instr->scalar ? 0 : i], args[1][i]);
+}
+
+static void pres_div(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = args[0][instr->scalar ? 0 : i] / args[1][i];
+}
+
+static void pres_iadd(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0];
+    int *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        int v = arg1[instr->scalar ? 0 : i] + arg2[i];
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_imul(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0];
+    int *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        int v = arg1[instr->scalar ? 0 : i] * arg2[i];
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_bilt(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0];
+    int *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] < arg2[i] ? ~0u : 0;
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_bige(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0];
+    int *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] >= arg2[i] ? ~0u : 0;
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_bieq(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0];
+    int *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] == arg2[i] ? ~0u : 0;
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_bine(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0];
+    int *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] != arg2[i] ? ~0u : 0;
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_buge(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0];
+    unsigned int *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] >= arg2[i] ? ~0u : 0;
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_bult(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0];
+    unsigned int *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] < arg2[i] ? ~0u : 0;
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_udiv(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0];
+    unsigned int *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg2[i] ? arg1[instr->scalar ? 0 : i] / arg2[i] : UINT_MAX;
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_imin(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0], *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        int v = min(arg1[instr->scalar ? 0 : i], arg2[i]);
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_imax(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0], *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        int v = max(arg1[instr->scalar ? 0 : i], arg2[i]);
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_umin(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0], *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = min(arg1[instr->scalar ? 0 : i], arg2[i]);
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_umax(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0], *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = max(arg1[instr->scalar ? 0 : i], arg2[i]);
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_and(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0];
+    unsigned int *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] & arg2[i];
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_or(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0];
+    unsigned int *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[0] | arg2[0];
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_xor(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0];
+    unsigned int *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] ^ arg2[i];
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_ishl(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0], *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] << (arg2[i] % 32);
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_ishr(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    int *arg1 = (int *)args[0], *arg2 = (int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] >> (arg2[i] % 32);
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_ushr(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    unsigned int *arg1 = (unsigned int *)args[0];
+    unsigned int *arg2 = (unsigned int *)args[1];
+    float *retval = args[2];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+    {
+        unsigned int v = arg1[instr->scalar ? 0 : i] >> (arg2[i] % 32);
+        retval[i] = *(float *)&v;
+    }
+}
+
+static void pres_movc(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *arg1 = args[0], *arg2 = args[1], *arg3 = args[2];
+    float *retval = args[3];
+    unsigned int i;
+
+    for (i = 0; i < instr->comp_count; ++i)
+        retval[i] = arg1[i] ? arg2[i] : arg3[i];
+}
+
+static void pres_dot(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[2];
+    unsigned int i;
+
+    *retval = 0.0f;
+    for (i = 0; i < instr->comp_count; ++i)
+        *retval += args[0][instr->scalar ? 0 : i] * args[1][i];
+}
+
+static void pres_dotswiz(float **args, unsigned int n, const struct preshader_instr *instr)
+{
+    float *retval = args[--n];
+    unsigned int i;
+
+    *retval = 0.0f;
+
+    if (n != 6 && n != 8 && instr->comp_count == 1)
+    {
+        WARN("Unexpected argument count %u, or component count %u.\n", n, instr->comp_count);
+        return;
+    }
+
+    for (i = 0; i < n / 2; ++i)
+        *retval += args[i][0] * args[i + n / 2][0];
+}
+
 struct preshader_op_info
 {
     int opcode;
-    char name[8];
+    char name[16];
     pres_op_func func;
 };
 
 static const struct preshader_op_info preshader_ops[] =
 {
+    { 0x100, "mov",  pres_mov  },
+    { 0x101, "neg",  pres_neg  },
+    { 0x103, "rcp",  pres_rcp  },
+    { 0x104, "frc",  pres_frc  },
+    { 0x105, "exp",  pres_exp  },
+    { 0x106, "log",  pres_log  },
+    { 0x107, "rsq",  pres_rsq  },
+    { 0x108, "sin",  pres_sin  },
+    { 0x109, "cos",  pres_cos  },
+    { 0x10a, "asin", pres_asin },
+    { 0x10b, "acos", pres_acos },
+    { 0x10c, "atan", pres_atan },
+    { 0x112, "sqrt", pres_sqrt },
+    { 0x120, "ineg", pres_ineg },
+    { 0x121, "not",  pres_not  },
+    { 0x130, "itof", pres_itof },
+    { 0x131, "utof", pres_utof },
     { 0x133, "ftou", pres_ftou },
+    { 0x137, "ftob", pres_ftob },
+    { 0x139, "floor",pres_floor},
+    { 0x13a, "ceil", pres_ceil },
+    { 0x200, "min",  pres_min  },
+    { 0x201, "max",  pres_max  },
     { 0x204, "add",  pres_add  },
+    { 0x205, "mul",  pres_mul  },
+    { 0x206, "atan2",pres_atan2},
+    { 0x208, "div",  pres_div  },
+    { 0x210, "bilt", pres_bilt },
+    { 0x211, "bige", pres_bige },
+    { 0x212, "bieq", pres_bieq },
+    { 0x213, "bine", pres_bine },
+    { 0x214, "buge", pres_buge },
+    { 0x215, "bult", pres_bult },
+    { 0x216, "iadd", pres_iadd },
+    { 0x219, "imul", pres_imul },
+    { 0x21a, "udiv", pres_udiv },
+    { 0x21d, "imin", pres_imin },
+    { 0x21e, "imax", pres_imax },
+    { 0x21f, "umin", pres_umin },
+    { 0x220, "umax", pres_umax },
+    { 0x230, "and",  pres_and  },
+    { 0x231, "or",   pres_or   },
+    { 0x233, "xor",  pres_xor  },
+    { 0x234, "ishl", pres_ishl },
+    { 0x235, "ishr", pres_ishr },
+    { 0x236, "ushr", pres_ushr },
+    { 0x301, "movc", pres_movc },
+    { 0x500, "dot",  pres_dot  },
+    { 0x70e, "d3ds_dotswiz", pres_dotswiz },
 };
 
 static int __cdecl preshader_op_compare(const void *a, const void *b)
@@ -360,7 +930,7 @@ static HRESULT d3d10_effect_preshader_eval(struct d3d10_effect_preshader *p)
     unsigned int i, j, regt, offset, instr_count, arg_count;
     const DWORD *ip = ID3D10Blob_GetBufferPointer(p->code);
     struct preshader_instr ins;
-    float *dst, *args[4];
+    float *dst, *args[9];
 
     dst = d3d10_effect_preshader_get_reg_ptr(p, D3D10_REG_TABLE_RESULT, 0);
     memset(dst, 0, sizeof(float) * p->reg_tables[D3D10_REG_TABLE_RESULT].count);
@@ -426,7 +996,6 @@ static void d3d10_effect_clear_prop_dependencies(struct d3d10_effect_prop_depend
 
 struct d3d10_effect_state_property_info
 {
-    UINT id;
     const char *name;
     D3D_SHADER_VARIABLE_TYPE type;
     UINT size;
@@ -438,69 +1007,69 @@ struct d3d10_effect_state_property_info
 
 static const struct d3d10_effect_state_property_info property_infos[] =
 {
-    {0x00, "Pass.RasterizerState",                        D3D10_SVT_RASTERIZER,       1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, rasterizer)    },
-    {0x01, "Pass.DepthStencilState",                      D3D10_SVT_DEPTHSTENCIL,     1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, depth_stencil) },
-    {0x02, "Pass.BlendState",                             D3D10_SVT_BLEND,            1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, blend)         },
-    {0x03, "Pass.RenderTargets",                          D3D10_SVT_RENDERTARGETVIEW, 1, 8, D3D10_C_PASS, ~0u },
-    {0x04, "Pass.DepthStencilView",                       D3D10_SVT_DEPTHSTENCILVIEW, 1, 1, D3D10_C_PASS, ~0u },
-    {0x05, "Pass.Unknown5",                               D3D10_SVT_VOID,             0, 0, D3D10_C_PASS, ~0u },
-    {0x06, "Pass.VertexShader",                           D3D10_SVT_VERTEXSHADER,     1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, vs.shader),
-                                                                                                          FIELD_OFFSET(struct d3d10_effect_pass, vs.index)      },
-    {0x07, "Pass.PixelShader",                            D3D10_SVT_PIXELSHADER,      1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, ps.shader),
-                                                                                                          FIELD_OFFSET(struct d3d10_effect_pass, ps.index)      },
-    {0x08, "Pass.GeometryShader",                         D3D10_SVT_GEOMETRYSHADER,   1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, gs.shader),
-                                                                                                          FIELD_OFFSET(struct d3d10_effect_pass, gs.index)      },
-    {0x09, "Pass.StencilRef",                             D3D10_SVT_UINT,             1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, stencil_ref)   },
-    {0x0a, "Pass.BlendFactor",                            D3D10_SVT_FLOAT,            4, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, blend_factor)  },
-    {0x0b, "Pass.SampleMask",                             D3D10_SVT_UINT,             1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, sample_mask)   },
+    { "Pass.RasterizerState",                        D3D10_SVT_RASTERIZER,       1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, rasterizer)    },
+    { "Pass.DepthStencilState",                      D3D10_SVT_DEPTHSTENCIL,     1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, depth_stencil) },
+    { "Pass.BlendState",                             D3D10_SVT_BLEND,            1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, blend)         },
+    { "Pass.RenderTargets",                          D3D10_SVT_RENDERTARGETVIEW, 1, 8, D3D10_C_PASS, ~0u },
+    { "Pass.DepthStencilView",                       D3D10_SVT_DEPTHSTENCILVIEW, 1, 1, D3D10_C_PASS, ~0u },
+    { "Pass.Unknown5",                               D3D10_SVT_VOID,             0, 0, D3D10_C_PASS, ~0u },
+    { "Pass.VertexShader",                           D3D10_SVT_VERTEXSHADER,     1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, vs.shader),
+                                                                                                     FIELD_OFFSET(struct d3d10_effect_pass, vs.index)      },
+    { "Pass.PixelShader",                            D3D10_SVT_PIXELSHADER,      1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, ps.shader),
+                                                                                                     FIELD_OFFSET(struct d3d10_effect_pass, ps.index)      },
+    { "Pass.GeometryShader",                         D3D10_SVT_GEOMETRYSHADER,   1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, gs.shader),
+                                                                                                     FIELD_OFFSET(struct d3d10_effect_pass, gs.index)      },
+    { "Pass.StencilRef",                             D3D10_SVT_UINT,             1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, stencil_ref)   },
+    { "Pass.BlendFactor",                            D3D10_SVT_FLOAT,            4, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, blend_factor)  },
+    { "Pass.SampleMask",                             D3D10_SVT_UINT,             1, 1, D3D10_C_PASS, FIELD_OFFSET(struct d3d10_effect_pass, sample_mask)   },
 
-    {0x0c, "RasterizerState.FillMode",                    D3D10_SVT_INT,     1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, FillMode)                       },
-    {0x0d, "RasterizerState.CullMode",                    D3D10_SVT_INT,     1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, CullMode)                       },
-    {0x0e, "RasterizerState.FrontCounterClockwise",       D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, FrontCounterClockwise)          },
-    {0x0f, "RasterizerState.DepthBias",                   D3D10_SVT_INT,     1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, DepthBias)                      },
-    {0x10, "RasterizerState.DepthBiasClamp",              D3D10_SVT_FLOAT,   1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, DepthBiasClamp)                 },
-    {0x11, "RasterizerState.SlopeScaledDepthBias",        D3D10_SVT_FLOAT,   1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, SlopeScaledDepthBias)           },
-    {0x12, "RasterizerState.DepthClipEnable",             D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, DepthClipEnable)                },
-    {0x13, "RasterizerState.ScissorEnable",               D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, ScissorEnable)                  },
-    {0x14, "RasterizerState.MultisampleEnable",           D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, MultisampleEnable)              },
-    {0x15, "RasterizerState.AntialiasedLineEnable",       D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, AntialiasedLineEnable)          },
+    { "RasterizerState.FillMode",                    D3D10_SVT_INT,     1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, FillMode)                       },
+    { "RasterizerState.CullMode",                    D3D10_SVT_INT,     1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, CullMode)                       },
+    { "RasterizerState.FrontCounterClockwise",       D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, FrontCounterClockwise)          },
+    { "RasterizerState.DepthBias",                   D3D10_SVT_INT,     1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, DepthBias)                      },
+    { "RasterizerState.DepthBiasClamp",              D3D10_SVT_FLOAT,   1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, DepthBiasClamp)                 },
+    { "RasterizerState.SlopeScaledDepthBias",        D3D10_SVT_FLOAT,   1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, SlopeScaledDepthBias)           },
+    { "RasterizerState.DepthClipEnable",             D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, DepthClipEnable)                },
+    { "RasterizerState.ScissorEnable",               D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, ScissorEnable)                  },
+    { "RasterizerState.MultisampleEnable",           D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, MultisampleEnable)              },
+    { "RasterizerState.AntialiasedLineEnable",       D3D10_SVT_BOOL,    1, 1, D3D10_C_RASTERIZER,   FIELD_OFFSET(D3D10_RASTERIZER_DESC, AntialiasedLineEnable)          },
 
-    {0x16, "DepthStencilState.DepthEnable",               D3D10_SVT_BOOL,    1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, DepthEnable)                 },
-    {0x17, "DepthStencilState.DepthWriteMask",            D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, DepthWriteMask)              },
-    {0x18, "DepthStencilState.DepthFunc",                 D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, DepthFunc)                   },
-    {0x19, "DepthStencilState.StencilEnable",             D3D10_SVT_BOOL,    1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, StencilEnable)               },
-    {0x1a, "DepthStencilState.StencilReadMask",           D3D10_SVT_UINT8,   1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, StencilReadMask)             },
-    {0x1b, "DepthStencilState.StencilWriteMask",          D3D10_SVT_UINT8,   1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, StencilWriteMask)            },
-    {0x1c, "DepthStencilState.FrontFaceStencilFail",      D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, FrontFace.StencilFailOp)     },
-    {0x1d, "DepthStencilState.FrontFaceStencilDepthFail", D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, FrontFace.StencilDepthFailOp)},
-    {0x1e, "DepthStencilState.FrontFaceStencilPass",      D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, FrontFace.StencilPassOp)     },
-    {0x1f, "DepthStencilState.FrontFaceStencilFunc",      D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, FrontFace.StencilFunc)       },
-    {0x20, "DepthStencilState.BackFaceStencilFail",       D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, BackFace.StencilFailOp)      },
-    {0x21, "DepthStencilState.BackFaceStencilDepthFail",  D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, BackFace.StencilDepthFailOp) },
-    {0x22, "DepthStencilState.BackFaceStencilPass",       D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, BackFace.StencilPassOp)      },
-    {0x23, "DepthStencilState.BackFaceStencilFunc",       D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, BackFace.StencilFunc)        },
+    { "DepthStencilState.DepthEnable",               D3D10_SVT_BOOL,    1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, DepthEnable)                 },
+    { "DepthStencilState.DepthWriteMask",            D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, DepthWriteMask)              },
+    { "DepthStencilState.DepthFunc",                 D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, DepthFunc)                   },
+    { "DepthStencilState.StencilEnable",             D3D10_SVT_BOOL,    1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, StencilEnable)               },
+    { "DepthStencilState.StencilReadMask",           D3D10_SVT_UINT8,   1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, StencilReadMask)             },
+    { "DepthStencilState.StencilWriteMask",          D3D10_SVT_UINT8,   1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, StencilWriteMask)            },
+    { "DepthStencilState.FrontFaceStencilFail",      D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, FrontFace.StencilFailOp)     },
+    { "DepthStencilState.FrontFaceStencilDepthFail", D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, FrontFace.StencilDepthFailOp)},
+    { "DepthStencilState.FrontFaceStencilPass",      D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, FrontFace.StencilPassOp)     },
+    { "DepthStencilState.FrontFaceStencilFunc",      D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, FrontFace.StencilFunc)       },
+    { "DepthStencilState.BackFaceStencilFail",       D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, BackFace.StencilFailOp)      },
+    { "DepthStencilState.BackFaceStencilDepthFail",  D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, BackFace.StencilDepthFailOp) },
+    { "DepthStencilState.BackFaceStencilPass",       D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, BackFace.StencilPassOp)      },
+    { "DepthStencilState.BackFaceStencilFunc",       D3D10_SVT_INT,     1, 1, D3D10_C_DEPTHSTENCIL, FIELD_OFFSET(D3D10_DEPTH_STENCIL_DESC, BackFace.StencilFunc)        },
 
-    {0x24, "BlendState.AlphaToCoverageEnable",            D3D10_SVT_BOOL,    1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         AlphaToCoverageEnable)       },
-    {0x25, "BlendState.BlendEnable",                      D3D10_SVT_BOOL,    1, 8, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         BlendEnable)                 },
-    {0x26, "BlendState.SrcBlend",                         D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         SrcBlend)                    },
-    {0x27, "BlendState.DestBlend",                        D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         DestBlend)                   },
-    {0x28, "BlendState.BlendOp",                          D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         BlendOp)                     },
-    {0x29, "BlendState.SrcBlendAlpha",                    D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         SrcBlendAlpha)               },
-    {0x2a, "BlendState.DestBlendAlpha",                   D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         DestBlendAlpha)              },
-    {0x2b, "BlendState.BlendOpAlpha",                     D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         BlendOpAlpha)                },
-    {0x2c, "BlendState.RenderTargetWriteMask",            D3D10_SVT_UINT8,   1, 8, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         RenderTargetWriteMask)       },
+    { "BlendState.AlphaToCoverageEnable",            D3D10_SVT_BOOL,    1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         AlphaToCoverageEnable)       },
+    { "BlendState.BlendEnable",                      D3D10_SVT_BOOL,    1, 8, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         BlendEnable)                 },
+    { "BlendState.SrcBlend",                         D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         SrcBlend)                    },
+    { "BlendState.DestBlend",                        D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         DestBlend)                   },
+    { "BlendState.BlendOp",                          D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         BlendOp)                     },
+    { "BlendState.SrcBlendAlpha",                    D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         SrcBlendAlpha)               },
+    { "BlendState.DestBlendAlpha",                   D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         DestBlendAlpha)              },
+    { "BlendState.BlendOpAlpha",                     D3D10_SVT_INT,     1, 1, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         BlendOpAlpha)                },
+    { "BlendState.RenderTargetWriteMask",            D3D10_SVT_UINT8,   1, 8, D3D10_C_BLEND,        FIELD_OFFSET(D3D10_BLEND_DESC,         RenderTargetWriteMask)       },
 
-    {0x2d, "SamplerState.Filter",                         D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.Filter)         },
-    {0x2e, "SamplerState.AddressU",                       D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.AddressU)       },
-    {0x2f, "SamplerState.AddressV",                       D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.AddressV)       },
-    {0x30, "SamplerState.AddressW",                       D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.AddressW)       },
-    {0x31, "SamplerState.MipLODBias",                     D3D10_SVT_FLOAT,   1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.MipLODBias)     },
-    {0x32, "SamplerState.MaxAnisotropy",                  D3D10_SVT_UINT,    1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.MaxAnisotropy)  },
-    {0x33, "SamplerState.ComparisonFunc",                 D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.ComparisonFunc) },
-    {0x34, "SamplerState.BorderColor",                    D3D10_SVT_FLOAT,   4, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.BorderColor)    },
-    {0x35, "SamplerState.MinLOD",                         D3D10_SVT_FLOAT,   1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.MinLOD)         },
-    {0x36, "SamplerState.MaxLOD",                         D3D10_SVT_FLOAT,   1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.MaxLOD)         },
-    {0x37, "SamplerState.Texture",                        D3D10_SVT_TEXTURE, 1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, texture)             },
+    { "SamplerState.Filter",                         D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.Filter)         },
+    { "SamplerState.AddressU",                       D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.AddressU)       },
+    { "SamplerState.AddressV",                       D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.AddressV)       },
+    { "SamplerState.AddressW",                       D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.AddressW)       },
+    { "SamplerState.MipLODBias",                     D3D10_SVT_FLOAT,   1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.MipLODBias)     },
+    { "SamplerState.MaxAnisotropy",                  D3D10_SVT_UINT,    1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.MaxAnisotropy)  },
+    { "SamplerState.ComparisonFunc",                 D3D10_SVT_INT,     1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.ComparisonFunc) },
+    { "SamplerState.BorderColor",                    D3D10_SVT_FLOAT,   4, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.BorderColor)    },
+    { "SamplerState.MinLOD",                         D3D10_SVT_FLOAT,   1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.MinLOD)         },
+    { "SamplerState.MaxLOD",                         D3D10_SVT_FLOAT,   1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, desc.MaxLOD)         },
+    { "SamplerState.Texture",                        D3D10_SVT_TEXTURE, 1, 1, D3D10_C_SAMPLER,      FIELD_OFFSET(struct d3d10_effect_sampler_desc, texture)             },
 };
 
 static const D3D10_RASTERIZER_DESC default_rasterizer_desc =
@@ -741,6 +1310,7 @@ static void d3d10_effect_update_dependent_props(struct d3d10_effect_prop_depende
     struct d3d10_effect_prop_dependency *d;
     unsigned int i, j, count, variable_idx;
     struct d3d10_effect_variable *v;
+    struct d3d10_reg_table *table;
     unsigned int *dst_index;
     uint32_t value;
     HRESULT hr;
@@ -805,6 +1375,35 @@ static void d3d10_effect_update_dependent_props(struct d3d10_effect_prop_depende
                 }
                 break;
 
+            case D3D10_EOO_VALUE_EXPRESSION:
+
+                if ((property_info->type != D3D10_SVT_UINT)
+                        && (property_info->type != D3D10_SVT_FLOAT)
+                        && (property_info->type != D3D10_SVT_BOOL))
+                {
+                    FIXME("Unimplemented for property %s.\n", property_info->name);
+                    return;
+                }
+
+                if (FAILED(hr = d3d10_effect_preshader_eval(&d->value_expr.value)))
+                {
+                    WARN("Failed to evaluate value expression, hr %#lx.\n", hr);
+                    return;
+                }
+
+                table = &d->value_expr.value.reg_tables[D3D10_REG_TABLE_RESULT];
+
+                if (property_info->size != table->count)
+                {
+                    WARN("Unexpected value expression output size %u, property size %u.\n",
+                            table->count, property_info->size);
+                    return;
+                }
+
+                memcpy(dst, table->f, property_info->size * sizeof(float));
+
+                break;
+
             default:
                 FIXME("Unsupported property update for %u.\n", d->operation);
         }
@@ -840,89 +1439,6 @@ static BOOL d3d_array_reserve(void **elements, SIZE_T *capacity, SIZE_T count, S
 static BOOL require_space(size_t offset, size_t count, size_t size, size_t data_size)
 {
     return !count || (data_size - offset) / count >= size;
-}
-
-static HRESULT parse_dxbc(const char *data, SIZE_T data_size,
-        HRESULT (*chunk_handler)(const char *data, size_t data_size, uint32_t tag, void *ctx), void *ctx)
-{
-    const char *ptr = data;
-    uint32_t chunk_count;
-    uint32_t total_size;
-    HRESULT hr = S_OK;
-    uint32_t version;
-    unsigned int i;
-    uint32_t tag;
-
-    if (!data)
-    {
-        WARN("No data supplied.\n");
-        return E_FAIL;
-    }
-
-    tag = read_u32(&ptr);
-    TRACE("tag: %s.\n", debugstr_an((const char *)&tag, 4));
-
-    if (tag != TAG_DXBC)
-    {
-        WARN("Wrong tag.\n");
-        return E_FAIL;
-    }
-
-    FIXME("Skipping DXBC checksum.\n");
-    skip_u32_unknown(&ptr, 4);
-
-    version = read_u32(&ptr);
-    TRACE("version: %#x.\n", version);
-    if (version != 0x00000001)
-    {
-        WARN("Got unexpected DXBC version %#x.\n", version);
-        return E_FAIL;
-    }
-
-    total_size = read_u32(&ptr);
-    TRACE("Total size: %#x.\n", total_size);
-
-    if (data_size != total_size)
-    {
-        WARN("Wrong size supplied.\n");
-        return E_FAIL;
-    }
-
-    chunk_count = read_u32(&ptr);
-    TRACE("Chunk count: %#x.\n", chunk_count);
-
-    for (i = 0; i < chunk_count; ++i)
-    {
-        uint32_t chunk_tag, chunk_size;
-        const char *chunk_ptr;
-        uint32_t chunk_offset;
-
-        chunk_offset = read_u32(&ptr);
-        TRACE("Chunk %u at offset %#x.\n", i, chunk_offset);
-
-        if (chunk_offset >= data_size || !require_space(chunk_offset, 2, sizeof(uint32_t), data_size))
-        {
-            WARN("Invalid chunk offset %#x (data size %#Ix).\n", chunk_offset, data_size);
-            return E_FAIL;
-        }
-
-        chunk_ptr = data + chunk_offset;
-
-        chunk_tag = read_u32(&chunk_ptr);
-        chunk_size = read_u32(&chunk_ptr);
-
-        if (!require_space(chunk_ptr - data, 1, chunk_size, data_size))
-        {
-            WARN("Invalid chunk size %#x (data size %#Ix, chunk offset %#x).\n",
-                    chunk_size, data_size, chunk_offset);
-            return E_FAIL;
-        }
-
-        if (FAILED(hr = chunk_handler(chunk_ptr, chunk_size, chunk_tag, ctx)))
-            break;
-    }
-
-    return hr;
 }
 
 static BOOL fx10_get_string(const char *data, size_t data_size, uint32_t offset, const char **s, size_t *l)
@@ -1367,9 +1883,25 @@ static D3D10_SHADER_VARIABLE_TYPE d3d10_variable_type(uint32_t t, BOOL is_object
     }
 }
 
+struct numeric_type
+{
+    uint32_t type_class   : 3;
+    uint32_t base_type    : 5;
+    uint32_t rows         : 3;
+    uint32_t columns      : 3;
+    uint32_t column_major : 1;
+    uint32_t unknown      : 17;
+};
+
 static HRESULT parse_fx10_type(const char *data, size_t data_size, uint32_t offset, struct d3d10_effect_type *t)
 {
     uint32_t typeinfo, type_flags, type_kind;
+    union
+    {
+        struct numeric_type type;
+        uint32_t data;
+    } numeric;
+
     const char *ptr;
     unsigned int i;
 
@@ -1410,28 +1942,25 @@ static HRESULT parse_fx10_type(const char *data, size_t data_size, uint32_t offs
         case 1:
             TRACE("Type is numeric.\n");
 
-            if (!require_space(ptr - data, 1, sizeof(typeinfo), data_size))
+            if (!require_space(ptr - data, 1, sizeof(numeric), data_size))
             {
                 WARN("Invalid offset %#x (data size %#Ix).\n", offset, data_size);
                 return E_FAIL;
             }
 
-            typeinfo = read_u32(&ptr);
+            numeric.data = read_u32(&ptr);
             t->member_count = 0;
-            t->column_count = (typeinfo & D3D10_FX10_TYPE_COLUMN_MASK) >> D3D10_FX10_TYPE_COLUMN_SHIFT;
-            t->row_count = (typeinfo & D3D10_FX10_TYPE_ROW_MASK) >> D3D10_FX10_TYPE_ROW_SHIFT;
-            t->basetype = d3d10_variable_type((typeinfo & D3D10_FX10_TYPE_BASETYPE_MASK)
-                    >> D3D10_FX10_TYPE_BASETYPE_SHIFT, FALSE, &type_flags);
-            t->type_class = d3d10_variable_class((typeinfo & D3D10_FX10_TYPE_CLASS_MASK)
-                    >> D3D10_FX10_TYPE_CLASS_SHIFT, typeinfo & D3D10_FX10_TYPE_MATRIX_COLUMN_MAJOR_MASK);
+            t->column_count = numeric.type.columns;
+            t->row_count = numeric.type.rows;
+            t->basetype = d3d10_variable_type(numeric.type.base_type, FALSE, &type_flags);
+            t->type_class = d3d10_variable_class(numeric.type.type_class, numeric.type.column_major);
 
-            TRACE("Type description: %#x.\n", typeinfo);
+            TRACE("Type description: %#x.\n", numeric.data);
             TRACE("\tcolumns: %u.\n", t->column_count);
             TRACE("\trows: %u.\n", t->row_count);
             TRACE("\tbasetype: %s.\n", debug_d3d10_shader_variable_type(t->basetype));
             TRACE("\tclass: %s.\n", debug_d3d10_shader_variable_class(t->type_class));
-            TRACE("\tunknown bits: %#x.\n", typeinfo & ~(D3D10_FX10_TYPE_COLUMN_MASK | D3D10_FX10_TYPE_ROW_MASK
-                    | D3D10_FX10_TYPE_BASETYPE_MASK | D3D10_FX10_TYPE_CLASS_MASK | D3D10_FX10_TYPE_MATRIX_COLUMN_MAJOR_MASK));
+            TRACE("\tunknown bits: %#x.\n", numeric.type.unknown);
             break;
 
         case 2:
@@ -2112,7 +2641,8 @@ static HRESULT parse_fx10_preshader_instr(struct d3d10_preshader_parse_context *
         return E_FAIL;
     }
 
-    TRACE("Opcode %#x (%s), input count %u.\n", ins.opcode, op_info->name, input_count);
+    TRACE("Opcode %#x (%s) (%u,%u), input count %u.\n", ins.opcode, op_info->name,
+            ins.comp_count, ins.scalar, input_count);
 
     /* Inputs + one output */
     param_count = input_count + 1;
@@ -2315,9 +2845,14 @@ static HRESULT parse_fx10_ctab(void *ctx, const char *data, unsigned int data_si
     return S_OK;
 }
 
-static HRESULT fxlvm_chunk_handler(const char *data, size_t data_size, uint32_t tag, void *ctx)
+static HRESULT fxlvm_chunk_handler(const struct vkd3d_shader_dxbc_section_desc *section,
+        struct d3d10_preshader_parse_context *ctx)
 {
-    TRACE("Chunk tag: %s, size: %Iu.\n", debugstr_an((const char *)&tag, 4), data_size);
+    const char *data = section->data.code;
+    size_t data_size = section->data.size;
+    uint32_t tag = section->tag;
+
+    TRACE("Chunk tag: %s, size: %Iu.\n", debugstr_fourcc(tag), data_size);
 
     switch (tag)
     {
@@ -2331,7 +2866,7 @@ static HRESULT fxlvm_chunk_handler(const char *data, size_t data_size, uint32_t 
             return parse_fx10_ctab(ctx, data, data_size);
 
         default:
-            FIXME("Unhandled chunk %s.\n", debugstr_an((const char *)&tag, 4));
+            FIXME("Unhandled chunk %s.\n", debugstr_fourcc(tag));
             return S_OK;
     }
 }
@@ -2339,16 +2874,33 @@ static HRESULT fxlvm_chunk_handler(const char *data, size_t data_size, uint32_t 
 static HRESULT parse_fx10_preshader(const char *data, size_t data_size,
         struct d3d10_effect *effect, struct d3d10_effect_preshader *preshader)
 {
+    const struct vkd3d_shader_code dxbc = {.code = data, .size = data_size};
+    const struct vkd3d_shader_dxbc_section_desc *section;
     struct d3d10_preshader_parse_context context;
-    HRESULT hr;
+    struct vkd3d_shader_dxbc_desc dxbc_desc;
+    HRESULT hr = S_OK;
+    unsigned int i;
+    int ret;
 
     memset(preshader, 0, sizeof(*preshader));
     memset(&context, 0, sizeof(context));
     context.preshader = preshader;
     context.effect = effect;
 
-    if (FAILED(hr = parse_dxbc(data, data_size, fxlvm_chunk_handler, &context)))
-        return hr;
+    if ((ret = vkd3d_shader_parse_dxbc(&dxbc, 0, &dxbc_desc, NULL)) < 0)
+    {
+        WARN("Failed to parse DXBC, ret %d.\n", ret);
+        return E_FAIL;
+    }
+
+    for (i = 0; i < dxbc_desc.section_count; ++i)
+    {
+        section = &dxbc_desc.sections[i];
+        if (FAILED(hr = fxlvm_chunk_handler(section, &context)))
+            break;
+    }
+
+    vkd3d_shader_free_dxbc(&dxbc_desc);
 
     /* Constant buffer and literal constants are preallocated, validate here that expression
        has no invalid accesses for those. */
@@ -2366,7 +2918,7 @@ static HRESULT parse_fx10_preshader(const char *data, size_t data_size,
         return E_FAIL;
     }
 
-    return S_OK;
+    return hr;
 }
 
 static HRESULT d3d10_effect_add_prop_dependency(struct d3d10_effect_prop_dependencies *d,
@@ -3244,10 +3796,13 @@ static HRESULT create_buffer_object(struct d3d10_effect_variable *v)
 static HRESULT parse_fx10_buffer(const char *data, size_t data_size, const char **ptr,
         BOOL local, struct d3d10_effect_variable *l)
 {
+    enum buffer_flags
+    {
+        IS_TBUFFER = 1,
+    };
     const char *prefix = local ? "Local" : "Shared";
+    uint32_t offset, flags;
     unsigned int i;
-    uint32_t offset;
-    D3D10_CBUFFER_TYPE d3d10_cbuffer_type;
     HRESULT hr;
     unsigned int stride = 0;
 
@@ -3274,32 +3829,30 @@ static HRESULT parse_fx10_buffer(const char *data, size_t data_size, const char 
     l->data_size = read_u32(ptr);
     TRACE("%s buffer data size: %#x.\n", prefix, l->data_size);
 
-    d3d10_cbuffer_type = read_u32(ptr);
-    TRACE("%s buffer type: %#x.\n", prefix, d3d10_cbuffer_type);
+    flags = read_u32(ptr);
+    TRACE("%s buffer flags: %#x.\n", prefix, flags);
 
-    switch(d3d10_cbuffer_type)
+    if (flags & IS_TBUFFER)
     {
-        case D3D10_CT_CBUFFER:
-            l->type->basetype = D3D10_SVT_CBUFFER;
-            if (!copy_name("cbuffer", &l->type->name))
-            {
-                ERR("Failed to copy name.\n");
-                return E_OUTOFMEMORY;
-            }
-            break;
+        l->type->basetype = D3D10_SVT_TBUFFER;
+        copy_name("tbuffer", &l->type->name);
+    }
+    else
+    {
+        l->type->basetype = D3D10_SVT_CBUFFER;
+        copy_name("cbuffer", &l->type->name);
+    }
+    if (!l->type->name)
+    {
+        ERR("Failed to copy name.\n");
+        return E_OUTOFMEMORY;
+    }
 
-        case D3D10_CT_TBUFFER:
-            l->type->basetype = D3D10_SVT_TBUFFER;
-            if (!copy_name("tbuffer", &l->type->name))
-            {
-                ERR("Failed to copy name.\n");
-                return E_OUTOFMEMORY;
-            }
-            break;
-
-        default:
-            ERR("Unexpected D3D10_CBUFFER_TYPE %#x!\n", d3d10_cbuffer_type);
-            return E_FAIL;
+    flags &= ~IS_TBUFFER;
+    if (flags)
+    {
+        ERR("Unexpected buffer flags %#x.\n", flags);
+        return E_FAIL;
     }
 
     l->type->member_count = read_u32(ptr);
@@ -3752,28 +4305,42 @@ static HRESULT parse_fx10(struct d3d10_effect *e, const char *data, size_t data_
     return parse_fx10_body(e, ptr, data_size - (ptr - data));
 }
 
-static HRESULT fx10_chunk_handler(const char *data, size_t data_size, uint32_t tag, void *ctx)
-{
-    struct d3d10_effect *e = ctx;
-
-    TRACE("tag: %s.\n", debugstr_an((const char *)&tag, 4));
-
-    TRACE("Chunk size: %#Ix.\n", data_size);
-
-    switch(tag)
-    {
-        case TAG_FX10:
-            return parse_fx10(e, data, data_size);
-
-        default:
-            FIXME("Unhandled chunk %s.\n", debugstr_an((const char *)&tag, 4));
-            return S_OK;
-    }
-}
-
 HRESULT d3d10_effect_parse(struct d3d10_effect *effect, const void *data, SIZE_T data_size)
 {
-    return parse_dxbc(data, data_size, fx10_chunk_handler, effect);
+    const struct vkd3d_shader_code dxbc = {.code = data, .size = data_size};
+    const struct vkd3d_shader_dxbc_section_desc *section;
+    struct vkd3d_shader_dxbc_desc dxbc_desc;
+    HRESULT hr = S_OK;
+    unsigned int i;
+    int ret;
+
+    if ((ret = vkd3d_shader_parse_dxbc(&dxbc, 0, &dxbc_desc, NULL)) < 0)
+    {
+        WARN("Failed to parse DXBC, ret %d.\n", ret);
+        return E_FAIL;
+    }
+
+    for (i = 0; i < dxbc_desc.section_count; ++i)
+    {
+        section = &dxbc_desc.sections[i];
+
+        TRACE("Section %u: tag %s, data {%p, %#Ix}.\n",
+                i, debugstr_fourcc(section->tag),
+                section->data.code, section->data.size);
+
+        if (section->tag != TAG_FX10)
+        {
+            FIXME("Unhandled chunk %s.\n", debugstr_fourcc(section->tag));
+            continue;
+        }
+
+        if (FAILED(hr = parse_fx10(effect, section->data.code, section->data.size)))
+            break;
+    }
+
+    vkd3d_shader_free_dxbc(&dxbc_desc);
+
+    return hr;
 }
 
 static void d3d10_effect_shader_variable_destroy(struct d3d10_effect_shader_variable *s,
@@ -8774,6 +9341,8 @@ static HRESULT STDMETHODCALLTYPE d3d10_effect_depth_stencil_variable_GetBackingS
 
     if (!(v = d3d10_get_state_variable(v, index, &v->effect->ds_states)))
         return E_FAIL;
+
+    d3d10_effect_update_dependent_props(&v->u.state.dependencies, &v->u.state.desc);
 
     *desc = v->u.state.desc.depth_stencil;
 

@@ -25,6 +25,7 @@
 #include "winnt.h"
 #include "winternl.h"
 #include "winerror.h"
+#include "winver.h"
 #include "wine/debug.h"
 #include "imagehlp.h"
 
@@ -187,9 +188,7 @@ BOOL WINAPI MapAndLoad(PCSTR pszImageName, PCSTR pszDllPath, PLOADED_IMAGE pLoad
     pLoadedImage->hFile            = hFile;
     pLoadedImage->MappedAddress    = mapping;
     pLoadedImage->FileHeader       = pNtHeader;
-    pLoadedImage->Sections         = (PIMAGE_SECTION_HEADER)
-        ((LPBYTE) &pNtHeader->OptionalHeader +
-         pNtHeader->FileHeader.SizeOfOptionalHeader);
+    pLoadedImage->Sections         = IMAGE_FIRST_SECTION(pNtHeader);
     pLoadedImage->NumberOfSections = pNtHeader->FileHeader.NumberOfSections;
     pLoadedImage->SizeOfImage      = GetFileSize(hFile, NULL);
     pLoadedImage->Characteristics  = pNtHeader->FileHeader.Characteristics;

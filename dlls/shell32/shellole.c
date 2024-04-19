@@ -24,8 +24,6 @@
 #include <string.h>
 
 #define COBJMACROS
-#define NONAMELESSUNION
-
 #include "windef.h"
 #include "winbase.h"
 #include "shellapi.h"
@@ -72,6 +70,7 @@ static const struct {
 	{&CLSID_MyComputer,	ISF_MyComputer_Constructor},
 	{&CLSID_MyDocuments,    MyDocuments_Constructor},
 	{&CLSID_NetworkPlaces,  ISF_NetworkPlaces_Constructor},
+	{&CLSID_NewMenu,        new_menu_create},
 	{&CLSID_Printers,       Printers_Constructor},
 	{&CLSID_QueryAssociations, QueryAssociations_Constructor},
 	{&CLSID_RecycleBin,     RecycleBin_Constructor},
@@ -87,6 +86,7 @@ static const struct {
 	{&CLSID_DestinationList, CustomDestinationList_Constructor},
 	{&CLSID_ShellImageDataFactory, ShellImageDataFactory_Constructor},
 	{&CLSID_FileOperation, IFileOperation_Constructor},
+	{&CLSID_ActiveDesktop, ActiveDesktop_Constructor},
 	{NULL, NULL}
 };
 
@@ -384,7 +384,7 @@ static IClassFactory * IDefClF_fnConstructor(LPFNCREATEINSTANCE lpfnCI, PLONG pc
 {
 	IDefClFImpl* lpclf;
 
-	lpclf = heap_alloc(sizeof(*lpclf));
+	lpclf = malloc(sizeof(*lpclf));
 	lpclf->ref = 1;
 	lpclf->IClassFactory_iface.lpVtbl = &dclfvt;
 	lpclf->lpfnCI = lpfnCI;
@@ -444,7 +444,7 @@ static ULONG WINAPI IDefClF_fnRelease(LPCLASSFACTORY iface)
 	  if (This->pcRefDll) InterlockedDecrement(This->pcRefDll);
 
 	  TRACE("-- destroying IClassFactory(%p)\n",This);
-	  heap_free(This);
+	  free(This);
 	}
 
 	return refCount;
@@ -559,56 +559,40 @@ BOOL WINAPI DragQueryPoint(HDROP hDrop, POINT *p)
  *  DragQueryFileA		[SHELL32.@]
  *  DragQueryFile 		[SHELL32.@]
  */
-UINT WINAPI DragQueryFileA(
-	HDROP hDrop,
-	UINT lFile,
-	LPSTR lpszFile,
-	UINT lLength)
+UINT WINAPI DragQueryFileA(HDROP hDrop, UINT lFile, LPSTR lpszFile, UINT lLength)
 {
-	LPSTR lpDrop;
-	UINT i = 0;
-	DROPFILES *lpDropFileStruct = GlobalLock(hDrop);
+    LPWSTR filenameW = NULL;
+    LPSTR filename = NULL;
+    UINT i;
 
-	TRACE("(%p, %x, %p, %u)\n",	hDrop,lFile,lpszFile,lLength);
+    TRACE("(%p, %x, %p, %u)\n", hDrop, lFile, lpszFile, lLength);
 
-	if(!lpDropFileStruct) goto end;
+    i = DragQueryFileW(hDrop, lFile, NULL, 0);
+    if (!i || lFile == 0xFFFFFFFF) goto end;
+    filenameW = malloc((i + 1) * sizeof(WCHAR));
+    if (!filenameW) goto error;
+    if (!DragQueryFileW(hDrop, lFile, filenameW, i + 1)) goto error;
 
-	lpDrop = (LPSTR) lpDropFileStruct + lpDropFileStruct->pFiles;
+    i = WideCharToMultiByte(CP_ACP, 0, filenameW, -1, NULL, 0, NULL, NULL);
+    if (!lpszFile || !lLength)
+    {
+        /* minus a trailing null */
+        i--;
+        goto end;
+    }
+    filename = malloc(i);
+    if (!filename) goto error;
+    i = WideCharToMultiByte(CP_ACP, 0, filenameW, -1, filename, i, NULL, NULL);
 
-        if(lpDropFileStruct->fWide) {
-            LPWSTR lpszFileW = NULL;
-
-            if(lpszFile && lFile != 0xFFFFFFFF) {
-                lpszFileW = heap_alloc(lLength*sizeof(WCHAR));
-                if(lpszFileW == NULL) {
-                    goto end;
-                }
-            }
-            i = DragQueryFileW(hDrop, lFile, lpszFileW, lLength);
-
-            if(lpszFileW) {
-                WideCharToMultiByte(CP_ACP, 0, lpszFileW, -1, lpszFile, lLength, 0, NULL);
-                heap_free(lpszFileW);
-            }
-            goto end;
-        }
-
-	while (i++ < lFile)
-	{
-	  while (*lpDrop++); /* skip filename */
-	  if (!*lpDrop)
-	  {
-	    i = (lFile == 0xFFFFFFFF) ? i : 0;
-	    goto end;
-	  }
-	}
-
-	i = strlen(lpDrop);
-	if (!lpszFile ) goto end;   /* needed buffer size */
-	lstrcpynA (lpszFile, lpDrop, lLength);
+    lstrcpynA(lpszFile, filename, lLength);
+    i = min(i, lLength) - 1;
 end:
-	GlobalUnlock(hDrop);
-	return i;
+    free(filenameW);
+    free(filename);
+    return i;
+error:
+    i = 0;
+    goto end;
 }
 
 /*************************************************************************
@@ -620,50 +604,59 @@ UINT WINAPI DragQueryFileW(
 	LPWSTR lpszwFile,
 	UINT lLength)
 {
-	LPWSTR lpwDrop;
+	LPWSTR buffer = NULL;
+	LPCWSTR filename;
 	UINT i = 0;
-	DROPFILES *lpDropFileStruct = GlobalLock(hDrop);
+	const DROPFILES *lpDropFileStruct = GlobalLock(hDrop);
 
 	TRACE("(%p, %x, %p, %u)\n", hDrop,lFile,lpszwFile,lLength);
 
 	if(!lpDropFileStruct) goto end;
 
-	lpwDrop = (LPWSTR) ((LPSTR)lpDropFileStruct + lpDropFileStruct->pFiles);
-
-        if(lpDropFileStruct->fWide == FALSE) {
-            LPSTR lpszFileA = NULL;
-
-            if(lpszwFile && lFile != 0xFFFFFFFF) {
-                lpszFileA = heap_alloc(lLength);
-                if(lpszFileA == NULL) {
+        if(lpDropFileStruct->fWide)
+        {
+            LPCWSTR p = (LPCWSTR) ((LPCSTR)lpDropFileStruct + lpDropFileStruct->pFiles);
+            while (i++ < lFile)
+            {
+                while (*p++); /* skip filename */
+                if (!*p)
+                {
+                    i = (lFile == 0xFFFFFFFF) ? i : 0;
                     goto end;
                 }
             }
-            i = DragQueryFileA(hDrop, lFile, lpszFileA, lLength);
-
-            if(lpszFileA) {
-                MultiByteToWideChar(CP_ACP, 0, lpszFileA, -1, lpszwFile, lLength);
-                heap_free(lpszFileA);
+            filename = p;
+        }
+        else
+        {
+            LPCSTR p = (LPCSTR)lpDropFileStruct + lpDropFileStruct->pFiles;
+            while (i++ < lFile)
+            {
+                while (*p++); /* skip filename */
+                if (!*p)
+                {
+                    i = (lFile == 0xFFFFFFFF) ? i : 0;
+                    goto end;
+                }
             }
-            goto end;
+            i = MultiByteToWideChar(CP_ACP, 0, p, -1, NULL, 0);
+            buffer = malloc(i * sizeof(WCHAR));
+            if (!buffer)
+            {
+                i = 0;
+                goto end;
+            }
+            MultiByteToWideChar(CP_ACP, 0, p, -1, buffer, i);
+            filename = buffer;
         }
 
-	i = 0;
-	while (i++ < lFile)
-	{
-	  while (*lpwDrop++); /* skip filename */
-	  if (!*lpwDrop)
-	  {
-	    i = (lFile == 0xFFFFFFFF) ? i : 0;
-	    goto end;
-	  }
-	}
-
-	i = lstrlenW(lpwDrop);
-	if ( !lpszwFile) goto end;   /* needed buffer size */
-	lstrcpynW (lpszwFile, lpwDrop, lLength);
+	i = lstrlenW(filename);
+	if (!lpszwFile || !lLength) goto end;   /* needed buffer size */
+	lstrcpynW(lpszwFile, filename, lLength);
+	i = min(i, lLength - 1);
 end:
 	GlobalUnlock(hDrop);
+	free(buffer);
 	return i;
 }
 
@@ -705,7 +698,7 @@ HRESULT WINAPI SHPropStgCreate(IPropertySetStorage *psstg, REFFMTID fmtid,
 
         if(puCodePage) {
             prop.ulKind = PRSPEC_PROPID;
-            prop.u.propid = PID_CODEPAGE;
+            prop.propid = PID_CODEPAGE;
             hres = IPropertyStorage_ReadMultiple(*ppstg, 1, &prop, &ret);
             if(FAILED(hres) || ret.vt!=VT_I2)
                 *puCodePage = 0;
@@ -738,7 +731,7 @@ HRESULT WINAPI SHPropStgReadMultiple(IPropertyStorage *pps, UINT uCodePage,
         PROPVARIANT ret;
 
         prop.ulKind = PRSPEC_PROPID;
-        prop.u.propid = PID_CODEPAGE;
+        prop.propid = PID_CODEPAGE;
         hres = IPropertyStorage_ReadMultiple(pps, 1, &prop, &ret);
         if(FAILED(hres) || ret.vt!=VT_I2)
             return S_OK;
@@ -777,7 +770,7 @@ HRESULT WINAPI SHPropStgWriteMultiple(IPropertyStorage *pps, UINT *uCodePage,
         PROPVARIANT ret;
 
         prop.ulKind = PRSPEC_PROPID;
-        prop.u.propid = PID_CODEPAGE;
+        prop.propid = PID_CODEPAGE;
         hres = IPropertyStorage_ReadMultiple(pps, 1, &prop, &ret);
         if(FAILED(hres))
             return hres;
@@ -875,8 +868,8 @@ static ULONG WINAPI ShellImageData_Release(IShellImageData *iface)
     if (!ref)
     {
         GdipDisposeImage(This->image);
-        heap_free(This->path);
-        SHFree(This);
+        free(This->path);
+        free(This);
     }
 
     return ref;
@@ -1246,12 +1239,12 @@ static HRESULT create_shellimagedata_from_path(const WCHAR *path, IShellImageDat
 {
     ShellImageData *This;
 
-    This = SHAlloc(sizeof(*This));
+    This = malloc(sizeof(*This));
 
     This->IShellImageData_iface.lpVtbl = &ShellImageDataVtbl;
     This->ref = 1;
 
-    This->path = strdupW(path);
+    This->path = wcsdup(path);
     This->image = NULL;
 
     *data = &This->IShellImageData_iface;

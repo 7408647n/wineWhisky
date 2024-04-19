@@ -92,7 +92,6 @@ enum {
     CGEventSourceKeyboardType keyboardType;
     NSEvent* lastFlagsChanged;
     BOOL inputSourceIsInputMethod;
-    BOOL inputSourceIsInputMethodValid;
     uint32_t pressedKeyCodes[128 / 32];
 
     CGFloat primaryScreenHeight;
@@ -149,6 +148,7 @@ enum {
     + (WineApplicationController*) sharedController;
 
     - (void) transformProcessToForeground:(BOOL)activateIfTransformed;
+    - (void) tryToActivateIgnoringOtherApps:(BOOL)ignore;
 
     - (BOOL) registerEventQueue:(WineEventQueue*)queue;
     - (void) unregisterEventQueue:(WineEventQueue*)queue;
@@ -164,6 +164,7 @@ enum {
 
     - (void) window:(WineWindow*)window isBeingDragged:(BOOL)dragged;
     - (void) windowWillOrderOut:(WineWindow*)window;
+    - (void) maybeHideDockIconDueToWindowOrderingOut:(NSWindow *)window;
 
     - (void) flipRect:(NSRect*)rect;
     - (NSPoint) flippedMouseLocation:(NSPoint)point;

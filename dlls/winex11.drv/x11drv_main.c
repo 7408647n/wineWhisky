@@ -19,6 +19,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#if 0
+#pragma makedep unix
+#endif
+
 #include "config.h"
 
 #include <fcntl.h>
@@ -28,29 +32,29 @@
 #include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <assert.h>
 #include <dlfcn.h>
 #include <X11/cursorfont.h>
 #include <X11/Xlib.h>
-#ifdef HAVE_XKB
 #include <X11/XKBlib.h>
-#endif
 #ifdef HAVE_X11_EXTENSIONS_XRENDER_H
 #include <X11/extensions/Xrender.h>
 #endif
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
-#include "windef.h"
-#include "winbase.h"
-#include "winreg.h"
+
+#define VK_NO_PROTOTYPES
+#define WINE_VK_HOST
 
 #include "x11drv.h"
+#include "winreg.h"
 #include "xcomposite.h"
 #include "wine/server.h"
-#include "wine/unicode.h"
 #include "wine/debug.h"
 #include "wine/list.h"
-#include "wine/heap.h"
+#include "wine/vulkan.h"
+#include "wine/vulkan_driver.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(x11drv);
 WINE_DECLARE_DEBUG_CHANNEL(synchronous);
@@ -60,17 +64,16 @@ XVisualInfo default_visual = { 0 };
 XVisualInfo argb_visual = { 0 };
 Colormap default_colormap = None;
 XPixmapFormatValues **pixmap_formats;
+Atom systray_atom = 0;
+HWND systray_hwnd = 0;
 unsigned int screen_bpp;
 Window root_window;
 BOOL usexvidmode = TRUE;
 BOOL usexrandr = TRUE;
 BOOL usexcomposite = TRUE;
-BOOL use_xkb = TRUE;
 BOOL use_take_focus = TRUE;
 BOOL use_primary_selection = FALSE;
 BOOL use_system_cursors = TRUE;
-BOOL show_systray = TRUE;
-BOOL grab_pointer = TRUE;
 BOOL grab_fullscreen = FALSE;
 BOOL managed_mode = TRUE;
 BOOL decorated_mode = TRUE;
@@ -82,8 +85,8 @@ BOOL shape_layered_windows = TRUE;
 int copy_default_colors = 128;
 int alloc_system_colors = 256;
 int xrender_error_base = 0;
-HMODULE x11drv_module = 0;
 char *process_name = NULL;
+WNDPROC client_foreign_window_proc = NULL;
 
 static x11drv_error_callback err_callback;   /* current callback for error */
 static Display *err_callback_display;        /* display callback is set for */
@@ -94,18 +97,7 @@ static int (*old_error_handler)( Display *, XErrorEvent * );
 static BOOL use_xim = TRUE;
 static WCHAR input_style[20];
 
-static pthread_mutex_t d3dkmt_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t error_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-struct d3dkmt_vidpn_source
-{
-    D3DKMT_VIDPNSOURCEOWNER_TYPE type;      /* VidPN source owner type */
-    D3DDDI_VIDEO_PRESENT_SOURCE_ID id;      /* VidPN present source id */
-    D3DKMT_HANDLE device;                   /* Kernel mode device context */
-    struct list entry;                      /* List entry */
-};
-
-static struct list d3dkmt_vidpn_sources = LIST_INIT( d3dkmt_vidpn_sources );   /* VidPN source information list */
 
 #define IS_OPTION_TRUE(ch) \
     ((ch) == 'y' || (ch) == 'Y' || (ch) == 't' || (ch) == 'T' || (ch) == '1')
@@ -130,8 +122,6 @@ static const char * const atom_names[NB_XATOMS - FIRST_XATOM] =
     "RAW_ASCENT",
     "RAW_DESCENT",
     "RAW_CAP_HEIGHT",
-    "Rel X",
-    "Rel Y",
     "WM_PROTOCOLS",
     "WM_DELETE_WINDOW",
     "WM_STATE",
@@ -139,6 +129,7 @@ static const char * const atom_names[NB_XATOMS - FIRST_XATOM] =
     "DndProtocol",
     "DndSelection",
     "_ICC_PROFILE",
+    "_KDE_NET_WM_STATE_SKIP_SWITCHER",
     "_MOTIF_WM_HINTS",
     "_NET_STARTUP_INFO_BEGIN",
     "_NET_STARTUP_INFO",
@@ -146,6 +137,7 @@ static const char * const atom_names[NB_XATOMS - FIRST_XATOM] =
     "_NET_SYSTEM_TRAY_OPCODE",
     "_NET_SYSTEM_TRAY_S0",
     "_NET_SYSTEM_TRAY_VISUAL",
+    "_NET_WM_FULLSCREEN_MONITORS",
     "_NET_WM_ICON",
     "_NET_WM_MOVERESIZE",
     "_NET_WM_NAME",
@@ -213,6 +205,7 @@ static inline BOOL ignore_error( Display *display, XErrorEvent *event )
 {
     if ((event->request_code == X_SetInputFocus ||
          event->request_code == X_ChangeWindowAttributes ||
+         event->request_code == X_ConfigureWindow ||
          event->request_code == X_SendEvent) &&
         (event->error_code == BadMatch ||
          event->error_code == BadWindow)) return TRUE;
@@ -247,6 +240,7 @@ static inline BOOL ignore_error( Display *display, XErrorEvent *event )
 void X11DRV_expect_error( Display *display, x11drv_error_callback callback, void *arg )
 {
     pthread_mutex_lock( &error_mutex );
+    XLockDisplay( display );
     err_callback         = callback;
     err_callback_display = display;
     err_callback_arg     = arg;
@@ -265,6 +259,7 @@ int X11DRV_check_error(void)
 {
     int res = err_callback_result;
     err_callback = NULL;
+    XUnlockDisplay( err_callback_display );
     pthread_mutex_unlock( &error_mutex );
     return res;
 }
@@ -276,7 +271,7 @@ int X11DRV_check_error(void)
 static int error_handler( Display *display, XErrorEvent *error_evt )
 {
     if (err_callback && display == err_callback_display &&
-        (long)(error_evt->serial - err_serial) >= 0)
+        (!error_evt->serial || error_evt->serial >= err_serial))
     {
         if ((err_callback_result = err_callback( display, error_evt, err_callback_arg )))
         {
@@ -291,16 +286,13 @@ static int error_handler( Display *display, XErrorEvent *error_evt )
                error_evt->error_code, error_evt->request_code );
         return 0;
     }
-    ERR("XERROR: code %d request %d minor %d xid %08lx\n",
-        error_evt->error_code,
-        error_evt->request_code,
-        error_evt->minor_code,
-        error_evt->resourceid);
     if (TRACE_ON(synchronous))
     {
-        DebugBreak();  /* force an entry in the debugger */
-        old_error_handler( display, error_evt );
+        ERR( "X protocol error: serial=%ld, request_code=%d - breaking into debugger\n",
+             error_evt->serial, error_evt->request_code );
+        assert( 0 );
     }
+    old_error_handler( display, error_evt );
     return 0;
 }
 
@@ -318,7 +310,7 @@ static void init_pixmap_formats( Display *display )
                formats[i].depth, formats[i].bits_per_pixel, formats[i].scanline_pad );
         if (formats[i].depth > max) max = formats[i].depth;
     }
-    pixmap_formats = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pixmap_formats) * (max + 1) );
+    pixmap_formats = calloc( 1, sizeof(*pixmap_formats) * (max + 1) );
     for (i = 0; i < count; i++) pixmap_formats[formats[i].depth] = &formats[i];
 }
 
@@ -357,12 +349,12 @@ HKEY open_hkcu_key( const char *name )
 
         sid = ((TOKEN_USER *)sid_data)->User.Sid;
         len = sprintf( buffer, "\\Registry\\User\\S-%u-%u", sid->Revision,
-                       MAKELONG( MAKEWORD( sid->IdentifierAuthority.Value[5],
-                                           sid->IdentifierAuthority.Value[4] ),
-                                 MAKEWORD( sid->IdentifierAuthority.Value[3],
-                                           sid->IdentifierAuthority.Value[2] )));
+                       (int)MAKELONG( MAKEWORD( sid->IdentifierAuthority.Value[5],
+                                                sid->IdentifierAuthority.Value[4] ),
+                                      MAKEWORD( sid->IdentifierAuthority.Value[3],
+                                                sid->IdentifierAuthority.Value[2] )));
         for (i = 0; i < sid->SubAuthorityCount; i++)
-            len += sprintf( buffer + len, "-%u", sid->SubAuthority[i] );
+            len += sprintf( buffer + len, "-%u", (int)sid->SubAuthority[i] );
 
         ascii_to_unicode( bufferW, buffer, len );
         hkcu = reg_open_key( NULL, bufferW, len * sizeof(WCHAR) );
@@ -426,10 +418,8 @@ static inline DWORD get_config_key( HKEY defkey, HKEY appkey, const char *name,
  */
 static void setup_options(void)
 {
-    static const WCHAR steamwebhelperW[] = {'s','t','e','a','m','w','e','b','h','e','l','p','e','r','.','e','x','e',0};
-    static const WCHAR steamW[] = {'s','t','e','a','m','.','e','x','e',0};
     static const WCHAR x11driverW[] = {'\\','X','1','1',' ','D','r','i','v','e','r',0};
-    WCHAR buffer[MAX_PATH+16];
+    WCHAR buffer[MAX_PATH+16], *p, *appname;
     HKEY hkey, appkey = 0;
     DWORD len;
 
@@ -438,27 +428,27 @@ static void setup_options(void)
 
     /* open the app-specific key */
 
-    len = GetModuleFileNameW( 0, buffer, MAX_PATH );
+    appname = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+    if ((p = wcsrchr( appname, '/' ))) appname = p + 1;
+    if ((p = wcsrchr( appname, '\\' ))) appname = p + 1;
+    len = lstrlenW( appname );
+
     if (len && len < MAX_PATH)
     {
         HKEY tmpkey;
-        WCHAR *p, *appname = buffer;
-        if ((p = strrchrW( appname, '/' ))) appname = p + 1;
-        if ((p = strrchrW( appname, '\\' ))) appname = p + 1;
-        CharLowerW(appname);
-        len = WideCharToMultiByte( CP_UNIXCP, 0, appname, -1, NULL, 0, NULL, NULL );
-        if ((process_name = HeapAlloc( GetProcessHeap(), 0, len )))
-            WideCharToMultiByte( CP_UNIXCP, 0, appname, -1, process_name, len, NULL, NULL );
-        strcatW( appname, x11driverW );
+        int i;
+        for (i = 0; appname[i]; i++) buffer[i] = RtlDowncaseUnicodeChar( appname[i] );
+        buffer[i] = 0;
+        appname = buffer;
+        if ((process_name = malloc( len * 3 + 1 )))
+            ntdll_wcstoumbs( appname, len + 1, process_name, len * 3 + 1, FALSE );
+        memcpy( appname + i, x11driverW, sizeof(x11driverW) );
         /* @@ Wine registry key: HKCU\Software\Wine\AppDefaults\app.exe\X11 Driver */
         if ((tmpkey = open_hkcu_key( "Software\\Wine\\AppDefaults" )))
         {
             appkey = reg_open_key( tmpkey, appname, lstrlenW( appname ) * sizeof(WCHAR) );
             NtClose( tmpkey );
         }
-
-        if (!lstrcmpW(appname, steamwebhelperW) || !strcmpW(appname, steamW))
-            enable_shm_surface = TRUE;
     }
 
     if (!get_config_key( hkey, appkey, "Managed", buffer, sizeof(buffer) ))
@@ -482,17 +472,11 @@ static void setup_options(void)
     if (!get_config_key( hkey, appkey, "UseSystemCursors", buffer, sizeof(buffer) ))
         use_system_cursors = IS_OPTION_TRUE( buffer[0] );
 
-    if (!get_config_key( hkey, appkey, "ShowSystray", buffer, sizeof(buffer) ))
-        show_systray = IS_OPTION_TRUE( buffer[0] );
-
-    if (!get_config_key( hkey, appkey, "GrabPointer", buffer, sizeof(buffer) ))
-        grab_pointer = IS_OPTION_TRUE( buffer[0] );
-
     if (!get_config_key( hkey, appkey, "GrabFullscreen", buffer, sizeof(buffer) ))
         grab_fullscreen = IS_OPTION_TRUE( buffer[0] );
 
     if (!get_config_key( hkey, appkey, "ScreenDepth", buffer, sizeof(buffer) ))
-        default_visual.depth = strtolW( buffer, NULL, 0 );
+        default_visual.depth = wcstol( buffer, NULL, 0 );
 
     if (!get_config_key( hkey, appkey, "ClientSideGraphics", buffer, sizeof(buffer) ))
         client_side_graphics = IS_OPTION_TRUE( buffer[0] );
@@ -510,24 +494,15 @@ static void setup_options(void)
         private_color_map = IS_OPTION_TRUE( buffer[0] );
 
     if (!get_config_key( hkey, appkey, "PrimaryMonitor", buffer, sizeof(buffer) ))
-        primary_monitor = strtolW( buffer, NULL, 0 );
+        primary_monitor = wcstol( buffer, NULL, 0 );
 
     if (!get_config_key( hkey, appkey, "CopyDefaultColors", buffer, sizeof(buffer) ))
-        copy_default_colors = strtolW( buffer, NULL, 0 );
+        copy_default_colors = wcstol( buffer, NULL, 0 );
 
     if (!get_config_key( hkey, appkey, "AllocSystemColors", buffer, sizeof(buffer) ))
-        alloc_system_colors = strtolW( buffer, NULL, 0 );
+        alloc_system_colors = wcstol( buffer, NULL, 0 );
 
     get_config_key( hkey, appkey, "InputStyle", input_style, sizeof(input_style) );
-
-    if (!get_config_key(hkey, appkey, "NvThreads", buffer, sizeof(buffer)))
-    {
-        if (IS_OPTION_TRUE(buffer[0]))
-        {
-            setenv("__GL_THREADED_OPTIMIZATIONS", "1", 1);
-            SetEnvironmentVariableA("__GL_THREADED_OPTIMIZATIONS", "1");
-        }
-    }
 
     NtClose( appkey );
     NtClose( hkey );
@@ -648,15 +623,16 @@ static void init_visuals( Display *display, int screen )
 /***********************************************************************
  *           X11DRV process initialisation routine
  */
-static BOOL process_attach(void)
+static NTSTATUS x11drv_init( void *arg )
 {
+    struct init_params *params = arg;
     Display *display;
     void *libx11 = dlopen( SONAME_LIBX11, RTLD_NOW|RTLD_GLOBAL );
 
     if (!libx11)
     {
         ERR( "failed to load %s: %s\n", SONAME_LIBX11, dlerror() );
-        return FALSE;
+        return STATUS_UNSUCCESSFUL;
     }
     pXGetEventData = dlsym( libx11, "XGetEventData" );
     pXFreeEventData = dlsym( libx11, "XFreeEventData" );
@@ -669,7 +645,9 @@ static BOOL process_attach(void)
     /* Open display */
 
     if (!XInitThreads()) ERR( "XInitThreads failed, trouble ahead\n" );
-    if (!(display = XOpenDisplay( NULL ))) return FALSE;
+    if (!(display = XOpenDisplay( NULL ))) return STATUS_UNSUCCESSFUL;
+
+    client_foreign_window_proc = params->foreign_window_proc;
 
     fcntl( ConnectionNumber(display), F_SETFD, 1 ); /* set close on exec flag */
     root_window = DefaultRootWindow( display );
@@ -697,17 +675,15 @@ static BOOL process_attach(void)
 #ifdef SONAME_LIBXCOMPOSITE
     X11DRV_XComposite_Init();
 #endif
-    X11DRV_XInput2_Init();
+    x11drv_xinput2_load();
 
-#ifdef HAVE_XKB
-    if (use_xkb) use_xkb = XkbUseExtension( gdi_display, NULL, NULL );
-#endif
+    XkbUseExtension( gdi_display, NULL, NULL );
     X11DRV_InitKeyboard( gdi_display );
-    if (use_xim) use_xim = X11DRV_InitXIM( input_style );
+    if (use_xim) use_xim = xim_init( input_style );
 
     init_user_driver();
     X11DRV_DisplayDevices_Init(FALSE);
-    return TRUE;
+    return STATUS_SUCCESS;
 }
 
 
@@ -723,10 +699,11 @@ void X11DRV_ThreadDetach(void)
         vulkan_thread_detach();
         if (data->xim) XCloseIM( data->xim );
         if (data->font_set) XFreeFontSet( data->display, data->font_set );
+        XSync( gdi_display, False ); /* make sure XReparentWindow requests have completed before closing the thread display */
         XCloseDisplay( data->display );
-        HeapFree( GetProcessHeap(), 0, data );
+        free( data );
         /* clear data in case we get re-entered from user32 before the thread is truly dead */
-        NtUserGetThreadInfo()->driver_data = NULL;
+        NtUserGetThreadInfo()->driver_data = 0;
     }
 }
 
@@ -740,7 +717,7 @@ static void set_queue_display_fd( Display *display )
     if (wine_server_fd_to_handle( ConnectionNumber(display), GENERIC_READ | SYNCHRONIZE, 0, &handle ))
     {
         MESSAGE( "x11drv: Can't allocate handle for display fd\n" );
-        ExitProcess(1);
+        NtTerminateProcess( 0, 1 );
     }
     SERVER_START_REQ( set_queue_fd )
     {
@@ -751,9 +728,9 @@ static void set_queue_display_fd( Display *display )
     if (ret)
     {
         MESSAGE( "x11drv: Can't store handle for display fd\n" );
-        ExitProcess(1);
+        NtTerminateProcess( 0, 1 );
     }
-    CloseHandle( handle );
+    NtClose( handle );
 }
 
 
@@ -766,51 +743,30 @@ struct x11drv_thread_data *x11drv_init_thread_data(void)
 
     if (data) return data;
 
-    if (!(data = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*data) )))
+    if (!(data = calloc( 1, sizeof(*data) )))
     {
         ERR( "could not create data\n" );
-        ExitProcess(1);
+        NtTerminateProcess( 0, 1 );
     }
     if (!(data->display = XOpenDisplay(NULL)))
     {
         ERR_(winediag)( "x11drv: Can't open display: %s. Please ensure that your X server is running and that $DISPLAY is set correctly.\n", XDisplayName(NULL));
-        ExitProcess(1);
+        NtTerminateProcess( 0, 1 );
     }
 
     fcntl( ConnectionNumber(data->display), F_SETFD, 1 ); /* set close on exec flag */
 
-#ifdef HAVE_XKB
-    if (use_xkb && XkbUseExtension( data->display, NULL, NULL ))
-        XkbSetDetectableAutoRepeat( data->display, True, NULL );
-#endif
-
+    XkbUseExtension( data->display, NULL, NULL );
+    XkbSetDetectableAutoRepeat( data->display, True, NULL );
     if (TRACE_ON(synchronous)) XSynchronize( data->display, True );
 
     set_queue_display_fd( data->display );
-    NtUserGetThreadInfo()->driver_data = data;
+    NtUserGetThreadInfo()->driver_data = (UINT_PTR)data;
 
-    if (use_xim) X11DRV_SetupXIM();
+    if (use_xim) xim_thread_attach( data );
+    x11drv_xinput2_init( data );
 
     return data;
-}
-
-
-/***********************************************************************
- *           X11DRV initialisation routine
- */
-BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, LPVOID reserved )
-{
-    BOOL ret = TRUE;
-
-    switch(reason)
-    {
-    case DLL_PROCESS_ATTACH:
-        DisableThreadLibraryCalls( hinst );
-        x11drv_module = hinst;
-        ret = process_attach();
-        break;
-    }
-    return ret;
 }
 
 
@@ -850,142 +806,72 @@ BOOL X11DRV_SystemParametersInfo( UINT action, UINT int_param, void *ptr_param, 
     return FALSE;  /* let user32 handle it */
 }
 
-/**********************************************************************
- *           X11DRV_D3DKMTSetVidPnSourceOwner
- */
-NTSTATUS CDECL X11DRV_D3DKMTSetVidPnSourceOwner( const D3DKMT_SETVIDPNSOURCEOWNER *desc )
+NTSTATUS x11drv_client_func( enum x11drv_client_funcs id, const void *params, ULONG size )
 {
-    struct d3dkmt_vidpn_source *source, *source2;
-    NTSTATUS status = STATUS_SUCCESS;
-    BOOL found;
-    UINT i;
-
-    TRACE("(%p)\n", desc);
-
-    pthread_mutex_lock( &d3dkmt_mutex );
-
-    /* Check parameters */
-    for (i = 0; i < desc->VidPnSourceCount; ++i)
-    {
-        LIST_FOR_EACH_ENTRY( source, &d3dkmt_vidpn_sources, struct d3dkmt_vidpn_source, entry )
-        {
-            if (source->id == desc->pVidPnSourceId[i])
-            {
-                /* Same device */
-                if (source->device == desc->hDevice)
-                {
-                    if ((source->type == D3DKMT_VIDPNSOURCEOWNER_EXCLUSIVE
-                         && (desc->pType[i] == D3DKMT_VIDPNSOURCEOWNER_SHARED
-                             || desc->pType[i] == D3DKMT_VIDPNSOURCEOWNER_EMULATED))
-                        || (source->type == D3DKMT_VIDPNSOURCEOWNER_EMULATED
-                            && desc->pType[i] == D3DKMT_VIDPNSOURCEOWNER_EXCLUSIVE))
-                    {
-                        status = STATUS_INVALID_PARAMETER;
-                        goto done;
-                    }
-                }
-                /* Different devices */
-                else
-                {
-                    if ((source->type == D3DKMT_VIDPNSOURCEOWNER_EXCLUSIVE
-                         || source->type == D3DKMT_VIDPNSOURCEOWNER_EMULATED)
-                        && (desc->pType[i] == D3DKMT_VIDPNSOURCEOWNER_EXCLUSIVE
-                            || desc->pType[i] == D3DKMT_VIDPNSOURCEOWNER_EMULATED))
-                    {
-                        status = STATUS_GRAPHICS_VIDPN_SOURCE_IN_USE;
-                        goto done;
-                    }
-                }
-            }
-        }
-
-        /* On Windows, it seems that all video present sources are owned by DMM clients, so any attempt to set
-         * D3DKMT_VIDPNSOURCEOWNER_SHARED come back STATUS_GRAPHICS_VIDPN_SOURCE_IN_USE */
-        if (desc->pType[i] == D3DKMT_VIDPNSOURCEOWNER_SHARED)
-        {
-            status = STATUS_GRAPHICS_VIDPN_SOURCE_IN_USE;
-            goto done;
-        }
-
-        /* FIXME: D3DKMT_VIDPNSOURCEOWNER_EXCLUSIVEGDI unsupported */
-        if (desc->pType[i] == D3DKMT_VIDPNSOURCEOWNER_EXCLUSIVEGDI || desc->pType[i] > D3DKMT_VIDPNSOURCEOWNER_EMULATED)
-        {
-            status = STATUS_INVALID_PARAMETER;
-            goto done;
-        }
-    }
-
-    /* Remove owner */
-    if (!desc->VidPnSourceCount && !desc->pType && !desc->pVidPnSourceId)
-    {
-        LIST_FOR_EACH_ENTRY_SAFE( source, source2, &d3dkmt_vidpn_sources, struct d3dkmt_vidpn_source, entry )
-        {
-            if (source->device == desc->hDevice)
-            {
-                list_remove( &source->entry );
-                heap_free( source );
-            }
-        }
-        goto done;
-    }
-
-    /* Add owner */
-    for (i = 0; i < desc->VidPnSourceCount; ++i)
-    {
-        found = FALSE;
-        LIST_FOR_EACH_ENTRY( source, &d3dkmt_vidpn_sources, struct d3dkmt_vidpn_source, entry )
-        {
-            if (source->device == desc->hDevice && source->id == desc->pVidPnSourceId[i])
-            {
-                found = TRUE;
-                break;
-            }
-        }
-
-        if (found)
-            source->type = desc->pType[i];
-        else
-        {
-            source = heap_alloc( sizeof( *source ) );
-            if (!source)
-            {
-                status = STATUS_NO_MEMORY;
-                goto done;
-            }
-
-            source->id = desc->pVidPnSourceId[i];
-            source->type = desc->pType[i];
-            source->device = desc->hDevice;
-            list_add_tail( &d3dkmt_vidpn_sources, &source->entry );
-        }
-    }
-
-done:
-    pthread_mutex_unlock( &d3dkmt_mutex );
-    return status;
+    void *ret_ptr;
+    ULONG ret_len;
+    return KeUserModeCallback( id, params, size, &ret_ptr, &ret_len );
 }
 
-/**********************************************************************
- *           X11DRV_D3DKMTCheckVidPnExclusiveOwnership
- */
-NTSTATUS CDECL X11DRV_D3DKMTCheckVidPnExclusiveOwnership( const D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP *desc )
+
+const unixlib_entry_t __wine_unix_call_funcs[] =
 {
-    struct d3dkmt_vidpn_source *source;
+    x11drv_init,
+    x11drv_tablet_attach_queue,
+    x11drv_tablet_get_packet,
+    x11drv_tablet_info,
+    x11drv_tablet_load_info,
+};
 
-    TRACE("(%p)\n", desc);
 
-    if (!desc || !desc->hAdapter)
-        return STATUS_INVALID_PARAMETER;
+C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );
 
-    pthread_mutex_lock( &d3dkmt_mutex );
-    LIST_FOR_EACH_ENTRY( source, &d3dkmt_vidpn_sources, struct d3dkmt_vidpn_source, entry )
+
+#ifdef _WIN64
+
+static NTSTATUS x11drv_wow64_init( void *arg )
+{
+    struct
     {
-        if (source->id == desc->VidPnSourceId && source->type == D3DKMT_VIDPNSOURCEOWNER_EXCLUSIVE)
-        {
-            pthread_mutex_unlock( &d3dkmt_mutex );
-            return STATUS_GRAPHICS_PRESENT_OCCLUDED;
-        }
-    }
-    pthread_mutex_unlock( &d3dkmt_mutex );
-    return STATUS_SUCCESS;
+        ULONG foreign_window_proc;
+    } *params32 = arg;
+    struct init_params params;
+
+    params.foreign_window_proc = UlongToPtr( params32->foreign_window_proc );
+    return x11drv_init( &params );
 }
+
+static NTSTATUS x11drv_wow64_tablet_get_packet( void *arg )
+{
+    FIXME( "%p\n", arg );
+    return 0;
+}
+
+static NTSTATUS x11drv_wow64_tablet_info( void *arg )
+{
+    struct
+    {
+        UINT category;
+        UINT index;
+        ULONG output;
+    } *params32 = arg;
+    struct tablet_info_params params;
+
+    params.category = params32->category;
+    params.index = params32->index;
+    params.output = UlongToPtr( params32->output );
+    return x11drv_tablet_info( &params );
+}
+
+const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
+{
+    x11drv_wow64_init,
+    x11drv_tablet_attach_queue,
+    x11drv_wow64_tablet_get_packet,
+    x11drv_wow64_tablet_info,
+    x11drv_tablet_load_info,
+};
+
+C_ASSERT( ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count );
+
+#endif /* _WIN64 */

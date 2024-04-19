@@ -150,6 +150,7 @@ typedef struct
 
 typedef struct cs_queue
 {
+    void *ctx;
     struct cs_queue *next;
     BOOL free;
     int unknown;
@@ -157,7 +158,6 @@ typedef struct cs_queue
 
 typedef struct
 {
-    ULONG_PTR unk_thread_id;
     cs_queue unk_active;
     void *unknown[2];
     cs_queue *head;
@@ -168,6 +168,7 @@ typedef struct
 {
     DWORD flags;
     critical_section cs;
+    ULONG_PTR unknown;
     DWORD thread_id;
     DWORD count;
 } *_Mtx_t;
@@ -1396,6 +1397,8 @@ static void test__Syserror_map(void)
 
     r1 = p__Syserror_map(0);
     ok(r1 != NULL, "_Syserror_map(0) returned NULL\n");
+    r1 = p__Syserror_map(1233);
+    ok(r1 != NULL, "_Syserror_map(1233) returned NULL\n");
     r2 = p__Syserror_map(1234);
     ok(r2 != NULL, "_Syserror_map(1234) returned NULL\n");
     ok(r1 == r2, "r1 = %p(%s), r2 = %p(%s)\n", r1, r1, r2, r2);
@@ -1614,12 +1617,14 @@ static void test_Copy_file(void)
     SetLastError(0xdeadbeef);
     ret = p_Copy_file(L"wine_test_dir/f1", L"wine_test_dir/f3");
     ok(ret == ERROR_SUCCESS, "Got unexpected ret %lu.\n", ret);
-    ok(GetLastError() == ret, "Got unexpected err %lu.\n", GetLastError());
+    ok(GetLastError() == ret || broken(GetLastError() == ERROR_INVALID_PARAMETER) /* some win8 machines */,
+            "Got unexpected err %lu.\n", GetLastError());
 
     SetLastError(0xdeadbeef);
     ret = p_Copy_file(L"wine_test_dir/f1", L"wine_test_dir/f3");
     ok(ret == ERROR_SUCCESS, "Got unexpected ret %lu.\n", ret);
-    ok(GetLastError() == ret, "Got unexpected err %lu.\n", GetLastError());
+    ok(GetLastError() == ret || broken(GetLastError() == ERROR_INVALID_PARAMETER) /* some win8 machines */,
+            "Got unexpected err %lu.\n", GetLastError());
 
     SetLastError(0xdeadbeef);
     ret = p_Copy_file(L"wine_test_dir/missing", L"wine_test_dir/f3");
@@ -1634,6 +1639,35 @@ static void test_Copy_file(void)
     ok(RemoveDirectoryW(L"wine_test_dir"), "expect wine_test_dir to exist\n");
 
     ok(SetCurrentDirectoryW(origin_path), "SetCurrentDirectoryW to origin_path failed\n");
+}
+
+static void test__Mtx(void)
+{
+    _Mtx_t mtx = NULL;
+    int r;
+
+    r = p__Mtx_init(&mtx, 0);
+    ok(!r, "failed to init mtx\n");
+
+    ok(mtx->thread_id == -1, "mtx.thread_id = %lx\n", mtx->thread_id);
+    ok(mtx->count == 0, "mtx.count = %lx\n", mtx->count);
+    p__Mtx_lock(mtx);
+    ok(mtx->thread_id == GetCurrentThreadId(), "mtx.thread_id = %lx\n", mtx->thread_id);
+    ok(mtx->count == 1, "mtx.count = %lx\n", mtx->count);
+    p__Mtx_lock(mtx);
+    ok(mtx->thread_id == GetCurrentThreadId(), "mtx.thread_id = %lx\n", mtx->thread_id);
+    ok(mtx->count == 1, "mtx.count = %lx\n", mtx->count);
+    p__Mtx_unlock(mtx);
+    ok(mtx->thread_id == -1, "mtx.thread_id = %lx\n", mtx->thread_id);
+    ok(mtx->count == 0, "mtx.count = %lx\n", mtx->count);
+    p__Mtx_unlock(mtx);
+    ok(mtx->thread_id == -1, "mtx.thread_id = %lx\n", mtx->thread_id);
+    ok(mtx->count == -1, "mtx.count = %lx\n", mtx->count);
+    p__Mtx_unlock(mtx);
+    ok(mtx->thread_id == -1, "mtx.thread_id = %lx\n", mtx->thread_id);
+    ok(mtx->count == -2, "mtx.count = %lx\n", mtx->count);
+
+    p__Mtx_destroy(mtx);
 }
 
 START_TEST(msvcp140)
@@ -1663,5 +1697,6 @@ START_TEST(msvcp140)
     test_Equivalent();
     test_cnd();
     test_Copy_file();
+    test__Mtx();
     FreeLibrary(msvcp);
 }

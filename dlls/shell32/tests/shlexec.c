@@ -54,6 +54,7 @@ static DLLVERSIONINFO dllver;
 static BOOL skip_shlexec_tests = FALSE;
 static BOOL skip_noassoc_tests = FALSE;
 static HANDLE dde_ready_event;
+static BOOL is_elevated;
 
 
 /***
@@ -193,6 +194,7 @@ static void init_event(const char* child_file)
     hEvent=CreateEventA(NULL, FALSE, FALSE, event_name);
 }
 
+static HANDLE hChildFile;
 /*
  * This is just to make sure the child won't run forever stuck in a
  * GetMessage() loop when DDE fails for some reason.
@@ -200,6 +202,7 @@ static void init_event(const char* child_file)
 static void CALLBACK childTimeout(HWND wnd, UINT msg, UINT_PTR timer, DWORD time)
 {
     trace("childTimeout called\n");
+    childPrintf(hChildFile, "Timeout=1\r\n");
 
     PostQuitMessage(0);
 }
@@ -216,6 +219,7 @@ static void doChild(int argc, char** argv)
     if (hFile == INVALID_HANDLE_VALUE)
         return;
 
+    hChildFile = hFile;
     /* Arguments */
     childPrintf(hFile, "[Child]\r\n");
     if (winetest_debug > 2)
@@ -607,7 +611,7 @@ static INT_PTR shell_execute_ex_(const char* file, int line,
     sei.lpClass=class;
     sei.hkeyClass=NULL;
     sei.dwHotKey=0;
-    U(sei).hIcon=NULL;
+    sei.hIcon=NULL;
     sei.hProcess=(HANDLE)0xdeadbeef; /* Out */
 
     DeleteFileA(child_file);
@@ -653,10 +657,20 @@ static INT_PTR shell_execute_ex_(const char* file, int line,
         c = GetPrivateProfileIntA("Child", "Failures", -1, child_file);
         if (c > 0)
             winetest_add_failures(c);
+        c = GetPrivateProfileIntA("Child", "Timeout", -1, child_file);
+        if (c > 0)
+        {
+            /* Inform caller of the timeout... these two following bits
+             * are directly returned by some Windows10 versions.
+             * Return the same bits when we detect a timeout in child.
+             */
+            SetLastError(ERROR_FILE_NOT_FOUND);
+            rc = SE_ERR_DDEFAIL;
+        }
         /* When NOZONECHECKS is specified the environment variables are not
          * inherited if the process does not have elevated privileges.
          */
-        if ((mask & SEE_MASK_NOZONECHECKS) && skip_shlexec_tests)
+        else if ((mask & SEE_MASK_NOZONECHECKS) && skip_shlexec_tests)
         {
             okChildInt_(file, line, "ShlexecVarLE", 203);
             okChildString_(file, line, "ShlexecVar", "", "");
@@ -708,23 +722,31 @@ static BOOL create_test_class(const char* class, BOOL protocol)
     return TRUE;
 }
 
-static BOOL create_test_association(const char* extension)
+static BOOL create_test_association_key(const char* extension, const char *class)
 {
     HKEY hkey;
-    char class[MAX_PATH];
     LONG rc;
 
-    sprintf(class, "shlexec%s", extension);
-    rc=RegCreateKeyExA(HKEY_CLASSES_ROOT, extension, 0, NULL, 0, KEY_SET_VALUE,
-                       NULL, &hkey, NULL);
+    rc = RegCreateKeyExA(HKEY_CLASSES_ROOT, extension, 0, NULL, 0, KEY_SET_VALUE,
+                         NULL, &hkey, NULL);
     ok(rc == ERROR_SUCCESS || rc == ERROR_ACCESS_DENIED,
        "could not create association %s (rc=%ld)\n", class, rc);
     if (rc != ERROR_SUCCESS)
         return FALSE;
 
-    rc=RegSetValueExA(hkey, NULL, 0, REG_SZ, (LPBYTE) class, strlen(class)+1);
-    ok(rc==ERROR_SUCCESS, "RegSetValueEx '%s' failed, expected ERROR_SUCCESS, got %ld\n", class, rc);
+    rc = RegSetValueExA(hkey, NULL, 0, REG_SZ, (LPBYTE) class, strlen(class)+1);
+    ok(rc == ERROR_SUCCESS, "RegSetValueEx '%s' failed, expected ERROR_SUCCESS, got %ld\n", class, rc);
     CloseHandle(hkey);
+    return TRUE;
+}
+
+static BOOL create_test_association(const char* extension)
+{
+    char class[MAX_PATH];
+
+    sprintf(class, "shlexec%s", extension);
+    if (!create_test_association_key(extension, class))
+        return FALSE;
 
     return create_test_class(class, FALSE);
 }
@@ -1418,11 +1440,11 @@ typedef struct
 
 static const argify_tests_t argify_tests[] =
 {
-    /* Start with three simple parameters. Notice that one can reorder and
-     * duplicate the parameters. Also notice how %* take the raw input
-     * parameters string, including the trailing spaces, no matter what
-     * arguments have already been used.
-     */
+    {"ParamsS", "p2 p3 \"p4 ", FALSE, " p2 p3 \"p4 "},
+
+    /* Notice that one can reorder and duplicate the parameters.
+     * Also notice how %* take the raw input parameters string, including
+     * the trailing spaces, no matter what arguments have already been used. */
     {"Params232S", "p2 p3 p4 ", TRUE,
      " p2 p3 \"p2\" \"p2 p3 p4 \""},
 
@@ -1567,6 +1589,7 @@ static void test_argify(void)
         return;
     }
 
+    create_test_verb("shlexec.shlexec", "ParamsS", 0, "ParamsS %*");
     create_test_verb("shlexec.shlexec", "Params232S", 0, "Params232S %2 %3 \"%2\" \"%*\"");
     create_test_verb("shlexec.shlexec", "Params23456", 0, "Params23456 \"%2\" \"%3\" \"%4\" \"%5\" \"%6\"");
     create_test_verb("shlexec.shlexec", "Params23456789", 0, "Params23456789 \"%2\" \"%3\" \"%4\" \"%5\" \"%6\" \"%7\" \"%8\" \"%9\"");
@@ -1594,14 +1617,14 @@ static void test_argify(void)
         if (!cmd) cmd = "(null)";
         todo_wine_if(test->todo)
             okShell(!strcmp(cmd, test->cmd) || broken(!strcmp(cmd, bad)),
-                    "expected '%s', got '%s'\n", cmd, test->cmd);
+                    "expected '%s', got '%s'\n", test->cmd, cmd);
         test++;
     }
 }
 
 static void test_filename(void)
 {
-    char filename[MAX_PATH + 20];
+    char filename[MAX_PATH + 20], curdir[MAX_PATH];
     const filename_tests_t* test;
     char* c;
     INT_PTR rc;
@@ -1611,6 +1634,31 @@ static void test_filename(void)
         skip("No ShellExecute/filename tests due to lack of .shlexec association\n");
         return;
     }
+
+    GetCurrentDirectoryA(sizeof(curdir), curdir);
+
+    SetCurrentDirectoryA(tmpdir);
+    rc=shell_execute("QuotedLowerL", "simple.shlexec", NULL, NULL);
+    if (rc > 32)
+        rc=33;
+    okShell(rc == 33, "failed: rc=%Id err=%lu\n", rc, GetLastError());
+    okChildInt("argcA", 5);
+    okChildString("argvA3", "QuotedLowerL");
+    strcpy(filename, tmpdir);
+    strcat(filename, "\\simple.shlexec");
+    okChildPath("argvA4", filename);
+
+    rc=shell_execute("QuotedUpperL", "simple.shlexec", NULL, NULL);
+    if (rc > 32)
+        rc=33;
+    okShell(rc == 33, "failed: rc=%Id err=%lu\n", rc, GetLastError());
+    okChildInt("argcA", 5);
+    okChildString("argvA3", "QuotedUpperL");
+    strcpy(filename, tmpdir);
+    strcat(filename, "\\simple.shlexec");
+    okChildPath("argvA4", filename);
+
+    SetCurrentDirectoryA(curdir);
 
     test=filename_tests;
     while (test->basename)
@@ -1961,9 +2009,11 @@ static void test_urls(void)
 
 static void test_find_executable(void)
 {
+    char curdir[MAX_PATH];
     char notepad_path[MAX_PATH];
     char filename[MAX_PATH + 17];
     char command[MAX_PATH];
+    char *basename = strrchr(argv0, '\\') + 1;
     const filename_tests_t* test;
     INT_PTR rc;
 
@@ -2003,6 +2053,18 @@ static void test_find_executable(void)
     rc=(INT_PTR)FindExecutableA(tmpdir, NULL, command);
     ok(rc == SE_ERR_NOASSOC /* >= win2000 */ || rc > 32 /* win98, nt4 */, "FindExecutable(NULL) returned %Id\n", rc);
     ok(strcmp(command, "your word") != 0, "FindExecutable(NULL) returned command=[%s]\n", command);
+
+    /* Search for the current executabe itself */
+    strcpy(command, "your word");
+    rc=(INT_PTR)FindExecutableA(argv0, NULL, command);
+    ok(rc > 32, "FindExecutable(%s) returned %Id\n", argv0, rc);
+
+    /* Make sure FindExecutable uses the correct current directory */
+    GetCurrentDirectoryA(MAX_PATH, curdir);
+    SetCurrentDirectoryA(tmpdir);
+    rc=(INT_PTR)FindExecutableA(basename, NULL, command);
+    ok(rc == SE_ERR_FNF, "FindExecutable(%s) returned %Id\n", basename, rc);
+    SetCurrentDirectoryA(curdir);
 
     sprintf(filename, "%s\\test file.sfe", tmpdir);
     rc=(INT_PTR)FindExecutableA(filename, NULL, command);
@@ -2204,6 +2266,8 @@ static void test_exes(void)
 {
     char filename[2 * MAX_PATH + 17];
     char params[1024];
+    char curdir[MAX_PATH];
+    char *basename = strrchr(argv0, '\\') + 1;
     INT_PTR rc;
 
     sprintf(params, "shlexec \"%s\" Exec", child_file);
@@ -2215,15 +2279,59 @@ static void test_exes(void)
     okChildInt("argcA", 4);
     okChildString("argvA3", "Exec");
 
+    rc=shell_execute_ex(SEE_MASK_NOZONECHECKS | SEE_MASK_CLASSNAME | SEE_MASK_FLAG_NO_UI, NULL, argv0, params,
+                        NULL, ".exe");
+    okShell(rc > 32, "returned %Iu\n", rc);
+    okChildInt("argcA", 4);
+    okChildString("argvA3", "Exec");
+
+    if (create_test_association_key(".qqqq", "exefile"))
+    {
+        rc = shell_execute_ex(SEE_MASK_NOZONECHECKS | SEE_MASK_CLASSNAME | SEE_MASK_FLAG_NO_UI, NULL, argv0, params,
+                            NULL, ".qqqq");
+        okShell(rc > 32, "returned %Iu\n", rc);
+        okChildInt("argcA", 4);
+        okChildString("argvA3", "Exec");
+        delete_test_association(".qqqq");
+    }
+    else
+    {
+        skip("Could not create associtation.\n");
+    }
+
+    if (create_test_association_key("qqqq", "exefile"))
+    {
+        rc = shell_execute_ex(SEE_MASK_NOZONECHECKS | SEE_MASK_CLASSNAME | SEE_MASK_FLAG_NO_UI, NULL, argv0, params,
+                            NULL, "qqqq");
+        okShell(rc < 32, "returned %Iu\n", rc);
+        todo_wine okShell(rc == SE_ERR_NOASSOC, "returned %Iu\n", rc);
+        delete_test_association("qqqq");
+    }
+    else
+    {
+        skip("Could not create associtation.\n");
+    }
+
+    if (is_elevated)
+    {
+        rc = shell_execute_ex(SEE_MASK_NOZONECHECKS | SEE_MASK_CLASSNAME | SEE_MASK_FLAG_NO_UI, "runas", argv0, params,
+                            NULL, ".exe");
+        okShell(rc > 32, "returned %Iu\n", rc);
+        okChildInt("argcA", 4);
+        okChildString("argvA3", "Exec");
+    }
+    else
+    {
+        skip("No admin privileges, skipping runas test.\n");
+    }
+
     if (! skip_noassoc_tests)
     {
         sprintf(filename, "%s\\test file.noassoc", tmpdir);
         if (CopyFileA(argv0, filename, FALSE))
         {
             rc=shell_execute(NULL, filename, params, NULL);
-            todo_wine {
-                okShell(rc==SE_ERR_NOASSOC, "returned %Iu\n", rc);
-            }
+            okShell(rc==SE_ERR_NOASSOC, "returned %Iu\n", rc);
         }
     }
     else
@@ -2245,16 +2353,23 @@ static void test_exes(void)
                                     "notaverb", argv0, NULL, NULL, NULL);
     todo_wine okShell(rc == SE_ERR_NOASSOC, "returned %Iu\n", rc);
 
+    /* Check the correct search path is used */
+    GetCurrentDirectoryA(MAX_PATH, curdir);
+    SetCurrentDirectoryA(tmpdir);
+    rc = shell_execute(NULL, basename, params, NULL);
+    okShell(rc == SE_ERR_FNF, "returned %Iu\n", rc);
+    SetCurrentDirectoryA(curdir);
+
     if (!skip_shlexec_tests)
     {
         /* A class overrides the normal handling of executables too */
         /* FIXME SEE_MASK_FLAG_NO_UI is only needed due to Wine's bug */
         rc = shell_execute_ex(SEE_MASK_CLASSNAME | SEE_MASK_FLAG_NO_UI,
                               NULL, argv0, NULL, NULL, ".shlexec");
-        todo_wine okShell(rc > 32, "returned %Iu\n", rc);
+        okShell(rc > 32, "returned %Iu\n", rc);
         okChildInt("argcA", 5);
-        todo_wine okChildString("argvA3", "Open");
-        todo_wine okChildPath("argvA4", argv0);
+        okChildString("argvA3", "Open");
+        okChildPath("argvA4", argv0);
     }
 }
 
@@ -2331,7 +2446,7 @@ static void hook_WaitForInputIdle(DWORD (WINAPI *new_func)(HANDLE, DWORD))
 
     /* Search for the correct imported module by walking the import descriptors */
     import_descriptor = (PIMAGE_IMPORT_DESCRIPTOR)(base + import_directory_rva);
-    while (U(*import_descriptor).OriginalFirstThunk != 0)
+    while (import_descriptor->OriginalFirstThunk != 0)
     {
         char *import_module_name;
 
@@ -2346,7 +2461,7 @@ static void hook_WaitForInputIdle(DWORD (WINAPI *new_func)(HANDLE, DWORD))
              * arrays. We need the import name table to find the imported
              * routine and the import address table to patch the address, so
              * walk them side by side */
-            int_entry = (PIMAGE_THUNK_DATA)(base + U(*import_descriptor).OriginalFirstThunk);
+            int_entry = (PIMAGE_THUNK_DATA)(base + import_descriptor->OriginalFirstThunk);
             iat_entry = (PIMAGE_THUNK_DATA)(base + import_descriptor->FirstThunk);
             while (int_entry->u1.Ordinal != 0)
             {
@@ -2656,6 +2771,9 @@ static void init_test(void)
     lnk_desc_t desc;
     DWORD rc;
     HRESULT r;
+    TOKEN_ELEVATION elevation;
+    HANDLE token;
+    BOOL ret;
 
     hdll=GetModuleHandleA("shell32.dll");
     pDllGetVersion=(void*)GetProcAddress(hdll, "DllGetVersion");
@@ -2780,6 +2898,13 @@ static void init_test(void)
 
     /* Set an environment variable to see if it is inherited */
     SetEnvironmentVariableA("ShlexecVar", "Present");
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token);
+    ok(ret, "OpenProcessToken failed.\n");
+    ret = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &rc);
+    ok(ret, "GetTokenInformation failed.\n");
+    is_elevated = elevation.TokenIsElevated;
+    CloseHandle(token);
 }
 
 static void cleanup_test(void)
@@ -2829,7 +2954,7 @@ static void test_directory(void)
                         NULL, "test2.exe", params, NULL, NULL);
     okShell(rc > 32, "returned %Iu\n", rc);
     okChildInt("argcA", 4);
-    todo_wine okChildString("argvA0", path);
+    okChildString("argvA0", path);
     okChildString("argvA3", "Exec");
     okChildPath("longPath", path);
     SetCurrentDirectoryA(curdir);
