@@ -10,8 +10,8 @@ env:
   CXX: clang++
   CPATH: /usr/local/include
   LIBRARY_PATH: /usr/local/lib
-  CFLAGS: -O3 -Wno-deprecated-declarations -Wno-incompatible-pointer-types
-  CROSSCFLAGS: -O3
+  CFLAGS: -O3 -Wno-deprecated-declarations -Wno-format -Wno-incompatible-pointer-types -Wno-implicit-function-declaration -Wno-int-conversion
+  CROSSCFLAGS: -O3 -Wno-deprecated-declarations -Wno-format -Wno-incompatible-pointer-types -Wno-implicit-function-declaration -Wno-int-conversion
   LDFLAGS: -Wl,-ld_classic -Wl,-headerpad_max_install_names -Wl,-rpath,@loader_path/../../ -Wl,-rpath,/usr/local/lib
   MACOSX_DEPLOYMENT_TARGET: 10.14
   WINE_CONFIGURE: $GITHUB_WORKSPACE/configure
@@ -245,6 +245,13 @@ jobs:
               "libxcb.1"
           )
 
+          FFMPEG_LIBS=(
+            "libavfilter.9"
+            "libavformat.60"
+            "libavcodec.60"
+            "libavutil.58"
+          )
+
           GSTREAMER_LIBS=(
               "libgstapplemedia"
               "libgstasf"
@@ -257,6 +264,7 @@ jobs:
               "libgstdeinterlace"
               "libgstid3demux"
               "libgstisomp4"
+              "libgstlibav"
               "libgstopengl"
               "libgstplayback"
               "libgsttypefindfunctions"
@@ -269,6 +277,11 @@ jobs:
           for i in "${LIBS[@]}"
           do
               cp -Lr $(brew --prefix)/lib/"$i".dylib Libraries/Wine/lib
+          done
+
+          for i in "${FFMPEG_LIBS[@]}"
+          do
+              cp -Lr $(brew --prefix ffmpeg@6)/lib/"$i".dylib Libraries/Wine/lib
           done
 
           mkdir Libraries/Wine/lib/gstreamer-1.0
